@@ -9,7 +9,7 @@ services:
     env_file:
       - .env
     command: >
-      sh -c "pip install -r requirements.txt && python main.py"
+      sh -c "pip install --no-cache-dir -r requirements.txt && python main.py"
     depends_on:
       - sbis-mock
 
@@ -19,23 +19,10 @@ services:
     volumes:
       - ./:/app
     command: >
-      sh -c "pip install -r requirements.txt && python sbis_mock.py"
+      sh -c "pip install --no-cache-dir -r requirements.txt && python sbis_mock.py"
     environment:
-      # Порт мок-сервера; при необходимости меняйте.
       - SBIS_MOCK_PORT=8081
     ports:
       - "8081:8081"
-version: "3.9"
-
-services:
-  financial-architect-bot:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./:/app
-    env_file:
-      - .env
-    command: >
-      sh -c "pip install --no-cache-dir -r requirements.txt &&
              python main.py"
 

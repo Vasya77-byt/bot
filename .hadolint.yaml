@@ -1,0 +1,4 @@
+ignored:
+  - DL3008  # Pin versions is not required for this simple base image
+  - DL3013  # Allow latest pip packages for this project
+

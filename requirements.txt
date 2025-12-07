@@ -1,0 +1,9 @@
+pyrogram==2.0.106
+pydantic==1.10.18
+requests==2.32.3
+fastapi==0.110.3
+uvicorn==0.30.3
+pyrogram==2.0.106
+pydantic==1.10.17
+requests==2.32.3
+

@@ -25,11 +25,11 @@ def mock_company(inn: Optional[str]) -> CompanyData:
         ogrn="0000000000000",
         region="Москва",
         reg_date="2019-01-01",
-        age_years=5,
+        age_years=7,
         okved_main="62.01 Разработка ПО",
-        employees_count=25,
-        revenue_last_year=120_000_000,
-        profit_last_year=18_000_000,
+        employees_count=30,
+        revenue_last_year=145_000_000,
+        profit_last_year=22_000_000,
         licenses=["нет лицензий"],
     )
 

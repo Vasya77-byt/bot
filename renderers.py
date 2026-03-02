@@ -1,8 +1,8 @@
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 from compliance import legal_note
 from parsers import ParseResult
-from schemas import CompanyData, empty_company
+from schemas import CarryoverSummary, CompanyData, Contract, Debt, empty_company
 
 
 def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: Set[str]) -> str:
@@ -145,4 +145,91 @@ def _mini_kp() -> str:
             "Следующий шаг: пришлите текущую схему/оборот/банк — предложим адаптированное решение.",
         ]
     )
+
+
+# ── Рендеринг учётных данных (контракты, долги, сводка) ──
+
+
+def render_contracts(contracts: List[Contract]) -> str:
+    if not contracts:
+        return "Контракты: нет активных контрактов."
+    lines = ["Активные контракты:"]
+    for i, c in enumerate(contracts, 1):
+        status_label = {"active": "действует", "completed": "завершён", "cancelled": "отменён"}.get(
+            c.status or "", c.status or "—"
+        )
+        remaining = f"{c.remaining_amount:,.0f}" if c.remaining_amount else "—"
+        lines.append(
+            f"{i}. {c.counterparty or '—'} (ИНН {c.inn or '—'}) — {c.subject or '—'}"
+        )
+        lines.append(
+            f"   Сумма: {c.total_amount or '—'} | Оплачено: {c.paid_amount or '—'} "
+            f"| Остаток: {remaining} | Статус: {status_label}"
+        )
+        if c.start_date or c.end_date:
+            lines.append(f"   Срок: {c.start_date or '—'} — {c.end_date or '—'}")
+    return "\n".join(lines)
+
+
+def render_debts(debts: List[Debt]) -> str:
+    if not debts:
+        return "Задолженности: нет непогашенных задолженностей."
+
+    receivables = [d for d in debts if d.direction == "receivable"]
+    payables = [d for d in debts if d.direction == "payable"]
+
+    lines = ["Задолженности:"]
+
+    if receivables:
+        total_r = sum(d.amount or 0 for d in receivables)
+        lines.append(f"\nДебиторская (нам должны) — итого: {total_r:,.0f}:")
+        for d in receivables:
+            status_label = {"outstanding": "не погашена", "overdue": "просрочена",
+                            "settled": "погашена"}.get(d.status or "", d.status or "—")
+            lines.append(
+                f"  • {d.counterparty or '—'} (ИНН {d.inn or '—'}): "
+                f"{d.amount or '—'} — {status_label}"
+            )
+
+    if payables:
+        total_p = sum(d.amount or 0 for d in payables)
+        lines.append(f"\nКредиторская (мы должны) — итого: {total_p:,.0f}:")
+        for d in payables:
+            status_label = {"outstanding": "не погашена", "overdue": "просрочена",
+                            "settled": "погашена"}.get(d.status or "", d.status or "—")
+            lines.append(
+                f"  • {d.counterparty or '—'} (ИНН {d.inn or '—'}): "
+                f"{d.amount or '—'} — {status_label}"
+            )
+
+    return "\n".join(lines)
+
+
+def render_carryover_summary(summary: CarryoverSummary) -> str:
+    lines = [
+        f"Сводка переноса {summary.year_from} → {summary.year_to}:",
+        f"• Активных контрактов перенесено: {len(summary.active_contracts)}",
+        f"• Непогашенных задолженностей перенесено: {len(summary.outstanding_debts)}",
+        f"• Дебиторская задолженность (нам должны): {summary.total_receivables:,.0f}",
+        f"• Кредиторская задолженность (мы должны): {summary.total_payables:,.0f}",
+    ]
+    remaining = sum(c.remaining_amount or 0 for c in summary.active_contracts)
+    if remaining:
+        lines.append(f"• Остаток по контрактам: {remaining:,.0f}")
+    if summary.notes:
+        lines.append(f"• Примечание: {summary.notes}")
+    return "\n".join(lines)
+
+
+def render_ledger_status(
+    contracts: List[Contract],
+    debts: List[Debt],
+    year: int,
+) -> str:
+    parts = [
+        f"Учётный период: {year} год",
+        render_contracts(contracts),
+        render_debts(debts),
+    ]
+    return "\n\n".join(parts)
 

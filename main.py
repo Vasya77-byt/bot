@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional
 
 from pyrogram import Client, filters
@@ -7,10 +8,17 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
+from ledger import Ledger
 from logging_config import setup_logging
 from parsers import ParseResult, parse_message
-from renderers import render_response
-from schemas import CompanyData
+from renderers import (
+    render_carryover_summary,
+    render_contracts,
+    render_debts,
+    render_ledger_status,
+    render_response,
+)
+from schemas import CompanyData, Contract, Debt
 from sbis_client import SbisClient
 from settings import Settings
 from storage import save_file_bytes
@@ -22,6 +30,7 @@ setup_logging()
 logger = logging.getLogger("financial-architect")
 init_sentry()
 metadata_store = MetadataStore()
+ledger = Ledger()
 
 
 async def handle_text_message(client: Client, message) -> None:
@@ -62,7 +71,8 @@ def main() -> None:
 
     async def start_handler(client: Client, message) -> None:
         await message.reply_text(
-            "Финансовый архитектор онлайн. Выберите режим или пришлите ИНН/JSON.",
+            f"Финансовый архитектор онлайн. Учётный период: {ledger.year} год.\n"
+            "Выберите режим или пришлите ИНН/JSON.",
             reply_markup=_main_menu(),
         )
 
@@ -74,12 +84,21 @@ def main() -> None:
 
     app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
     app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
+    app.add_handler(MessageHandler(handle_ledger_command, filters.command(["ledger"])))
+    app.add_handler(MessageHandler(handle_contracts_command, filters.command(["contracts"])))
+    app.add_handler(MessageHandler(handle_debts_command, filters.command(["debts"])))
+    app.add_handler(MessageHandler(handle_add_contract_command, filters.command(["add_contract"])))
+    app.add_handler(MessageHandler(handle_add_debt_command, filters.command(["add_debt"])))
+    app.add_handler(MessageHandler(handle_carryover_command, filters.command(["carryover"])))
     app.add_handler(
-        MessageHandler(handle_text_message, filters.text & ~filters.command(["start", "help"]))
+        MessageHandler(handle_text_message, filters.text & ~filters.command(
+            ["start", "help", "ledger", "contracts", "debts",
+             "add_contract", "add_debt", "carryover"]
+        ))
     )
     app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
 
-    logger.info("Bot starting...")
+    logger.info("Bot starting... Accounting year: %d", ledger.year)
     app.run()
 
 
@@ -129,8 +148,159 @@ def _main_menu() -> InlineKeyboardMarkup:
                     switch_inline_query_current_chat="/kp png 7700000000",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    "Контракты",
+                    switch_inline_query_current_chat="/contracts",
+                ),
+                InlineKeyboardButton(
+                    "Задолженности",
+                    switch_inline_query_current_chat="/debts",
+                ),
+                InlineKeyboardButton(
+                    "Сводка учёта",
+                    switch_inline_query_current_chat="/ledger",
+                ),
+            ],
         ]
     )
+
+
+# ── Команды учёта ──
+
+
+async def handle_ledger_command(client: Client, message) -> None:
+    """
+    /ledger — показать сводку учёта за текущий год.
+    """
+    contracts = ledger.get_active_contracts()
+    debts = ledger.get_outstanding_debts()
+    reply = render_ledger_status(contracts, debts, ledger.year)
+    await message.reply_text(reply)
+
+
+async def handle_contracts_command(client: Client, message) -> None:
+    """
+    /contracts — показать все контракты текущего года.
+    """
+    contracts = ledger.list_contracts()
+    reply = render_contracts(contracts)
+    await message.reply_text(reply)
+
+
+async def handle_debts_command(client: Client, message) -> None:
+    """
+    /debts — показать все задолженности текущего года.
+    """
+    debts = ledger.list_debts()
+    reply = render_debts(debts)
+    await message.reply_text(reply)
+
+
+async def handle_add_contract_command(client: Client, message) -> None:
+    """
+    /add_contract <ИНН> <контрагент> <сумма> <предмет>
+    Пример: /add_contract 7700000000 ООО_Ромашка 500000 Поставка_оборудования
+    """
+    text = message.text or ""
+    args = text.split()
+    if len(args) < 4:
+        await message.reply_text(
+            "Формат: /add_contract <ИНН> <контрагент> <сумма> [предмет]\n"
+            "Пример: /add_contract 7700000000 ООО_Ромашка 500000 Поставка_оборудования"
+        )
+        return
+
+    inn = args[1] if len(args) > 1 else None
+    counterparty = (args[2] if len(args) > 2 else "").replace("_", " ")
+    try:
+        total = float(args[3]) if len(args) > 3 else 0.0
+    except ValueError:
+        total = 0.0
+    subject = " ".join(args[4:]).replace("_", " ") if len(args) > 4 else ""
+
+    contract = Contract(
+        inn=inn,
+        counterparty=counterparty,
+        subject=subject,
+        total_amount=total,
+        paid_amount=0.0,
+        remaining_amount=total,
+        status="active",
+    )
+    saved = ledger.add_contract(contract)
+    await message.reply_text(
+        f"Контракт добавлен (ID: {saved.contract_id}):\n"
+        f"Контрагент: {counterparty}\n"
+        f"ИНН: {inn}\nСумма: {total:,.0f}\nПредмет: {subject or '—'}"
+    )
+
+
+async def handle_add_debt_command(client: Client, message) -> None:
+    """
+    /add_debt <receivable|payable> <ИНН> <контрагент> <сумма> [описание]
+    Пример: /add_debt receivable 7700000000 ООО_Ромашка 150000 За_поставку_Q4
+    """
+    text = message.text or ""
+    args = text.split()
+    if len(args) < 5:
+        await message.reply_text(
+            "Формат: /add_debt <receivable|payable> <ИНН> <контрагент> <сумма> [описание]\n"
+            "  receivable — нам должны (дебиторская)\n"
+            "  payable — мы должны (кредиторская)\n"
+            "Пример: /add_debt receivable 7700000000 ООО_Ромашка 150000 За_поставку"
+        )
+        return
+
+    direction = args[1] if len(args) > 1 else "receivable"
+    if direction not in ("receivable", "payable"):
+        await message.reply_text("Направление должно быть receivable или payable.")
+        return
+
+    inn = args[2] if len(args) > 2 else None
+    counterparty = (args[3] if len(args) > 3 else "").replace("_", " ")
+    try:
+        amount = float(args[4]) if len(args) > 4 else 0.0
+    except ValueError:
+        amount = 0.0
+    description = " ".join(args[5:]).replace("_", " ") if len(args) > 5 else ""
+
+    direction_label = "дебиторская (нам должны)" if direction == "receivable" \
+        else "кредиторская (мы должны)"
+
+    debt = Debt(
+        inn=inn,
+        counterparty=counterparty,
+        direction=direction,
+        amount=amount,
+        status="outstanding",
+        description=description,
+    )
+    saved = ledger.add_debt(debt)
+    await message.reply_text(
+        f"Задолженность добавлена (ID: {saved.debt_id}):\n"
+        f"Тип: {direction_label}\n"
+        f"Контрагент: {counterparty}\nИНН: {inn}\n"
+        f"Сумма: {amount:,.0f}\nОписание: {description or '—'}"
+    )
+
+
+async def handle_carryover_command(client: Client, message) -> None:
+    """
+    /carryover — показать сводку переноса данных из предыдущего года.
+    """
+    summary = ledger.get_carryover_summary(ledger.year - 1, ledger.year)
+    if not summary:
+        await message.reply_text(
+            f"Сводка переноса из {ledger.year - 1} в {ledger.year} не найдена.\n"
+            "Запустите скрипт миграции: python migrate_2025_to_2026.py"
+        )
+        return
+    reply = render_carryover_summary(summary)
+    await message.reply_text(reply)
+
+
+# ── KP команды (без изменений) ──
 
 
 async def handle_kp_command(client: Client, message) -> None:
@@ -216,4 +386,3 @@ async def _send_kp_file(
         save_file_bytes(content, filename)
         metadata_store.append(filename, company, "pdf")
         await message.reply_document(document=("kp.pdf", content), caption="Ваше КП (PDF)")
-

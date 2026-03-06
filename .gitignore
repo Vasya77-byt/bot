@@ -1,0 +1,26 @@
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
+
+# System files
+.DS_Store
+.Trash/
+Library/
+.claude/
+.config/
+.ssh/
+.npm/
+.nvm/
+.docker/
+.kube/
+.vscode/
+.cursor/
+
+# Large temp files
+claude home/formula_audit.json
+claude home/*.py
+claude home/*BACKUP*
+claude home/bank_label_fixes.json
+claude home/missing_ops.json
+claude home/extra_ops.json

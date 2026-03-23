@@ -1,0 +1,24 @@
+[Unit]
+Description=INN Checker Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/home/botuser/inn_checker_bot
+ExecStart=/home/botuser/inn_checker_bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# Логи
+StandardOutput=journal
+StandardError=journal
+
+# Безопасность
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/botuser/inn_checker_bot
+
+[Install]
+WantedBy=multi-user.target

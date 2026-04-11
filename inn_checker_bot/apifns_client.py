@@ -191,34 +191,38 @@ async def fetch_zsk(inn: str) -> dict[str, Any] | None:
 
 async def fetch_changes(inn: str) -> dict[str, Any] | None:
     """
-    Получает историю изменений компании через API-FNS метод 'changes'.
-    Возвращает список изменений (записи в ЕГРЮЛ).
+    Получает историю изменений из ЕГРЮЛ через метод 'egr'.
+    Записи ГРН содержат все изменения в ЕГРЮЛ.
     """
-    return await _api_request("changes", inn, param_name="req")
+    return await _api_request("egr", inn, param_name="req")
 
 
 def extract_changes_data(raw: dict[str, Any] | None) -> list[dict[str, Any]]:
     """
-    Извлекает и нормализует историю изменений из ответа API-FNS.
-    Возвращает список записей: [{date, type, description}, ...]
+    Извлекает историю изменений (записи ГРН) из ответа EGR API-FNS.
+    Формат ответа: {"items": [{"ЮЛ": {"ГРН": [...]}}]} или варианты.
     """
     if not raw:
         return []
 
     changes: list[dict[str, Any]] = []
 
-    # Ответ может быть dict с items или list
+    # Распаковываем items wrapper
+    data = raw
+    if isinstance(data, dict):
+        items_list = data.get("items")
+        if isinstance(items_list, list) and items_list:
+            data = items_list[0]
+
+    # Навигация к записям ГРН
     items = None
-    if isinstance(raw, dict):
-        items = raw.get("items") or raw.get("Записи") or raw.get("changes")
-        if items is None:
-            # Попробуем найти ключ ЮЛ → ГРН
-            ul = raw.get("ЮЛ") or raw
-            grn_list = ul.get("ГРН") or ul.get("Записи") or []
-            if isinstance(grn_list, list):
-                items = grn_list
-    elif isinstance(raw, list):
-        items = raw
+    if isinstance(data, dict):
+        ul = data.get("ЮЛ") or data.get("ИП") or data
+        grn_list = ul.get("ГРН") or ul.get("Записи") or ul.get("changes") or ul.get("items") or []
+        if isinstance(grn_list, list):
+            items = grn_list
+    elif isinstance(data, list):
+        items = data
 
     if not items or not isinstance(items, list):
         return changes
@@ -684,13 +688,72 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+# ── Справочник кодов критериев ЗСК ЦБ (Положение 375-П) ──
+ZSK_RISK_CODES: dict[str, str] = {
+    # 1. Обналичивание
+    "1.01": "Обналичивание через кассу банка",
+    "1.02": "Обналичивание через корпоративные карты",
+    "1.99": "Обналичивание (иные основания)",
+    # 2. Вывод за рубеж
+    "2.01": "Вывод за рубеж — расчёты за товары",
+    "2.02": "Вывод за рубеж — расчёты за услуги",
+    "2.03": "Вывод за рубеж — ценные бумаги",
+    "2.04": "Вывод за рубеж — недвижимость",
+    "2.05": "Вывод за рубеж — через ПУРЦБ",
+    "2.06": "Вывод за рубеж — судебные решения",
+    "2.07": "Вывод за рубеж — корпоративные карты",
+    "2.08": "Вывод за рубеж — без постановки контракта на учёт",
+    "2.99": "Вывод за рубеж (иные основания)",
+    # 3. Транзитные схемы обналичивания
+    "3.01": "Транзит обналичивания: ЮЛ → ФЛ",
+    "3.02": "Транзит обналичивания: ЮЛ → ИП",
+    "3.03": "Вексельные схемы обналичивания",
+    "3.04": "Обналичивание через ПУРЦБ",
+    "3.05": "Обналичивание через исполнительные документы",
+    "3.06": "Обналичивание через корп. карты (транзит)",
+    "3.99": "Транзит обналичивания (иные)",
+    # 4. Транзит вывода за рубеж
+    "4.01": "Транзитный вывод денежных средств за рубеж",
+    # 5. Покупка наличной выручки
+    "5.01": "Покупка наличной выручки — ТРП",
+    "5.02": "Покупка наличной выручки — платёжные агенты",
+    "5.03": "Покупка наличной выручки — корп. карты",
+    "5.04": "Продажа наличной выручки",
+    "5.99": "Покупка наличной выручки (иные)",
+    # 6. Теневой оборот
+    "6.01": "Теневой оборот: подрядчик >50%",
+    "6.02": "Теневой оборот: подрядчик >30% ≤50%",
+    "6.03": "Теневой оборот: подрядчик ≤30%",
+    # 7. Налоговая оптимизация
+    "7.01": "Налоговая оптимизация — драг. металлы",
+    "7.02": "Налоговая оптимизация — металлолом",
+    "7.99": "Налоговая оптимизация (иные)",
+    # 8. Прочие подозрительные
+    "8.01": "Сомнительные транзитные операции",
+    "8.02": "Вывод средств в теневой оборот",
+    "8.99": "Прочие подозрительные операции",
+    # 9. ИП
+    "9.01": "Обналичивание через ИП: ЮЛ → ИП → ФЛ",
+    "9.99": "Подозрительные операции ИП (иные)",
+    # 10. Иные
+    "10.01": "Высокий риск вовлечения в подозрительные операции",
+    "10.02": "Признаки нелегальной деятельности на финрынке",
+    "10.99": "Иные признаки высокого риска",
+}
+
+
+def decode_zsk_risk_code(code: str) -> str:
+    """Расшифровывает код критерия ЗСК ЦБ."""
+    return ZSK_RISK_CODES.get(code, f"Код {code}")
+
+
 def extract_zsk_data(raw: dict[str, Any]) -> dict[str, Any]:
     """
     Извлекает уровень риска ЗСК.
 
     Формат ответа API:
     {"Состояние": "1", "Риск": "0", "Текст": "..."}
-      Риск: 0 = нет высокого риска, 2 = высокий риск.
+      Риск: 0 = нет высокого риска, 1 = средний, 2 = высокий.
     """
     result: dict[str, Any] = {"source": "api-fns.ru/zsk"}
 
@@ -706,6 +769,9 @@ def extract_zsk_data(raw: dict[str, Any]) -> dict[str, Any]:
         if risk_str == "0":
             result["zsk_level"] = "Нет высокого риска"
             result["zsk_color"] = "green"
+        elif risk_str == "1":
+            result["zsk_level"] = "Средний риск"
+            result["zsk_color"] = "yellow"
         elif risk_str == "2":
             result["zsk_level"] = "Высокий риск"
             result["zsk_color"] = "red"
@@ -715,6 +781,21 @@ def extract_zsk_data(raw: dict[str, Any]) -> dict[str, Any]:
 
         if text:
             result["zsk_text"] = text
+
+        # Коды критериев риска (если есть)
+        risk_codes = []
+        for key in ("MainRisk", "КодКритерия", "Критерий"):
+            code = raw.get(key)
+            if code:
+                risk_codes.append(code)
+        for key in ("AddRisk1", "AddRisk2", "AddRisk3", "ДопКритерий1", "ДопКритерий2"):
+            code = raw.get(key)
+            if code:
+                risk_codes.append(code)
+        if risk_codes:
+            result["risk_codes"] = risk_codes
+            result["risk_reasons"] = [decode_zsk_risk_code(c) for c in risk_codes]
+
         return result
 
     # Фоллбэк: другие возможные форматы

@@ -1,6 +1,7 @@
 """Форматирование отчётов — обычная проверка, предложение, запрос счёта."""
 
 from typing import Any
+from risk_scoring import calculate_risk_score
 
 
 def _first_num(*values):
@@ -37,7 +38,7 @@ def format_report_free(
     sanctions_data: dict[str, Any] | None = None,
     cbrf_data: dict[str, Any] | None = None,
 ) -> str:
-    """Краткий отчёт для бесплатных пользователей."""
+    """Краткий отчёт для бесплатных пользователей. Вердикт-ориентированный."""
     zchb = zchb_data or {}
     zsk = zsk_data or {}
     rp = rp_data or {}
@@ -49,83 +50,39 @@ def format_report_free(
     entity_type = fields.get("entity_type", "ul")
     is_ip = entity_type == "ip"
 
-    # ── Шапка ──
+    # ═══ ПО ДАННЫМ ИСТОЧНИКОВ (СВЕРХУ) ═══
+    lines.append("─── <b>По данным источников</b> ───")
+    _append_source_lights(zsk, rp, fns, lines)
+    lines.append("")
+
+    # ═══ КАРТОЧКА КОМПАНИИ ═══
     name = fields.get("name") or "Неизвестно"
     icon = "👤" if is_ip else "🏢"
     lines.append(f"{icon} <b>{_esc(name)}</b>")
-    if is_ip:
-        lines.append("Индивидуальный предприниматель")
-    lines.append("")
+    lines.append(f"ИНН <code>{fields.get('inn', '—')}</code> | {_status_label(fields.get('status'))}")
 
-    # Реквизиты
-    lines.append(f"ИНН: <code>{fields.get('inn', '—')}</code>")
-    if not is_ip and fields.get("kpp"):
-        lines.append(f"КПП: {fields['kpp']}")
-    if fields.get("ogrn"):
-        ogrn_label = "ОГРНИП" if is_ip else "ОГРН"
-        lines.append(f"{ogrn_label}: {fields['ogrn']}")
-    lines.append(f"Статус: {_status_label(fields.get('status'))}")
-
-    # Регистрация
     reg = fields.get("registration_date")
     age = fields.get("company_age_years")
     if reg:
         age_s = f" ({_format_age(age)})" if age is not None else ""
-        lines.append(f"📅 Регистрация: {reg}{age_s}")
+        lines.append(f"📅 {reg}{age_s}")
 
-    # Руководитель (только для ЮЛ)
     if not is_ip:
         mgr = fields.get("management_name")
         if mgr:
-            post = fields.get("management_post") or ""
-            if post:
-                lines.append(f"👤 {_esc(post)}: {_esc(mgr)}")
-            else:
-                lines.append(f"👤 Руководитель: {_esc(mgr)}")
+            lines.append(f"👤 {_esc(mgr)}")
 
-    # Адрес (полный из ЗЧБ API)
-    full_addr = fields.get("full_address") or zchb.get("address")
-    city = fields.get("city")
+    full_addr = fields.get("full_address") or zchb.get("address") or fields.get("city")
     if full_addr:
-        lines.append(f"📍 {_esc(full_addr)}")
-    elif city:
-        lines.append(f"📍 {_esc(city)}")
+        lines.append(f"📍 {_esc(str(full_addr)[:80])}")
 
-    # ОКВЭД
-    okved = fields.get("okved_code")
-    okved_text = fields.get("okved_text")
-    if okved:
-        s = f"🏭 ОКВЭД: {okved}"
-        if okved_text:
-            short = okved_text[:50] + "..." if len(okved_text) > 50 else okved_text
-            s += f" — {_esc(short)}"
-        lines.append(s)
-
-    # Уставный капитал (только для ЮЛ)
-    if not is_ip:
-        cap = fields.get("capital_value")
-        if cap is not None:
-            lines.append(f"💰 Уст. капитал: {_money(cap)}")
-
-    # ── Финансы (краткие) ──
+    # Финансы — 1 строка
     rev = _first_num(zchb.get("revenue"), fields.get("income"))
     if rev is not None:
-        src = f" ({zchb['revenue_year']})" if zchb.get("revenue_year") else ""
-        lines.append(f"📊 Выручка: {_money(rev)}{src}")
+        lines.append(f"📊 Выручка: {_money(rev)}")
 
-    # Суды (сводка из ЗЧБ API)
-    courts_total = _first_num(zchb.get("courts_total"), zsk.get("courts_total"))
-    if courts_total is not None:
-        if courts_total == 0:
-            lines.append("⚖️ Суды: нет ✅")
-        else:
-            lines.append(f"⚖️ Суды: {_fmt_number(courts_total)} дел")
-
-    # ── Стоп-листы ──
+    # Стоп-листы (важно для всех пользователей!)
     _format_stop_lists(zchb, sanctions, cbrf, fns, lines)
-
-    # ── Оценка риска (ЗЧБ + Русрпофайл отдельно) ──
-    _format_risk_traffic_light(zsk, rp, fns, lines)
 
     return "\n".join(lines)
 
@@ -152,22 +109,23 @@ def format_report(
     entity_type = fields.get("entity_type", "ul")
     is_ip = entity_type == "ip"
 
-    # ── Шапка ──
+    # ═══ ПО ДАННЫМ ИСТОЧНИКОВ + СТОП-ЛИСТЫ (СВЕРХУ) ═══
+    lines.append("─── <b>По данным источников</b> ───")
+    _append_source_lights(zsk, rp, fns, lines)
+    # Стоп-листы сразу после светофора
+    _format_stop_lists(zchb, sanctions, cbrf_data or {}, fns, lines)
+    lines.append("")
+
+    # ═══ КАРТОЧКА КОМПАНИИ ═══
     name = fields.get("name") or "Неизвестно"
     icon = "👤" if is_ip else "🏢"
     lines.append(f"{icon} <b>{_esc(name)}</b>")
-    if is_ip:
-        lines.append("Индивидуальный предприниматель")
-    lines.append("")
-
-    # Реквизиты
-    lines.append(f"ИНН: <code>{fields.get('inn', '—')}</code>")
+    lines.append(f"ИНН <code>{fields.get('inn', '—')}</code> | {_status_label(fields.get('status'))}")
     if not is_ip and fields.get("kpp"):
         lines.append(f"КПП: {fields['kpp']}")
     if fields.get("ogrn"):
         ogrn_label = "ОГРНИП" if is_ip else "ОГРН"
         lines.append(f"{ogrn_label}: {fields['ogrn']}")
-    lines.append(f"Статус: {_status_label(fields.get('status'))}")
 
     # Регистрация
     reg = fields.get("registration_date")
@@ -220,7 +178,18 @@ def format_report(
     # МСП (малое/среднее предприятие)
     msp = fields.get("msp_category") or zchb.get("msp_category")
     if msp:
-        lines.append(f"🏷 МСП: {_esc(str(msp))}")
+        if isinstance(msp, dict):
+            # ЗЧБ API возвращает {'1': 'Малое', '2': 'до 800 млн', '3': '16-100 чел'}
+            cat_name = msp.get("1", "")
+            revenue_cat = msp.get("2", "")
+            staff_cat = msp.get("3", "")
+            # Убираем HTML entities
+            staff_cat = staff_cat.replace("&mdash;", "–").replace("&ndash;", "–")
+            parts = [p for p in [cat_name, revenue_cat, staff_cat] if p]
+            msp_text = " | ".join(parts) if parts else str(msp)
+        else:
+            msp_text = str(msp)
+        lines.append(f"🏷 МСП: {_esc(msp_text)}")
 
     # ── Финансы ──
     lines.append("")
@@ -249,7 +218,12 @@ def format_report(
             src = f" ({fields['finance_year']}, DaData)"
         lines.append(f"📊 {', '.join(parts)}{src}")
     else:
-        lines.append("📊 Нет данных")
+        # Fallback: scraping
+        rev_fallback = _first_num(zsk.get("revenue"), rp.get("revenue"))
+        if rev_fallback is not None:
+            lines.append(f"📊 Выручка: {_money(rev_fallback)} <i>(оценка)</i>")
+        else:
+            lines.append("📊 Финансы: данные запрошены, ожидайте в след. проверке")
 
     # Динамика по годам (приоритет ЗЧБ API → ФНС BO)
     zchb_years = zchb.get("finances") or []
@@ -372,7 +346,7 @@ def format_report(
             plaintiff = _first_num(zchb.get("courts_plaintiff"), zsk.get("courts_plaintiff")) or 0
             lines.append(f"⚖️ Суды: {_fmt_number(courts_total)} (истец {_fmt_number(plaintiff)}, отв. {_fmt_number(defendant)}) ⤵️")
     else:
-        lines.append("⚖️ Суды: нет данных")
+        lines.append("⚖️ Суды: проверяется...")
 
     # ФССП — 1 строка (приоритет: ЗЧБ API → scraping)
     fssp = _first_num(zchb.get("fssp_count"), zsk.get("fssp_total"))
@@ -382,7 +356,7 @@ def format_report(
         else:
             lines.append("👮 ФССП: нет ✅")
     else:
-        lines.append("👮 ФССП: нет данных")
+        lines.append("👮 ФССП: проверяется...")
 
     # ФНС проверка — 1 строка
     check = fns.get("check") or {}
@@ -415,14 +389,6 @@ def format_report(
     else:
         lines.append("🏦 ФНС: нет данных")
 
-    # Отказы банков (ЦБ)
-    cbrf = cbrf_data or {}
-    if cbrf.get("found"):
-        cnt = cbrf.get("count", 0)
-        lines.append(f"🚫 Отказы банков: ⚠️ <b>{cnt}</b> ⤵️")
-    elif cbrf.get("source"):
-        lines.append("🚫 Отказы банков: нет ✅")
-
     # Госзакупки (ЗЧБ API)
     purch_count = zchb.get("purchases_supplier_count")
     if purch_count is not None and purch_count > 0:
@@ -443,11 +409,25 @@ def format_report(
     if extras:
         lines.append(f"ℹ️ {', '.join(extras)}")
 
-    # ── Стоп-листы ──
-    _format_stop_lists(zchb, sanctions, cbrf_data or {}, fns, lines)
+    # Стоп-листы уже показаны СВЕРХУ — не дублируем
 
-    # ── Оценка риска (двойной светофор: ЗЧБ + Русрпофайл) ──
-    _format_risk_traffic_light(zsk, rp, fns, lines)
+    # ── Наш анализ (Risk Engine) ──
+    risk = calculate_risk_score(fields, zchb_data=zchb, fns_data=fns, sanctions_data=sanctions, cbrf_data=cbrf_data or {})
+    risk_factors = risk.get("factors", [])
+    # Показываем только реальные проблемы (score > 0)
+    problems = [f for f in risk_factors if f.get("score", 0) > 0]
+    if problems:
+        lines.append("")
+        lines.append("─── <b>📋 Причины</b> ───")
+        for f in problems[:8]:
+            score_val = f.get("score", 0)
+            if score_val >= 20:
+                icon = "🔴"
+            elif score_val >= 10:
+                icon = "🟡"
+            else:
+                icon = "⚪"
+            lines.append(f"  {icon} {f['name']}: {f.get('comment', '')}")
 
     # ── Ссылки на источники ──
     _links = links or {}
@@ -468,49 +448,9 @@ def format_report(
 # Детальные форматтеры (для callback-кнопок)
 # ─────────────────────────────────────────────────
 
-def _format_stop_lists(zchb: dict, sanctions: dict, cbrf: dict, fns: dict, lines: list[str]) -> None:
-    """Стоп-листы: террористы, санкции, отказы банков, недобросовестный поставщик."""
-    lines.append("")
-    lines.append("─── <b>Стоп-листы</b> ───")
-
-    # Террорист/экстремист (ЗЧБ API → Росфинмониторинг)
-    if zchb.get("terrorist"):
-        lines.append("🚨 <b>ТЕРРОРИСТ/ЭКСТРЕМИСТ — В РЕЕСТРЕ!</b>")
-    else:
-        lines.append("✅ Террорист/экстремист: нет")
-
-    # Недобросовестный поставщик (ЗЧБ API → ЕИС)
-    if zchb.get("bad_supplier"):
-        lines.append("⚠️ <b>Недобросовестный поставщик!</b>")
-    elif zchb.get("source"):
-        lines.append("✅ Недобросов. поставщик: нет")
-
-    # Санкции (OpenSanctions)
-    if sanctions.get("found"):
-        lines.append(f"🛑 Санкции: ⚠️ <b>найден!</b>")
-    elif sanctions.get("source"):
-        lines.append("✅ Санкции: нет")
-
-    # Отказы банков (ЦБ 550-П)
-    if cbrf.get("found"):
-        cnt = cbrf.get("count", 0)
-        lines.append(f"🚫 Отказы банков (ЦБ): ⚠️ <b>{cnt}</b>")
-    elif cbrf.get("source"):
-        lines.append("✅ Отказы банков (ЦБ): нет")
-
-    # Блокировка счетов ФНС
-    nalogbi = fns.get("nalogbi") or {}
-    if nalogbi.get("has_blocked_accounts"):
-        cnt = nalogbi.get("blocked_accounts_count", 0)
-        lines.append(f"🔒 Блокировка счетов ФНС: ⚠️ <b>{cnt}</b>")
-    elif nalogbi.get("source"):
-        lines.append("✅ Блокировка счетов: нет")
-
-
-def _format_risk_traffic_light(zsk: dict, rp: dict, fns: dict, lines: list[str]) -> None:
-    """Двойной светофор: по данным ЗЧБ + по данным Русрпофайл."""
-    lines.append("")
-    lines.append("─── <b>Оценка (по данным)</b> ───")
+def _append_source_lights(zsk: dict, rp: dict, fns: dict, lines: list[str]) -> None:
+    """Светофор по данным источников: ЗЧБ, Русрпофайл, ЗСК ЦБ."""
+    has_any = False
 
     # ЗЧБ
     zsk_color = zsk.get("reliability_color")
@@ -518,42 +458,154 @@ def _format_risk_traffic_light(zsk: dict, rp: dict, fns: dict, lines: list[str])
     zsk_score = zsk.get("reliability_score")
     if zsk_color:
         icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(zsk_color, "⚪")
-        label = zsk_label or zsk_color
-        score_s = f" ({zsk_score})" if zsk_score else ""
-        lines.append(f"{icon} ЗЧБ: <b>{label}</b>{score_s}")
-
-        # Факты ЗЧБ
-        green_f = zsk.get("green_facts")
-        yellow_f = zsk.get("yellow_facts")
-        red_f = zsk.get("red_facts")
-        if green_f or yellow_f or red_f:
-            parts = []
-            if green_f:
-                parts.append(f"🟢{green_f}")
-            if yellow_f:
-                parts.append(f"🟡{yellow_f}")
-            if red_f:
-                parts.append(f"🔴{red_f}")
-            lines.append(f"   факты: {' '.join(parts)}")
+        score_s = f" (балл: {zsk_score})" if zsk_score else ""
+        lines.append(f"{icon} ЗЧБ: <b>{zsk_label or zsk_color}</b>{score_s}")
+        has_any = True
 
     # Русрпофайл
     rp_color = rp.get("reliability_color")
     rp_label = rp.get("reliability_label")
     if rp_color:
         icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(rp_color, "⚪")
-        label = rp_label or rp_color
-        lines.append(f"{icon} Русрпофайл: <b>{label}</b>")
+        lines.append(f"{icon} Русрпофайл: <b>{rp_label or rp_color}</b>")
+        has_any = True
 
-    # ЗСК ЦБ (ФНС)
+    # ЗСК ЦБ (с расшифровкой кодов критериев)
     fns_zsk = fns.get("zsk") or {}
     fns_zsk_color = fns_zsk.get("zsk_color")
     fns_zsk_level = fns_zsk.get("zsk_level")
     if fns_zsk_color:
         icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(fns_zsk_color, "⚪")
         lines.append(f"{icon} ЗСК ЦБ: <b>{fns_zsk_level or fns_zsk_color}</b>")
+        # Коды критериев риска
+        risk_reasons = fns_zsk.get("risk_reasons", [])
+        risk_codes = fns_zsk.get("risk_codes", [])
+        for i, reason in enumerate(risk_reasons[:3]):
+            code = risk_codes[i] if i < len(risk_codes) else ""
+            code_s = f" [{code}]" if code else ""
+            lines.append(f"   ⚠️ {_esc(reason)}{code_s}")
+        has_any = True
 
-    if not zsk_color and not rp_color and not fns_zsk_color:
-        lines.append("⚪ Нет данных для оценки")
+    if not has_any:
+        lines.append("⚪ Нет данных от источников")
+
+
+def _format_stop_lists(zchb: dict, sanctions: dict, cbrf: dict, fns: dict, lines: list[str]) -> None:
+    """Стоп-листы: 115-ФЗ, 550-П, террористы, санкции, блокировки."""
+    check = fns.get("check") or {}
+    nalogbi = fns.get("nalogbi") or {}
+    lines.append("")
+    lines.append("─── <b>Стоп-листы / 115-ФЗ / 550-П</b> ───")
+
+    # 1. Террорист/экстремист (ЗЧБ API → Росфинмониторинг)
+    if zchb.get("terrorist"):
+        lines.append("🚨 <b>ТЕРРОРИСТ/ЭКСТРЕМИСТ — В РЕЕСТРЕ!</b>")
+    else:
+        lines.append("✅ Росфинмониторинг: чисто")
+
+    # 2. Недобросовестный поставщик (ЗЧБ API → ЕИС)
+    if zchb.get("bad_supplier"):
+        lines.append("⚠️ <b>Недобросовестный поставщик (ЕИС)!</b>")
+    else:
+        lines.append("✅ Реестр недобросов. поставщиков: чисто")
+
+    # 3. Санкции (OpenSanctions)
+    if sanctions.get("found"):
+        lines.append("🛑 Санкции: ⚠️ <b>найден в списках!</b>")
+    else:
+        lines.append("✅ Санкционные списки: чисто")
+
+    # 4. Реестр предупреждений ЦБ (нелегальная деятельность)
+    if cbrf.get("found"):
+        cnt = cbrf.get("count", 0)
+        lines.append(f"🚫 Реестр ЦБ (нелегальная деят.): ⚠️ <b>{cnt}</b>")
+    else:
+        lines.append("✅ Реестр предупреждений ЦБ: чисто")
+
+    # 5. Блокировка счетов ФНС
+    if nalogbi.get("has_blocked_accounts"):
+        cnt = nalogbi.get("blocked_accounts_count", 0)
+        lines.append(f"🔒 Блокировка счетов ФНС: ⚠️ <b>{cnt} решений</b>")
+    elif nalogbi.get("source"):
+        lines.append("✅ Блокировка счетов ФНС: нет")
+
+    # 6. Недостоверные сведения в ЕГРЮЛ (ФНС)
+    unreliable = []
+    if check.get("unreliable_address"):
+        unreliable.append("адрес")
+    if check.get("unreliable_director"):
+        unreliable.append("руководитель")
+    if check.get("unreliable_founder"):
+        unreliable.append("учредитель")
+    if unreliable:
+        lines.append(f"⚠️ Недостоверные сведения ЕГРЮЛ: <b>{', '.join(unreliable)}</b>")
+
+    # 7. Дисквалификация
+    if check.get("disqualified"):
+        lines.append("🚨 <b>Руководитель дисквалифицирован!</b>")
+
+
+def _format_risk_traffic_light(zsk: dict, rp: dict, fns: dict, lines: list[str],
+                                risk_result: dict | None = None) -> None:
+    """Свой светофор + по данным ЗЧБ/Русрпофайл."""
+    lines.append("")
+    lines.append("─── <b>ОЦЕНКА РИСКА</b> ───")
+
+    # Наш собственный Risk Engine
+    if risk_result:
+        emoji = risk_result.get("emoji", "⚪")
+        label = risk_result.get("label", "Нет данных")
+        score = risk_result.get("total_score", 0)
+        lines.append(f"{emoji} <b>{label}</b> (балл: {score})")
+
+        # Причины — только негативные (score > 0)
+        neg_factors = [f for f in risk_result.get("factors", []) if f["score"] > 0]
+        if neg_factors:
+            lines.append("")
+            lines.append("<b>📋 Причины:</b>")
+            for f in sorted(neg_factors, key=lambda x: -x["score"])[:8]:
+                icon = "🔴" if f["score"] >= 20 else "🟡" if f["score"] >= 10 else "⚪"
+                lines.append(f"  {icon} {f['name']}: {f['comment']}")
+
+        # Рекомендация
+        lines.append("")
+        if score >= 50:
+            lines.append("⛔ <b>НЕ РЕКОМЕНДУЕТСЯ работать</b>")
+        elif score >= 25:
+            lines.append("⚠️ <b>Работать с осторожностью</b> (предоплата)")
+        else:
+            lines.append("✅ <b>МОЖНО работать</b>")
+
+    # Подтверждение от внешних источников
+    lines.append("")
+    lines.append("<b>По данным источников:</b>")
+
+    # ЗЧБ
+    zsk_color = zsk.get("reliability_color")
+    zsk_label = zsk.get("reliability_label")
+    if zsk_color:
+        icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(zsk_color, "⚪")
+        lines.append(f"  {icon} ЗЧБ: {zsk_label or zsk_color}")
+
+    # Русрпофайл
+    rp_color = rp.get("reliability_color")
+    rp_label = rp.get("reliability_label")
+    if rp_color:
+        icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(rp_color, "⚪")
+        lines.append(f"  {icon} Русрпофайл: {rp_label or rp_color}")
+
+    # ЗСК ЦБ (с расшифровкой кодов критериев)
+    fns_zsk = fns.get("zsk") or {}
+    fns_zsk_color = fns_zsk.get("zsk_color")
+    if fns_zsk_color:
+        icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(fns_zsk_color, "⚪")
+        lines.append(f"  {icon} ЗСК ЦБ: {fns_zsk.get('zsk_level', fns_zsk_color)}")
+        # Расшифровка кодов критериев риска
+        risk_reasons = fns_zsk.get("risk_reasons") or []
+        risk_codes = fns_zsk.get("risk_codes") or []
+        if risk_codes:
+            for code, reason in zip(risk_codes, risk_reasons):
+                lines.append(f"     ⤷ <i>{code}: {reason}</i>")
 
 
 def format_courts_detail(zsk_data: dict[str, Any] | None, zchb_data: dict[str, Any] | None = None, court_cases: dict[str, Any] | None = None) -> str:
@@ -606,7 +658,8 @@ def format_courts_detail(zsk_data: dict[str, Any] | None, zchb_data: dict[str, A
             lines.append(s)
             cat = c.get("category", "")
             if cat:
-                lines.append(f"   <i>{_esc(cat[:80])}</i>")
+                short_cat = cat[:120] + "..." if len(cat) > 120 else cat
+                lines.append(f"   <i>{_esc(short_cat)}</i>")
 
     fssp = _first_num(zchb.get("fssp_count"), zsk.get("fssp_total"))
     if fssp is not None:
@@ -642,10 +695,19 @@ def format_fns_detail(fns_data: dict[str, Any] | None, cbrf_data: dict[str, Any]
         color = fns_zsk.get("zsk_color", "")
         level = fns_zsk.get("zsk_level", "")
         icon = {"green": "🟢", "red": "🔴", "yellow": "🟡"}.get(color, "⚪")
-        lines.append(f"{icon} {level}")
+        lines.append(f"{icon} <b>{level}</b>")
         zsk_text = fns_zsk.get("zsk_text")
         if zsk_text:
             lines.append(f"  <i>{_esc(zsk_text[:200])}</i>")
+        # Коды критериев с расшифровкой
+        risk_reasons = fns_zsk.get("risk_reasons", [])
+        risk_codes = fns_zsk.get("risk_codes", [])
+        if risk_reasons:
+            lines.append("")
+            lines.append("<b>Критерии риска:</b>")
+            for i, reason in enumerate(risk_reasons):
+                code = risk_codes[i] if i < len(risk_codes) else ""
+                lines.append(f"  ⚠️ <b>{code}</b> — {_esc(reason)}")
 
     # ── Бухгалтерская отчётность (BO) ──
     fns_bo = fns.get("bo") or {}
@@ -671,34 +733,22 @@ def format_fns_detail(fns_data: dict[str, Any] | None, cbrf_data: dict[str, Any]
             if parts:
                 lines.append(f"  <b>{y}</b>: {', '.join(parts)}")
 
-    # ── Позитив/Негатив текст ФНС ──
-    check = fns.get("check") or {}
-    neg_text = check.get("negative_text")
-    pos_text = check.get("positive_text")
-    if neg_text or pos_text:
-        lines.append("")
-        lines.append("─── <b>Выводы ФНС</b> ───")
-        if pos_text:
-            lines.append(f"✅ {_esc(pos_text[:300])}")
-        if neg_text:
-            lines.append(f"⚠️ {_esc(neg_text[:300])}")
-
-    # ── Отказы банков (ЦБ 550-П) ──
+    # ── Реестр предупреждений ЦБ ──
     if cbrf.get("source"):
         lines.append("")
-        lines.append("─── <b>Отказы банков (ЦБ 550-П)</b> ───")
+        lines.append("─── <b>Реестр предупреждений ЦБ</b> ───")
         if cbrf.get("found"):
             cnt = cbrf.get("count", 0)
-            lines.append(f"⚠️ <b>Найдено отказов: {cnt}</b>")
+            lines.append(f"⚠️ <b>Найдено в реестре ЦБ: {cnt}</b>")
             for d in cbrf.get("details", [])[:5]:
-                bank = _esc(d.get("bank", "—"))
-                date = d.get("date", "—")
-                reason = _esc(d.get("reason", ""))
-                lines.append(f"  • {bank} ({date})")
-                if reason:
-                    lines.append(f"    {reason}")
+                name = _esc(d.get("name", "—"))
+                dtype = d.get("type", "")
+                date = d.get("date", "")
+                lines.append(f"  • {name}")
+                if dtype or date:
+                    lines.append(f"    {_esc(dtype)} ({date})")
         else:
-            lines.append("✅ Отказов не найдено")
+            lines.append("✅ В реестре предупреждений ЦБ не найдено")
 
     if not fns.get("check") and not fns.get("nalogbi") and not cbrf.get("source"):
         lines.append("")
@@ -815,7 +865,7 @@ def _format_courts(zsk: dict, lines: list[str]) -> None:
             if active_sum:
                 lines.append(f"   🔄 на рассмотрении: {_money(active_sum)}")
     else:
-        lines.append("⚖️ Суды: нет данных")
+        lines.append("⚖️ Суды: проверяется...")
 
 
 def _format_sanctions_section(sanctions: dict, lines: list[str]) -> None:

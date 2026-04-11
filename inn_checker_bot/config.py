@@ -44,27 +44,35 @@ if ADMIN_IDS_STR:
 SUPPORT_CHAT_ID = os.getenv("SUPPORT_CHAT_ID", "")
 
 # ── Лимиты планов ──
+# Free=3/день, Start=50/день, Pro=300/день, Business=безлимит
 PLAN_LIMITS = {
-    "free":     {"daily_checks": 5,    "full_report": False, "ai_analysis": False, "egrul": False},
+    "free":     {"daily_checks": 3,    "full_report": False, "ai_analysis": False, "egrul": False},
     "promo":    {"daily_checks": 999,  "full_report": True,  "ai_analysis": True,  "egrul": True},
-    "pro":      {"daily_checks": 50,   "full_report": True,  "ai_analysis": True,  "egrul": True},
-    "business": {"daily_checks": 999,  "full_report": True,  "ai_analysis": True,  "egrul": True},
+    "start":    {"daily_checks": 50,   "full_report": True,  "ai_analysis": False, "egrul": True},
+    "pro":      {"daily_checks": 300,  "full_report": True,  "ai_analysis": True,  "egrul": True},
+    "business": {"daily_checks": 9999, "full_report": True,  "ai_analysis": True,  "egrul": True},
     "admin":    {"daily_checks": 9999, "full_report": True,  "ai_analysis": True,  "egrul": True},
 }
 
-# ── Тарифы (для отображения) ──
+# ── Тарифы (на 15% ниже рынка: Контур ~1000-1500₽, Руспрофайл ~499₽) ──
 TARIFF_INFO = {
+    "start": {
+        "name": "⭐ Start",
+        "price": "490 ₽/мес",
+        "checks": "50 проверок/день",
+        "features": "Полный отчёт • ЕГРЮЛ • Суды/ФССП • Стоп-листы",
+    },
     "pro": {
         "name": "💎 Pro",
-        "price": "590 ₽/мес",
-        "checks": "50 проверок/день",
-        "features": "Полный отчёт • ИИ-анализ • ЕГРЮЛ • Приоритетная поддержка",
+        "price": "1 290 ₽/мес",
+        "checks": "300 проверок/день",
+        "features": "Всё из Start • ИИ-анализ • Связи • История • Мониторинг",
     },
     "business": {
         "name": "🏆 Business",
-        "price": "1 490 ₽/мес",
+        "price": "2 490 ₽/мес",
         "checks": "Безлимитные проверки",
-        "features": "Всё из Pro • Мониторинг • Сравнения безлимит • API доступ",
+        "features": "Всё из Pro • API доступ • Массовые проверки • PDF/1С экспорт",
     },
 }
 

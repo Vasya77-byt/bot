@@ -215,23 +215,35 @@ def _report_keyboard(inn: str, full: bool = True, entity_type: str = "ul", show_
 # ─────────────────────────────────────────────────
 
 async def _full_check(inn: str) -> dict:
-    """Запрашивает все источники параллельно. Кэш 30 мин."""
+    """Запрашивает все источники параллельно. Кэш 30 мин. Retry x3 для критических."""
     cached = cache.get(f"check:{inn}")
     if cached is not None:
         logger.info("Cache HIT for %s", inn)
         return cached
+
+    # ── Retry-обёртка: повторяет запрос до 3 раз при ошибке ──
+    async def _retry(coro_fn, *args, retries=3, **kwargs):
+        for attempt in range(retries):
+            try:
+                return await coro_fn(*args, **kwargs)
+            except Exception as e:
+                if attempt < retries - 1:
+                    logger.info("Retry %d/%d for %s: %s", attempt + 1, retries, coro_fn.__name__, e)
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    raise
 
     raw_data = await fetch_company_data(inn)
     fields = extract_company_fields(raw_data)
     ogrn = fields.get("ogrn")
     company_name = fields.get("name", "")
 
-    # Параллельно запрашиваем ВСЕ источники
-    zchb_task = asyncio.create_task(fetch_company_card(inn))       # ЗЧБ API (основной)
-    zsk_task = asyncio.create_task(fetch_zsk_data(inn, ogrn))      # ЗЧБ scraping (фоллбэк)
-    rp_task = asyncio.create_task(fetch_rusprofile_data(inn))      # Rusprofile
-    fin_task = asyncio.create_task(fetch_finance_history(inn))     # ITSoft
-    fns_task = asyncio.create_task(full_apifns_check(inn))         # API-FNS
+    # Параллельно запрашиваем ВСЕ источники (критические с retry)
+    zchb_task = asyncio.create_task(_retry(fetch_company_card, inn))       # ЗЧБ API (основной, retry x3)
+    zsk_task = asyncio.create_task(fetch_zsk_data(inn, ogrn))              # ЗЧБ scraping (фоллбэк, без retry)
+    rp_task = asyncio.create_task(fetch_rusprofile_data(inn))              # Rusprofile (фоллбэк)
+    fin_task = asyncio.create_task(fetch_finance_history(inn))             # ITSoft
+    fns_task = asyncio.create_task(_retry(full_apifns_check, inn))         # API-FNS (retry x3)
     sanctions_task = asyncio.create_task(check_sanctions(inn, company_name))
     cbrf_task = asyncio.create_task(check_bank_refusals(inn))
     fssp_task = asyncio.create_task(fetch_fssp(inn))
@@ -488,6 +500,55 @@ async def cmd_privacy(message: Message) -> None:
     await _register_user(message)
     text = get_privacy_policy()
     await _send_long_message(message, text, parse_mode=ParseMode.HTML)
+
+
+# ─── /admin_help (скрытый) ───
+
+@dp.message(Command("admin_help"))
+async def cmd_admin_help(message: Message) -> None:
+    if not await _is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "🔧 <b>Админ-панель</b>\n\n"
+        "📊 <b>Мониторинг:</b>\n"
+        "/status — статус API, ключи, сервер\n"
+        "/apistats — лимиты API-FNS\n"
+        "/users — список пользователей\n"
+        "/stats — статистика предложений\n"
+        "/invoices — статистика счетов\n\n"
+        "👥 <b>Управление:</b>\n"
+        "/grant <code>USER_ID PLAN [DAYS]</code> — выдать тариф\n"
+        "/revoke <code>USER_ID</code> — отозвать тариф\n"
+        "/grant_docs <code>USER_ID</code> — открыть предложения/счета\n"
+        "/revoke_docs <code>USER_ID</code> — закрыть предложения/счета\n"
+        "/gen_promos <code>N</code> — сгенерировать промокоды\n\n"
+        "🔧 <b>Система:</b>\n"
+        "/refresh_cache — очистить кэш\n"
+        "/force_recheck <code>ИНН</code> — принудительная проверка\n\n"
+        "Планы: free, start, pro, business, admin",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(Command("refresh_cache"))
+async def cmd_refresh_cache(message: Message) -> None:
+    if not await _is_admin(message.from_user.id):
+        return
+    cache.clear()
+    await message.answer("✅ Кэш полностью очищен.")
+
+
+@dp.message(Command("force_recheck"))
+async def cmd_force_recheck(message: Message) -> None:
+    if not await _is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /force_recheck <code>ИНН</code>", parse_mode=ParseMode.HTML)
+        return
+    inn = parts[1].strip()
+    cache.delete(f"check:{inn}")
+    await message.answer(f"✅ Кэш для ИНН <code>{inn}</code> очищен. Следующий запрос будет свежим.", parse_mode=ParseMode.HTML)
 
 
 # ─── /stats и /invoices ───
@@ -787,6 +848,59 @@ async def admin_users(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+@dp.message(Command("admin_help"))
+async def admin_help(message: Message) -> None:
+    """Полный список скрытых админ-команд."""
+    if not await _is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "🔧 <b>Админ-панель</b>\n\n"
+        "─── <b>Мониторинг</b> ───\n"
+        "/status — статус API ключей и сервера\n"
+        "/apistats — лимиты API-FNS (использовано/осталось)\n"
+        "/users — список пользователей\n\n"
+        "─── <b>Управление</b> ───\n"
+        "/grant <code>USER_ID PLAN [DAYS]</code> — выдать тариф\n"
+        "/revoke <code>USER_ID</code> — отозвать тариф\n"
+        "/grant_docs <code>USER_ID</code> — открыть предложения/счета\n"
+        "/revoke_docs <code>USER_ID</code> — закрыть предложения/счета\n"
+        "/gen_promos <code>N</code> — сгенерировать промокоды\n\n"
+        "─── <b>Диагностика</b> ───\n"
+        "/force_check <code>ИНН</code> — проверка без кэша\n"
+        "/clear_cache — очистить весь кэш\n\n"
+        "─── <b>Контент</b> ───\n"
+        "/stats — статистика предложений\n"
+        "/invoices — статистика счетов\n"
+        "/support_list — обращения в поддержку\n\n"
+        "─── <b>Авторизация</b> ───\n"
+        f"/f_access — скрытая команда входа",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(Command("force_check"))
+async def admin_force_check(message: Message) -> None:
+    """Принудительная проверка ИНН без кэша."""
+    if not await _is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /force_check <code>ИНН</code>", parse_mode=ParseMode.HTML)
+        return
+    inn = parts[1].strip()
+    cache.delete(f"check:{inn}")
+    await message.answer(f"🔄 Кэш для {inn} очищен. Отправьте ИНН для свежей проверки.")
+
+
+@dp.message(Command("clear_cache"))
+async def admin_clear_cache(message: Message) -> None:
+    """Очистить весь кэш."""
+    if not await _is_admin(message.from_user.id):
+        return
+    cache.clear()
+    await message.answer("🗑 Кэш очищен.")
+
+
 @dp.message(Command("status"))
 async def admin_status(message: Message) -> None:
     """Статус API ключей, лимитов и сервера."""
@@ -859,6 +973,59 @@ async def admin_status(message: Message) -> None:
     lines.append(f"Пользователей: <b>{users_count}</b>")
 
     await _send_long_message(message, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("admin_help"))
+async def admin_help(message: Message) -> None:
+    """Полный список скрытых админ-команд."""
+    if not await _is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "🔧 <b>Админ-команды</b>\n\n"
+        "<b>Мониторинг:</b>\n"
+        "/status — статус API, ключей, сервера\n"
+        "/apistats — лимиты API-FNS (использовано/осталось)\n"
+        "/users — список пользователей\n"
+        "/support_list — обращения в поддержку\n\n"
+        "<b>Управление доступом:</b>\n"
+        "/grant <code>USER_ID PLAN [DAYS]</code> — выдать тариф\n"
+        "  планы: free, start, pro, business, admin\n"
+        "/revoke <code>USER_ID</code> — отозвать тариф\n"
+        "/grant_docs <code>USER_ID</code> — открыть предложения/счета\n"
+        "/revoke_docs <code>USER_ID</code> — закрыть предложения/счета\n\n"
+        "<b>Промокоды:</b>\n"
+        "/gen_promos <code>N</code> — сгенерировать N промокодов\n\n"
+        "<b>Статистика:</b>\n"
+        "/stats — статистика предложений\n"
+        "/invoices — статистика счетов\n\n"
+        "<b>Диагностика:</b>\n"
+        "/force_recheck <code>INN</code> — проверка ИНН без кэша\n"
+        "/refresh_cache — очистка всего кэша\n",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@dp.message(Command("force_recheck"))
+async def admin_force_recheck(message: Message) -> None:
+    """Принудительная проверка ИНН без кэша."""
+    if not await _is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /force_recheck <code>INN</code>", parse_mode=ParseMode.HTML)
+        return
+    inn = parts[1].strip()
+    cache.delete(f"check:{inn}")
+    await message.answer(f"🔄 Кэш для <code>{inn}</code> очищен. Отправьте ИНН для проверки.", parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("refresh_cache"))
+async def admin_refresh_cache(message: Message) -> None:
+    """Очистка всего кэша."""
+    if not await _is_admin(message.from_user.id):
+        return
+    cache.clear()
+    await message.answer("✅ Весь кэш очищен.")
 
 
 @dp.message(Command("apistats"))
@@ -1573,9 +1740,20 @@ async def cb_affiliated(callback: CallbackQuery) -> None:
 
     try:
         from affiliated_client import fetch_affiliated
-        companies = await fetch_affiliated(inn)
+        check = cache.get(f"check:{inn}")
+        if not check:
+            check = await _full_check(inn)
+        companies = await fetch_affiliated(
+            inn,
+            fields=check.get("fields"),
+            zchb_data=check.get("zchb_data"),
+        )
         if not companies:
-            await callback.message.answer("ℹ️ Связанные компании не найдены.")
+            await callback.message.answer(
+                "ℹ️ Связанные компании не найдены.\n\n"
+                "<i>Поиск ведётся по ФИО руководителя и учредителей.</i>",
+                parse_mode=ParseMode.HTML,
+            )
             return
         report = format_affiliated(companies)
         await _send_long_message(callback.message, report, parse_mode=ParseMode.HTML)

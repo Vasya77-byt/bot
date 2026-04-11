@@ -228,23 +228,27 @@ def get_tariffs_text() -> str:
         "💎 <b>Тарифные планы</b>",
         "",
         "─── 🆓 <b>Free</b> ───",
-        "Бесплатно",
-        "• 5 проверок в день",
-        "• Краткий отчёт по компании",
-        "• Предложения и запросы счетов",
+        "Бесплатно навсегда",
+        "• 3 проверки в день",
+        "• Краткий отчёт + светофор",
+        "• Стоп-листы и суды (сводка)",
         "",
     ]
 
     for plan_id, info in TARIFF_INFO.items():
         lines.append(f"─── {info['name']} ───")
         lines.append(f"💰 {info['price']}")
-        lines.append(f"• {info['checks']}")
-        lines.append(f"• {info['features']}")
+        lines.append(f"📊 {info['checks']}")
+        features = info['features'].split(' • ')
+        for feat in features:
+            lines.append(f"  ✅ {feat}")
         lines.append("")
 
-    lines.append("─── Оплата ───")
+    lines.append("─── 💳 <b>Оплата</b> ───")
     lines.append("Для подключения тарифа напишите в поддержку:")
     lines.append("/support — связаться с нами")
+    lines.append("")
+    lines.append("<i>Цены на 15% ниже аналогов (Контур, Руспрофайл)</i>")
     lines.append("")
     lines.append("Есть промокод? Введите /promo")
 

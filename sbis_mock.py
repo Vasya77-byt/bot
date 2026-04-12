@@ -14,7 +14,7 @@ app = FastAPI(title="SBIS Mock")
 @app.post("/service/")
 async def get_org_info(payload: Dict[str, Any]) -> JSONResponse:
     inn = payload.get("inn") or "0000000000"
-    data = mock_company(inn).dict()
+    data = mock_company(inn).model_dump()
     return JSONResponse(content=data)
 
 

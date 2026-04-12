@@ -21,8 +21,8 @@ class ParseResult:
 def parse_message(text: str) -> ParseResult:
     inn = extract_inn(text)
     mode = extract_mode(text)
-    is_request = bool(re.search(r"дай\s+заявку\s+\d{10}", text, re.IGNORECASE))
-    is_proposal = bool(re.search(r"дай\s+предложение\s+\d{10}", text, re.IGNORECASE))
+    is_request = bool(re.search(r"дай\s+заявку\s+(\d{10}|\d{12})", text, re.IGNORECASE))
+    is_proposal = bool(re.search(r"дай\s+предложение\s+(\d{10}|\d{12})", text, re.IGNORECASE))
 
     company_data = parse_company_json(text)
     if company_data is None and inn:

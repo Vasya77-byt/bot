@@ -35,7 +35,7 @@ class SbisClient:
         cached_file = self._file_cache.get(inn)
         if cached_file:
             try:
-                return CompanyData.parse_obj(cached_file)
+                return CompanyData.model_validate(cached_file)
             except Exception:
                 pass
 
@@ -77,7 +77,7 @@ class SbisClient:
         company = self._normalize(raw, inn)
         if company:
             self._cache_put(inn, company)
-            self._file_cache.set(inn, company.dict())
+            self._file_cache.set(inn, company.model_dump())
         return company
 
     def _normalize(self, data: Dict[str, Any], inn: str) -> CompanyData:

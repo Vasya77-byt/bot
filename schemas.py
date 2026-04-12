@@ -16,8 +16,7 @@ class CompanyData(BaseModel):
     profit_last_year: Optional[float] = None
     licenses: Optional[List[str]] = None
 
-    class Config:
-        frozen = True
+    model_config = {"frozen": True}
 
 
 def empty_company(inn: Optional[str] = None) -> CompanyData:

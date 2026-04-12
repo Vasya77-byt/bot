@@ -1,3 +1,4 @@
+import os
 from io import BytesIO
 from textwrap import wrap
 from typing import Optional
@@ -7,13 +8,37 @@ from PIL import Image, ImageDraw, ImageFont
 
 from schemas import CompanyData
 
+_FONT_SEARCH_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+
+
+def _find_truetype_font() -> Optional[str]:
+    for path in _FONT_SEARCH_PATHS:
+        if os.path.isfile(path):
+            return path
+    return None
+
 
 def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -> bytes:
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=14)
+
+    font_path = _find_truetype_font()
+    if font_path:
+        pdf.add_font("CustomFont", "", font_path, uni=True)
+        pdf.set_font("CustomFont", size=14)
+    else:
+        pdf.set_font("Helvetica", size=14)
+
     pdf.cell(0, 10, txt=title, ln=True)
-    pdf.set_font("Arial", size=11)
+
+    if font_path:
+        pdf.set_font("CustomFont", size=11)
+    else:
+        pdf.set_font("Helvetica", size=11)
 
     if company:
         pdf.multi_cell(0, 8, txt=_company_block(company))
@@ -29,9 +54,14 @@ def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -
 def build_kp_png(title: str, body: str, company: Optional[CompanyData] = None, width: int = 1000, height: int = 600) -> bytes:
     img = Image.new("RGB", (width, height), color="white")
     draw = ImageDraw.Draw(img)
+    ttf_path = _find_truetype_font()
     try:
-        font_title = ImageFont.truetype("arial.ttf", 24)
-        font_body = ImageFont.truetype("arial.ttf", 16)
+        if ttf_path:
+            font_title = ImageFont.truetype(ttf_path, 24)
+            font_body = ImageFont.truetype(ttf_path, 16)
+        else:
+            font_title = ImageFont.load_default()
+            font_body = ImageFont.load_default()
     except Exception:
         font_title = ImageFont.load_default()
         font_body = ImageFont.load_default()

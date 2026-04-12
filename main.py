@@ -1,4 +1,5 @@
 import logging
+from io import BytesIO
 from typing import Optional
 
 from pyrogram import Client, filters
@@ -74,10 +75,13 @@ def main() -> None:
 
     app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
     app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(
-        MessageHandler(handle_text_message, filters.text & ~filters.command(["start", "help"]))
-    )
     app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+    app.add_handler(
+        MessageHandler(
+            handle_text_message,
+            filters.text & ~filters.command(["start", "help", "menu", "kp"]),
+        )
+    )
 
     logger.info("Bot starting...")
     app.run()
@@ -210,10 +214,14 @@ async def _send_kp_file(
         content = build_kp_png(title, body, company)
         save_file_bytes(content, filename)
         metadata_store.append(filename, company, "png")
-        await message.reply_photo(content, caption="Ваше КП (PNG)")
+        photo = BytesIO(content)
+        photo.name = filename
+        await message.reply_photo(photo, caption="Ваше КП (PNG)")
     else:
         content = build_kp_pdf(title, body, company)
         save_file_bytes(content, filename)
         metadata_store.append(filename, company, "pdf")
-        await message.reply_document(document=("kp.pdf", content), caption="Ваше КП (PDF)")
+        doc = BytesIO(content)
+        doc.name = filename
+        await message.reply_document(document=doc, file_name=filename, caption="Ваше КП (PDF)")
 

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from schemas import CompanyData, empty_company
 
-INN_PATTERN = re.compile(r"\b(\d{10})\b")
+INN_PATTERN = re.compile(r"\b(\d{10}|\d{12})\b")
 
 
 @dataclass

@@ -24,5 +24,4 @@ services:
       - SBIS_MOCK_PORT=8081
     ports:
       - "8081:8081"
-             python main.py"
 

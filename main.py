@@ -57,43 +57,6 @@ def build_app(settings: Settings) -> Client:
     )
 
 
-def main() -> None:
-    settings = Settings.from_env()
-    app = build_app(settings)
-
-    async def start_handler(client: Client, message) -> None:
-        await message.reply_text(
-            "Финансовый архитектор онлайн. Выберите режим или пришлите ИНН/JSON.",
-            reply_markup=_main_menu(),
-        )
-
-    async def menu_handler(client: Client, message) -> None:
-        await message.reply_text(
-            "Меню быстрого старта:",
-            reply_markup=_main_menu(),
-        )
-
-    app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
-    app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
-    app.add_handler(
-        MessageHandler(
-            handle_text_message,
-            filters.text & ~filters.command(["start", "help", "menu", "kp"]),
-        )
-    )
-
-    logger.info("Bot starting...")
-    app.run()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped.")
-
-
 def _main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -135,23 +98,6 @@ def _main_menu() -> InlineKeyboardMarkup:
             ],
         ]
     )
-
-
-async def handle_kp_command(client: Client, message) -> None:
-    """
-    Команда: /kp <pdf|png> <ИНН?>
-    Если ИНН не указан — используем текст или заглушку.
-    """
-    text = message.text or ""
-    args = text.split()
-    fmt = _extract_format(args)
-    inn = _extract_inn_arg(args)
-
-    parsed = parse_message(text)
-    company = await _resolve_company(text, inn)
-
-    title, body = _kp_template()
-    await _send_kp_file(message, parsed, company, title, body, fmt)
 
 
 def _extract_format(args: list[str]) -> str:
@@ -224,4 +170,58 @@ async def _send_kp_file(
         doc = BytesIO(content)
         doc.name = filename
         await message.reply_document(document=doc, file_name=filename, caption="Ваше КП (PDF)")
+
+
+async def handle_kp_command(client: Client, message) -> None:
+    """
+    Команда: /kp <pdf|png> <ИНН?>
+    Если ИНН не указан — используем текст или заглушку.
+    """
+    text = message.text or ""
+    args = text.split()
+    fmt = _extract_format(args)
+    inn = _extract_inn_arg(args)
+
+    parsed = parse_message(text)
+    company = await _resolve_company(text, inn)
+
+    title, body = _kp_template()
+    await _send_kp_file(message, parsed, company, title, body, fmt)
+
+
+def main() -> None:
+    settings = Settings.from_env()
+    app = build_app(settings)
+
+    async def start_handler(client: Client, message) -> None:
+        await message.reply_text(
+            "Финансовый архитектор онлайн. Выберите режим или пришлите ИНН/JSON.",
+            reply_markup=_main_menu(),
+        )
+
+    async def menu_handler(client: Client, message) -> None:
+        await message.reply_text(
+            "Меню быстрого старта:",
+            reply_markup=_main_menu(),
+        )
+
+    app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
+    app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
+    app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+    app.add_handler(
+        MessageHandler(
+            handle_text_message,
+            filters.text & ~filters.command(["start", "help", "menu", "kp"]),
+        )
+    )
+
+    logger.info("Bot starting...")
+    app.run()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped.")
 

@@ -109,6 +109,15 @@ async def handle_text_message(client: Client, message) -> None:
     parsed: ParseResult = parse_message(text)
     logger.info("Parsed message from user %s: %s", user_id, parsed)
 
+    # Обработка Reply-кнопок (нижнее меню)
+    reply_action = _match_reply_button(text)
+    if reply_action:
+        # Сбрасываем предыдущее состояние
+        _user_state.pop(user_id, None)
+        _user_state[user_id] = reply_action
+        await message.reply_text(_inn_prompt_text(reply_action))
+        return
+
     # Если пользователь в состоянии ожидания ИНН
     pending_action = _user_state.pop(user_id, None)
     if pending_action and parsed.inn:
@@ -116,10 +125,10 @@ async def handle_text_message(client: Client, message) -> None:
         await _dispatch_action(message, pending_action, parsed, company)
         return
     elif pending_action and not parsed.inn:
-        # Пользователь нажал кнопку, но прислал не ИНН
-        _user_state[user_id] = pending_action
+        # Не ИНН — сбрасываем состояние, не застреваем
         await message.reply_text(
-            "⚠️ Не удалось распознать ИНН. Пожалуйста, отправьте ИНН (10 или 12 цифр):"
+            "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
+            "Отправьте ИНН (10 или 12 цифр) или нажмите /menu для выбора действия."
         )
         return
 
@@ -146,9 +155,29 @@ async def handle_text_message(client: Client, message) -> None:
 
     # Если ни ИНН, ни команды — подсказка
     await message.reply_text(
-        "👋 Отправьте ИНН компании или нажмите кнопку в меню (/menu), "
-        "чтобы я мог помочь с анализом или коммерческим предложением."
+        "👋 Отправьте ИНН компании или нажмите /menu для выбора действия."
     )
+
+
+def _match_reply_button(text: str) -> Optional[str]:
+    """Сопоставляет текст Reply-кнопок с действиями."""
+    mapping = {
+        "проверка компании": "mode_internal_analysis",
+        "сравнить": "mode_client_proposal",
+        "профиль": "mode_request",
+        "тарифы": "mode_proposal",
+    }
+    # Убираем эмодзи и лишние пробелы
+    clean = text.strip()
+    for char in clean:
+        if ord(char) > 0xFFFF:
+            clean = clean.replace(char, "")
+    clean = clean.strip().lower()
+
+    for keyword, action in mapping.items():
+        if keyword in clean:
+            return action
+    return None
 
 
 async def _dispatch_action(

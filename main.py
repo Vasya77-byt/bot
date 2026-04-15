@@ -290,8 +290,8 @@ def _kp_filename(company: Optional[CompanyData], parsed: ParseResult, ext: str) 
 
 
 async def _send_kp_auto(message, parsed: ParseResult, company: Optional[CompanyData], fmt: str) -> None:
-    body = render_response(parsed=parsed, company=company, risk=set())
-    await _send_kp_file(message, parsed, company, "Коммерческое предложение", body, fmt)
+    title, body = _kp_template()
+    await _send_kp_file(message, parsed, company, title, body, fmt)
 
 
 async def _send_kp_file(

@@ -2,26 +2,16 @@ version: "3.9"
 
 services:
   bot:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./:/app
+    build: .
     env_file:
       - .env
-    command: >
-      sh -c "pip install --no-cache-dir -r requirements.txt && python main.py"
     depends_on:
       - sbis-mock
 
   sbis-mock:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./:/app
-    command: >
-      sh -c "pip install --no-cache-dir -r requirements.txt && python sbis_mock.py"
+    build: .
+    command: ["python", "sbis_mock.py"]
     environment:
       - SBIS_MOCK_PORT=8081
     ports:
       - "8081:8081"
-

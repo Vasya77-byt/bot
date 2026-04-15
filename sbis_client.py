@@ -124,12 +124,24 @@ class SbisClient:
         )
 
     @staticmethod
+    def _safe_get(d: Any, key: str, default: Any = None) -> Any:
+        """Безопасный get — не падает если d не dict."""
+        if isinstance(d, dict):
+            return d.get(key, default)
+        return default
+
+    @staticmethod
     def _extract_org(data: Dict[str, Any]) -> Dict[str, Any]:
+        result = data.get("result") if isinstance(data, dict) else None
+        org_from_result = result.get("Organization") if isinstance(result, dict) else None
+        answer = data.get("answer") if isinstance(data, dict) else None
+        answer_data = answer.get("data") if isinstance(answer, dict) else None
+
         candidates = [
-            data.get("result", {}).get("Organization", {}),
-            data.get("result", {}),
-            data.get("Organization", {}),
-            data.get("answer", {}).get("data", {}),
+            org_from_result,
+            result,
+            data.get("Organization") if isinstance(data, dict) else None,
+            answer_data,
             data,
         ]
         for candidate in candidates:

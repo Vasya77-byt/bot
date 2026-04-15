@@ -28,12 +28,12 @@ def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -
 
     font_path = _find_truetype_font()
     if font_path:
-        pdf.add_font("CustomFont", "", font_path, uni=True)
+        pdf.add_font("CustomFont", "", font_path)
         pdf.set_font("CustomFont", size=14)
     else:
         pdf.set_font("Helvetica", size=14)
 
-    pdf.cell(0, 10, txt=title, ln=True)
+    pdf.cell(0, 10, text=title, new_x="LMARGIN", new_y="NEXT")
 
     if font_path:
         pdf.set_font("CustomFont", size=11)
@@ -41,10 +41,10 @@ def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -
         pdf.set_font("Helvetica", size=11)
 
     if company:
-        pdf.multi_cell(0, 8, txt=_company_block(company))
+        pdf.multi_cell(0, 8, text=_company_block(company))
         pdf.ln(4)
 
-    pdf.multi_cell(0, 8, txt=body)
+    pdf.multi_cell(0, 8, text=body)
 
     output = BytesIO()
     pdf.output(output)

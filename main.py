@@ -3,8 +3,12 @@ from io import BytesIO
 from typing import Optional
 
 from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
@@ -24,28 +28,8 @@ logger = logging.getLogger("financial-architect")
 init_sentry()
 metadata_store = MetadataStore()
 
-
-async def handle_text_message(client: Client, message) -> None:
-    text: str = message.text or ""
-    parsed: ParseResult = parse_message(text)
-    logger.info("Parsed message: %s", parsed)
-
-    company = parsed.company_data
-    if not company and parsed.inn:
-        sbis = SbisClient()
-        company = await sbis.fetch_company_data(parsed.inn)
-
-    lower_text = text.lower()
-    if "кп pdf" in lower_text or "kp pdf" in lower_text:
-        await _send_kp_auto(message, parsed, company, fmt="pdf")
-        return
-    if "кп png" in lower_text or "kp png" in lower_text:
-        await _send_kp_auto(message, parsed, company, fmt="png")
-        return
-
-    risk = assess_risk(text)
-    reply = render_response(parsed=parsed, company=company, risk=risk)
-    await message.reply_text(reply, disable_web_page_preview=True)
+# Хранение состояния пользователей (ожидание ИНН)
+_user_state: dict[int, str] = {}
 
 
 def build_app(settings: Settings) -> Client:
@@ -62,42 +46,177 @@ def _main_menu() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "Внутренний анализ",
-                    switch_inline_query_current_chat="mode=internal_analysis 7700000000",
+                    "📊 Внутренний анализ",
+                    callback_data="mode_internal_analysis",
                 ),
                 InlineKeyboardButton(
-                    "Коммерческое предложение",
-                    switch_inline_query_current_chat="mode=client_proposal 7700000000",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "Дай заявку",
-                    switch_inline_query_current_chat="дай заявку 7700000000",
-                ),
-                InlineKeyboardButton(
-                    "Дай предложение",
-                    switch_inline_query_current_chat="дай предложение 7700000000",
+                    "📝 Коммерческое предложение",
+                    callback_data="mode_client_proposal",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    "Пример JSON",
-                    switch_inline_query_current_chat='{"inn":"7700000000","name":"ООО Ромашка","okved_main":"62.01"}',
-                )
+                    "📋 Дай заявку",
+                    callback_data="mode_request",
+                ),
+                InlineKeyboardButton(
+                    "💼 Дай предложение",
+                    callback_data="mode_proposal",
+                ),
             ],
             [
                 InlineKeyboardButton(
-                    "Сгенерировать КП (PDF)",
-                    switch_inline_query_current_chat="/kp pdf 7700000000",
+                    "📄 Сгенерировать КП (PDF)",
+                    callback_data="kp_pdf",
                 ),
                 InlineKeyboardButton(
-                    "Сгенерировать КП (PNG)",
-                    switch_inline_query_current_chat="/kp png 7700000000",
+                    "🖼 Сгенерировать КП (PNG)",
+                    callback_data="kp_png",
                 ),
             ],
         ]
     )
+
+
+def _inn_prompt_text(action: str) -> str:
+    labels = {
+        "mode_internal_analysis": "внутреннего анализа",
+        "mode_client_proposal": "коммерческого предложения",
+        "mode_request": "заявки",
+        "mode_proposal": "предложения",
+        "kp_pdf": "генерации КП (PDF)",
+        "kp_png": "генерации КП (PNG)",
+    }
+    label = labels.get(action, "обработки")
+    return f"Для {label} отправьте ИНН компании (10 или 12 цифр):"
+
+
+async def handle_callback(client: Client, callback_query: CallbackQuery) -> None:
+    """Обработка нажатий на кнопки меню."""
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+    logger.info("Callback from user %s: %s", user_id, data)
+
+    _user_state[user_id] = data
+    await callback_query.answer()
+    await callback_query.message.reply_text(_inn_prompt_text(data))
+
+
+async def handle_text_message(client: Client, message) -> None:
+    """Обработка текстовых сообщений."""
+    text: str = message.text or ""
+    user_id = message.from_user.id
+    parsed: ParseResult = parse_message(text)
+    logger.info("Parsed message from user %s: %s", user_id, parsed)
+
+    # Если пользователь в состоянии ожидания ИНН
+    pending_action = _user_state.pop(user_id, None)
+    if pending_action and parsed.inn:
+        company = await _fetch_company(parsed.inn)
+        await _dispatch_action(message, pending_action, parsed, company)
+        return
+    elif pending_action and not parsed.inn:
+        # Пользователь нажал кнопку, но прислал не ИНН
+        _user_state[user_id] = pending_action
+        await message.reply_text(
+            "⚠️ Не удалось распознать ИНН. Пожалуйста, отправьте ИНН (10 или 12 цифр):"
+        )
+        return
+
+    # Обычная обработка текста с ИНН
+    company = parsed.company_data
+    if not company and parsed.inn:
+        company = await _fetch_company(parsed.inn)
+
+    # Проверка текстовых триггеров КП
+    lower_text = text.lower()
+    if "кп pdf" in lower_text or "kp pdf" in lower_text:
+        await _send_kp_auto(message, parsed, company, fmt="pdf")
+        return
+    if "кп png" in lower_text or "kp png" in lower_text:
+        await _send_kp_auto(message, parsed, company, fmt="png")
+        return
+
+    # Если есть ИНН — анализируем
+    if parsed.inn or parsed.company_data:
+        risk = assess_risk(text)
+        reply = render_response(parsed=parsed, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+        return
+
+    # Если ни ИНН, ни команды — подсказка
+    await message.reply_text(
+        "👋 Отправьте ИНН компании или нажмите кнопку в меню (/menu), "
+        "чтобы я мог помочь с анализом или коммерческим предложением."
+    )
+
+
+async def _dispatch_action(
+    message, action: str, parsed: ParseResult, company: Optional[CompanyData]
+) -> None:
+    """Выполняет действие после получения ИНН."""
+    risk = assess_risk(message.text or "")
+
+    if action == "mode_internal_analysis":
+        parsed_with_mode = ParseResult(
+            raw_text=parsed.raw_text,
+            inn=parsed.inn,
+            mode="internal_analysis",
+            is_request=False,
+            is_proposal=False,
+            company_data=company,
+        )
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+
+    elif action == "mode_client_proposal":
+        parsed_with_mode = ParseResult(
+            raw_text=parsed.raw_text,
+            inn=parsed.inn,
+            mode="client_proposal",
+            is_request=False,
+            is_proposal=False,
+            company_data=company,
+        )
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+
+    elif action == "mode_request":
+        parsed_with_mode = ParseResult(
+            raw_text=parsed.raw_text,
+            inn=parsed.inn,
+            mode=None,
+            is_request=True,
+            is_proposal=False,
+            company_data=company,
+        )
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+
+    elif action == "mode_proposal":
+        parsed_with_mode = ParseResult(
+            raw_text=parsed.raw_text,
+            inn=parsed.inn,
+            mode=None,
+            is_request=False,
+            is_proposal=True,
+            company_data=company,
+        )
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+
+    elif action == "kp_pdf":
+        title, body = _kp_template()
+        await _send_kp_file(message, parsed, company, title, body, "pdf")
+
+    elif action == "kp_png":
+        title, body = _kp_template()
+        await _send_kp_file(message, parsed, company, title, body, "png")
+
+
+async def _fetch_company(inn: str) -> Optional[CompanyData]:
+    sbis = SbisClient()
+    return await sbis.fetch_company_data(inn)
 
 
 def _extract_format(args: list[str]) -> str:
@@ -117,8 +236,7 @@ async def _resolve_company(text: str, inn_arg: Optional[str]) -> Optional[Compan
     if not inn:
         return None
 
-    sbis = SbisClient()
-    return await sbis.fetch_company_data(inn)
+    return await _fetch_company(inn)
 
 
 def _kp_template() -> tuple[str, str]:
@@ -175,16 +293,25 @@ async def _send_kp_file(
 async def handle_kp_command(client: Client, message) -> None:
     """
     Команда: /kp <pdf|png> <ИНН?>
-    Если ИНН не указан — используем текст или заглушку.
+    Если ИНН не указан — просим прислать.
     """
     text = message.text or ""
     args = text.split()
     fmt = _extract_format(args)
     inn = _extract_inn_arg(args)
 
-    parsed = parse_message(text)
-    company = await _resolve_company(text, inn)
+    if not inn:
+        parsed = parse_message(text)
+        inn = parsed.inn
 
+    if not inn:
+        action = "kp_pdf" if fmt == "pdf" else "kp_png"
+        _user_state[message.from_user.id] = action
+        await message.reply_text("Для генерации КП отправьте ИНН компании (10 или 12 цифр):")
+        return
+
+    company = await _fetch_company(inn)
+    parsed = parse_message(text)
     title, body = _kp_template()
     await _send_kp_file(message, parsed, company, title, body, fmt)
 
@@ -195,19 +322,27 @@ def main() -> None:
 
     async def start_handler(client: Client, message) -> None:
         await message.reply_text(
-            "Финансовый архитектор онлайн. Выберите режим или пришлите ИНН/JSON.",
+            "👋 Финансовый архитектор онлайн!\n\n"
+            "Я помогу с анализом компаний и подготовкой КП.\n\n"
+            "Что умею:\n"
+            "• Отправьте ИНН — получите анализ компании\n"
+            "• Нажмите кнопку ниже для нужного действия\n"
+            "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
+            "• /kp png <ИНН> — сгенерировать КП в PNG\n"
+            "• /menu — показать меню",
             reply_markup=_main_menu(),
         )
 
     async def menu_handler(client: Client, message) -> None:
         await message.reply_text(
-            "Меню быстрого старта:",
+            "Выберите действие:",
             reply_markup=_main_menu(),
         )
 
     app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
     app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
     app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(
             handle_text_message,
@@ -224,4 +359,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         logger.info("Bot stopped.")
-

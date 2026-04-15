@@ -10,13 +10,13 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 
+from company_service import CompanyService
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from parsers import ParseResult, parse_message
 from renderers import render_response
 from schemas import CompanyData
-from sbis_client import SbisClient
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -27,6 +27,7 @@ setup_logging()
 logger = logging.getLogger("financial-architect")
 init_sentry()
 metadata_store = MetadataStore()
+company_service = CompanyService()
 
 # Хранение состояния пользователей (ожидание ИНН)
 _user_state: dict[int, str] = {}
@@ -244,8 +245,7 @@ async def _dispatch_action(
 
 
 async def _fetch_company(inn: str) -> Optional[CompanyData]:
-    sbis = SbisClient()
-    return await sbis.fetch_company_data(inn)
+    return await company_service.fetch(inn)
 
 
 def _extract_format(args: list[str]) -> str:

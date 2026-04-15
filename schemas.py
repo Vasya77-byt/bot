@@ -8,13 +8,20 @@ class CompanyData(BaseModel):
     name: Optional[str] = None
     ogrn: Optional[str] = None
     region: Optional[str] = None
+    address: Optional[str] = None
     reg_date: Optional[str] = None
     age_years: Optional[int] = None
     okved_main: Optional[str] = None
+    okved_name: Optional[str] = None
     employees_count: Optional[int] = None
     revenue_last_year: Optional[float] = None
     profit_last_year: Optional[float] = None
     licenses: Optional[List[str]] = None
+    director: Optional[str] = None
+    status: Optional[str] = None
+    kpp: Optional[str] = None
+    capital: Optional[float] = None
+    source: Optional[str] = None  # откуда данные: dadata, fns, sbis, mock
 
     model_config = {"frozen": True}
 

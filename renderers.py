@@ -24,20 +24,22 @@ def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: S
 
 def render_internal_analysis(company: CompanyData, risk: Set[str]) -> str:
     parts = [
-        "Внутренний разбор: оцениваем риски по банку/115-ФЗ, структуру платежей и соответствие ОКВЭД.",
+        "📊 Внутренний разбор: оцениваем риски по банку/115-ФЗ, структуру платежей и соответствие ОКВЭД.",
         _company_table(company),
         _recommendations(company),
     ]
     note = legal_note(risk)
     if note:
         parts.append(note)
+    if company.source:
+        parts.append(f"📡 Источники: {company.source}")
     return "\n\n".join(parts)
 
 
 def render_client_proposal(company: CompanyData, risk: Set[str]) -> str:
     analysis = _short_analysis(company)
     proposal = [
-        "Коммерческое предложение:",
+        "📝 Коммерческое предложение:",
         "— Индивидуальная настройка РКО и платежной архитектуры под ваши обороты.",
         "— Согласование лимитов и назначений, чтобы не ловить стопы.",
         "— Сопровождение по комплаенсу и ответы на запросы банка.",
@@ -49,28 +51,32 @@ def render_client_proposal(company: CompanyData, risk: Set[str]) -> str:
 
 def render_mixed(company: CompanyData, risk: Set[str]) -> str:
     return "\n\n".join(
-        [
+        filter(None, [
             _short_analysis(company),
             _mini_kp(),
             legal_note(risk),
-        ]
+        ])
     ).strip()
 
 
 def render_request(company: CompanyData) -> str:
     return "\n".join(
         [
-            "[ДАННЫЕ_КОМПАНИИ]:",
-            "- ЗАЯВКА",
-            f"- inn: {company.inn or 'не указано'}",
-            f"- name: {company.name or 'не указано'}",
-            f"- region: {company.region or 'не указано'}",
-            f"- reg_date: {company.reg_date or 'не указано'}",
-            f"- okved_main: {company.okved_main or 'не указано'}",
-            f"- employees_count: {company.employees_count or 'не указано'}",
-            "- sum: ",
-            "- designation: ",
-            "есть что предложить? цена? срок?",
+            "📋 ЗАЯВКА НА ОБСЛУЖИВАНИЕ:",
+            f"Компания: {company.name or 'не указано'}",
+            f"ИНН: {company.inn or 'не указано'}",
+            f"ОГРН: {company.ogrn or 'не указано'}",
+            f"Адрес: {company.address or company.region or 'не указано'}",
+            f"Руководитель: {company.director or 'не указано'}",
+            f"ОКВЭД: {company.okved_main or 'не указано'}",
+            f"Дата регистрации: {company.reg_date or 'не указано'}",
+            f"Штат: {company.employees_count or 'не указано'}",
+            f"Статус: {company.status or 'не указано'}",
+            "",
+            "Сумма: _____",
+            "Назначение: _____",
+            "",
+            "Готовы предложить условия? Укажите цену и сроки.",
         ]
     )
 
@@ -78,35 +84,53 @@ def render_request(company: CompanyData) -> str:
 def render_proposal(company: CompanyData) -> str:
     return "\n".join(
         [
-            "[ДАННЫЕ_КОМПАНИИ]:",
-            "- ПРЕДЛОЖЕНИЕ",
-            f"- inn: {company.inn or 'не указано'}",
-            f"- name: {company.name or 'не указано'}",
-            f"- region: {company.region or 'не указано'}",
-            f"- reg_date: {company.reg_date or 'не указано'}",
-            f"- okved_main: {company.okved_main or 'не указано'}",
-            f"- employees_count: {company.employees_count or 'не указано'}",
-            "- sum: ",
-            "- designation: ",
-            "цена _____  выгрузка ______",
+            "💼 ПРЕДЛОЖЕНИЕ ДЛЯ КОМПАНИИ:",
+            f"Компания: {company.name or 'не указано'}",
+            f"ИНН: {company.inn or 'не указано'}",
+            f"ОГРН: {company.ogrn or 'не указано'}",
+            f"Адрес: {company.address or company.region or 'не указано'}",
+            f"Руководитель: {company.director or 'не указано'}",
+            f"ОКВЭД: {company.okved_main or 'не указано'}",
+            f"Дата регистрации: {company.reg_date or 'не указано'}",
+            f"Штат: {company.employees_count or 'не указано'}",
+            f"Выручка: {_fmt_money(company.revenue_last_year)}",
+            f"Прибыль: {_fmt_money(company.profit_last_year)}",
+            f"Статус: {company.status or 'не указано'}",
+            "",
+            "Цена: _____",
+            "Выгрузка: _____",
         ]
     )
 
 
 def _company_table(company: CompanyData) -> str:
-    return "\n".join(
-        [
-            "Таблица:",
-            f"- Название: {company.name or 'не указано'}",
-            f"- ИНН: {company.inn or 'не указано'}",
-            f"- Регион: {company.region or 'не указано'}",
-            f"- Возраст: {company.age_years or 'не указано'}",
-            f"- Основной ОКВЭД: {company.okved_main or 'не указано'}",
-            f"- Штат: {company.employees_count or 'не указано'}",
-            f"- Выручка / прибыль: {company.revenue_last_year or 'не указано'} / {company.profit_last_year or 'не указано'}",
-            f"- Лицензии: {', '.join(company.licenses) if company.licenses else 'не указано'}",
-        ]
-    )
+    lines = [
+        "Карточка компании:",
+        f"• Название: {company.name or 'не указано'}",
+        f"• ИНН: {company.inn or 'не указано'}",
+        f"• ОГРН: {company.ogrn or 'не указано'}",
+    ]
+    if company.kpp:
+        lines.append(f"• КПП: {company.kpp}")
+    lines.extend([
+        f"• Адрес: {company.address or company.region or 'не указано'}",
+        f"• Руководитель: {company.director or 'не указано'}",
+        f"• Статус: {company.status or 'не указано'}",
+        f"• Дата регистрации: {company.reg_date or 'не указано'} ({company.age_years or '?'} лет)",
+        f"• Основной ОКВЭД: {company.okved_main or 'не указано'}",
+    ])
+    if company.okved_name:
+        lines.append(f"  ({company.okved_name})")
+    lines.extend([
+        f"• Штат: {company.employees_count or 'не указано'}",
+        f"• Выручка: {_fmt_money(company.revenue_last_year)}",
+        f"• Прибыль: {_fmt_money(company.profit_last_year)}",
+    ])
+    if company.capital:
+        lines.append(f"• Уставный капитал: {_fmt_money(company.capital)}")
+    if company.licenses:
+        lines.append(f"• Лицензии: {', '.join(company.licenses)}")
+    return "\n".join(lines)
 
 
 def _recommendations(company: CompanyData) -> str:
@@ -123,14 +147,23 @@ def _recommendations(company: CompanyData) -> str:
 
 def _short_analysis(company: CompanyData) -> str:
     lines = [
-        "Вот анализ компании в 3–5 пунктах:",
-        f"1. Отрасль/ОКВЭД: {company.okved_main or 'не указано'}.",
-        f"2. Возраст: {company.age_years or 'не указано'} лет; регион: {company.region or 'не указано'}.",
-        f"3. Штат: {company.employees_count or 'не указано'}.",
-        f"4. Выручка: {company.revenue_last_year or 'не указано'}; прибыль: {company.profit_last_year or 'не указано'}.",
+        "📊 Анализ компании:",
+        f"1. Компания: {company.name or 'не указано'}",
+        f"2. ОКВЭД: {company.okved_main or 'не указано'}",
     ]
+    if company.okved_name:
+        lines[-1] += f" ({company.okved_name})"
+    lines.extend([
+        f"3. Возраст: {company.age_years or '?'} лет; регион: {company.region or 'не указано'}",
+        f"4. Штат: {company.employees_count or 'не указано'}",
+        f"5. Выручка: {_fmt_money(company.revenue_last_year)}; прибыль: {_fmt_money(company.profit_last_year)}",
+    ])
+    if company.director:
+        lines.append(f"6. Руководитель: {company.director}")
+    if company.status and company.status != "Действующая":
+        lines.append(f"⚠️ Статус: {company.status}")
     if company.licenses:
-        lines.append(f"5. Лицензии: {', '.join(company.licenses)}.")
+        lines.append(f"7. Лицензии: {', '.join(company.licenses)}")
     return "\n".join(lines)
 
 
@@ -146,3 +179,15 @@ def _mini_kp() -> str:
         ]
     )
 
+
+def _fmt_money(value: Optional[float]) -> str:
+    """Форматирование денежных сумм."""
+    if value is None:
+        return "не указано"
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f} млрд ₽"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} млн ₽"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f} тыс ₽"
+    return f"{value:.0f} ₽"

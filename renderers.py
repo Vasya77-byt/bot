@@ -198,18 +198,13 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     label = risk_label.get(result.risk_level, "Неизвестен")
 
     lines = [
-        f"🔒 Проверка безопасности",
+        "🔒 Проверка безопасности",
         f"{emoji} Уровень риска: {label}",
-        "",
-        "1️⃣ Росфинмониторинг (террор/экстремизм):",
     ]
-    if result.in_terrorist_list:
-        lines.append(f"   🔴 ВНИМАНИЕ: {result.terrorist_details}")
-    else:
-        lines.append("   ✅ Не найден в списках")
 
+    # ФССП
     lines.append("")
-    lines.append("2️⃣ ФССП (исполнительные производства):")
+    lines.append("⚖️ ФССП (исполнительные производства):")
     if result.has_enforcement:
         lines.append(f"   ⚠️ Найдено производств: {result.enforcement_count}")
         if result.enforcement_total_sum > 0:
@@ -221,13 +216,17 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     else:
         lines.append("   ✅ Исполнительных производств не найдено")
 
-    if result.is_bank:
+    # ЗЧБ (когда подключим)
+    if result.zchb_details:
         lines.append("")
-        lines.append("3️⃣ ЦБ РФ (лицензия кредитной организации):")
-        if result.bank_license_active:
-            lines.append("   ✅ Лицензия действует")
-        else:
-            lines.append(f"   🔴 {result.bank_details or 'Лицензия отозвана/ликвидирована'}")
+        lines.append("📋 ЗаЧестныйБизнес:")
+        lines.append(f"   {result.zchb_details}")
+
+    # Контур.Фокус (когда подключим)
+    if result.focus_details:
+        lines.append("")
+        lines.append("🔍 Контур.Фокус:")
+        lines.append(f"   {result.focus_details}")
 
     return "\n".join(lines)
 

@@ -104,32 +104,18 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     if data.startswith("tariff_"):
         await callback_query.answer()
         tariff_messages = {
-            "tariff_free": (
-                "🆓 Тариф Free — Бесплатно\n\n"
-                "Вы выбрали бесплатный тариф.\n"
-                "Он подключён автоматически — можете пользоваться прямо сейчас!\n\n"
-                "• 3 проверки в день\n"
-                "• Краткий отчёт + светофор\n"
-                "• Стоп-листы и суды (сводка)"
-            ),
             "tariff_start": (
                 "⭐️ Тариф Start — 490 ₽/мес\n\n"
-                "Для подключения свяжитесь с нами:\n"
-                "@support_username\n\n"
                 "• 50 проверок/день\n"
                 "• Полный отчёт, ЕГРЮЛ, Суды/ФССП, Стоп-листы"
             ),
             "tariff_pro": (
                 "💎 Тариф Pro — 1 290 ₽/мес\n\n"
-                "Для подключения свяжитесь с нами:\n"
-                "@support_username\n\n"
                 "• 300 проверок/день\n"
                 "• Всё из Start + ИИ-анализ, Связи, История, Мониторинг"
             ),
             "tariff_business": (
                 "🏆 Тариф Business — 2 490 ₽/мес\n\n"
-                "Для подключения свяжитесь с нами:\n"
-                "@support_username\n\n"
                 "• Безлимитные проверки\n"
                 "• Всё из Pro + API доступ, Массовые проверки, PDF/1С экспорт"
             ),
@@ -240,8 +226,7 @@ def _tariffs_text() -> str:
         "  ✅ PDF/1С экспорт\n"
         "\n"
         "─── 💳 Оплата ───\n"
-        "Для подключения тарифа нажмите соответствующую кнопку\n"
-        "\n"
+        "Для подключения тарифа нажмите соответствующую кнопку\n\n"
         "Цены на 15% ниже аналогов (Контур, Руспрофайл)"
     )
 
@@ -249,11 +234,12 @@ def _tariffs_text() -> str:
 def _tariffs_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🆓 Free", callback_data="tariff_free"),
             InlineKeyboardButton("⭐️ Start — 490 ₽/мес", callback_data="tariff_start"),
         ],
         [
             InlineKeyboardButton("💎 Pro — 1 290 ₽/мес", callback_data="tariff_pro"),
+        ],
+        [
             InlineKeyboardButton("🏆 Business — 2 490 ₽/мес", callback_data="tariff_business"),
         ],
     ])

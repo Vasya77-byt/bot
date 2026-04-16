@@ -1,6 +1,7 @@
+import asyncio
 import logging
 from io import BytesIO
-from typing import Optional
+from typing import Any, Optional
 
 from pyrogram import Client, filters
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
@@ -15,7 +16,7 @@ from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from parsers import ParseResult, parse_message
-from renderers import render_response
+from renderers import render_comparison, render_response
 from schemas import CompanyData
 from security_check import SecurityService
 from settings import Settings
@@ -32,7 +33,8 @@ company_service = CompanyService()
 security_service = SecurityService()
 
 # Хранение состояния пользователей (ожидание ИНН)
-_user_state: dict[int, str] = {}
+# Значение: строка (action) или dict с данными многошагового флоу
+_user_state: dict[int, Any] = {}
 
 
 def build_app(settings: Settings) -> Client:
@@ -151,6 +153,26 @@ async def handle_text_message(client: Client, message) -> None:
 
     # Если пользователь в состоянии ожидания ИНН
     pending_action = _user_state.pop(user_id, None)
+
+    # Многошаговое сравнение — шаг 2: ждём ИНН второй компании
+    if isinstance(pending_action, dict) and pending_action.get("action") == "compare_step2":
+        if parsed.inn:
+            inn1 = pending_action["inn1"]
+            inn2 = parsed.inn
+            await message.reply_text("🔍 Загружаю данные обеих компаний...")
+            company1, company2 = await asyncio.gather(
+                _fetch_company(inn1),
+                _fetch_company(inn2),
+            )
+            reply = render_comparison(company1, inn1, company2, inn2)
+            await message.reply_text(reply, disable_web_page_preview=True)
+        else:
+            await message.reply_text(
+                "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
+                "Нажмите /menu для выбора действия."
+            )
+        return
+
     if pending_action and parsed.inn:
         company = await _fetch_company(parsed.inn)
         await _dispatch_action(message, pending_action, parsed, company)
@@ -297,16 +319,12 @@ async def _dispatch_action(
         await message.reply_text(reply, disable_web_page_preview=True)
 
     elif action == "mode_client_proposal":
-        parsed_with_mode = ParseResult(
-            raw_text=parsed.raw_text,
-            inn=parsed.inn,
-            mode="client_proposal",
-            is_request=False,
-            is_proposal=False,
-            company_data=company,
+        # Шаг 1 сравнения: получили ИНН первой компании, просим вторую
+        _user_state[message.from_user.id] = {"action": "compare_step2", "inn1": parsed.inn}
+        await message.reply_text(
+            f"✅ Первая компания: {company.name if company else parsed.inn}\n\n"
+            "Теперь отправьте ИНН второй компании для сравнения:"
         )
-        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
-        await message.reply_text(reply, disable_web_page_preview=True)
 
     elif action == "mode_request":
         parsed_with_mode = ParseResult(

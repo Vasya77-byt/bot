@@ -23,6 +23,43 @@ def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: S
     return render_mixed(company, risk)
 
 
+def render_comparison(
+    company1: Optional[CompanyData], inn1: str,
+    company2: Optional[CompanyData], inn2: str,
+) -> str:
+    """Сравнение двух компаний."""
+    c1 = company1 or empty_company(inn1)
+    c2 = company2 or empty_company(inn2)
+
+    def row(label: str, v1, v2) -> str:
+        v1 = str(v1) if v1 else "—"
+        v2 = str(v2) if v2 else "—"
+        mark = "✅" if v1 == v2 else "↔️"
+        return f"{mark} {label}:\n   {v1}\n   {v2}"
+
+    lines = [
+        "🔀 Сравнение компаний",
+        "",
+        f"1️⃣ {c1.name or inn1}",
+        f"2️⃣ {c2.name or inn2}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        row("ИНН", c1.inn, c2.inn),
+        row("ОГРН", c1.ogrn, c2.ogrn),
+        row("Статус", c1.status, c2.status),
+        row("Регион", c1.region, c2.region),
+        row("ОКВЭД", c1.okved_main, c2.okved_main),
+        row("Возраст (лет)", c1.age_years, c2.age_years),
+        row("Штат", c1.employees_count, c2.employees_count),
+        row("Выручка", _fmt_money(c1.revenue_last_year), _fmt_money(c2.revenue_last_year)),
+        row("Прибыль", _fmt_money(c1.profit_last_year), _fmt_money(c2.profit_last_year)),
+        row("Руководитель", c1.director, c2.director),
+    ]
+
+    return "\n".join(lines)
+
+
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     parts = [
         "📊 Внутренний разбор: оцениваем риски по банку/115-ФЗ, структуру платежей и соответствие ОКВЭД.",

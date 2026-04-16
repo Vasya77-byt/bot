@@ -115,7 +115,11 @@ async def handle_text_message(client: Client, message) -> None:
     # Обработка Reply-кнопок (нижнее меню)
     reply_action = _match_reply_button(text)
     if reply_action:
-        # Сбрасываем предыдущее состояние
+        # Тарифы — показываем сразу, ИНН не нужен
+        if reply_action == "show_tariffs":
+            await message.reply_text(_tariffs_text())
+            return
+        # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
         _user_state[user_id] = reply_action
         await message.reply_text(_inn_prompt_text(reply_action))
@@ -162,13 +166,56 @@ async def handle_text_message(client: Client, message) -> None:
     )
 
 
+def _tariffs_text() -> str:
+    return (
+        "💎 Тарифные планы\n"
+        "\n"
+        "─── 🆓 Free ───\n"
+        "Бесплатно навсегда\n"
+        "• 3 проверки в день\n"
+        "• Краткий отчёт + светофор\n"
+        "• Стоп-листы и суды (сводка)\n"
+        "\n"
+        "─── ⭐️ Start ───\n"
+        "💰 490 ₽/мес\n"
+        "📊 50 проверок/день\n"
+        "  ✅ Полный отчёт\n"
+        "  ✅ ЕГРЮЛ\n"
+        "  ✅ Суды/ФССП\n"
+        "  ✅ Стоп-листы\n"
+        "\n"
+        "─── 💎 Pro ───\n"
+        "💰 1 290 ₽/мес\n"
+        "📊 300 проверок/день\n"
+        "  ✅ Всё из Start\n"
+        "  ✅ ИИ-анализ\n"
+        "  ✅ Связи\n"
+        "  ✅ История\n"
+        "  ✅ Мониторинг\n"
+        "\n"
+        "─── 🏆 Business ───\n"
+        "💰 2 490 ₽/мес\n"
+        "📊 Безлимитные проверки\n"
+        "  ✅ Всё из Pro\n"
+        "  ✅ API доступ\n"
+        "  ✅ Массовые проверки\n"
+        "  ✅ PDF/1С экспорт\n"
+        "\n"
+        "─── 💳 Оплата ───\n"
+        "Для подключения тарифа напишите в поддержку:\n"
+        "/support — связаться с нами\n"
+        "\n"
+        "Цены на 15% ниже аналогов (Контур, Руспрофайл)"
+    )
+
+
 def _match_reply_button(text: str) -> Optional[str]:
     """Сопоставляет текст Reply-кнопок с действиями."""
     mapping = {
         "проверка компании": "mode_internal_analysis",
         "сравнить": "mode_client_proposal",
         "профиль": "mode_request",
-        "тарифы": "mode_proposal",
+        "тарифы": "show_tariffs",
     }
     # Убираем эмодзи и лишние пробелы
     clean = text.strip()

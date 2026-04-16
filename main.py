@@ -100,6 +100,44 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     user_id = callback_query.from_user.id
     logger.info("Callback from user %s: %s", user_id, data)
 
+    # Кнопки выбора тарифа
+    if data.startswith("tariff_"):
+        await callback_query.answer()
+        tariff_messages = {
+            "tariff_free": (
+                "🆓 Тариф Free — Бесплатно\n\n"
+                "Вы выбрали бесплатный тариф.\n"
+                "Он подключён автоматически — можете пользоваться прямо сейчас!\n\n"
+                "• 3 проверки в день\n"
+                "• Краткий отчёт + светофор\n"
+                "• Стоп-листы и суды (сводка)"
+            ),
+            "tariff_start": (
+                "⭐️ Тариф Start — 490 ₽/мес\n\n"
+                "Для подключения свяжитесь с нами:\n"
+                "@support_username\n\n"
+                "• 50 проверок/день\n"
+                "• Полный отчёт, ЕГРЮЛ, Суды/ФССП, Стоп-листы"
+            ),
+            "tariff_pro": (
+                "💎 Тариф Pro — 1 290 ₽/мес\n\n"
+                "Для подключения свяжитесь с нами:\n"
+                "@support_username\n\n"
+                "• 300 проверок/день\n"
+                "• Всё из Start + ИИ-анализ, Связи, История, Мониторинг"
+            ),
+            "tariff_business": (
+                "🏆 Тариф Business — 2 490 ₽/мес\n\n"
+                "Для подключения свяжитесь с нами:\n"
+                "@support_username\n\n"
+                "• Безлимитные проверки\n"
+                "• Всё из Pro + API доступ, Массовые проверки, PDF/1С экспорт"
+            ),
+        }
+        text = tariff_messages.get(data, "Тариф не найден.")
+        await callback_query.message.reply_text(text)
+        return
+
     _user_state[user_id] = data
     await callback_query.answer()
     await callback_query.message.reply_text(_inn_prompt_text(data))
@@ -117,7 +155,7 @@ async def handle_text_message(client: Client, message) -> None:
     if reply_action:
         # Тарифы — показываем сразу, ИНН не нужен
         if reply_action == "show_tariffs":
-            await message.reply_text(_tariffs_text())
+            await message.reply_text(_tariffs_text(), reply_markup=_tariffs_keyboard())
             return
         # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
@@ -202,11 +240,23 @@ def _tariffs_text() -> str:
         "  ✅ PDF/1С экспорт\n"
         "\n"
         "─── 💳 Оплата ───\n"
-        "Для подключения тарифа напишите в поддержку:\n"
-        "/support — связаться с нами\n"
+        "Для подключения тарифа нажмите соответствующую кнопку\n"
         "\n"
         "Цены на 15% ниже аналогов (Контур, Руспрофайл)"
     )
+
+
+def _tariffs_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🆓 Free", callback_data="tariff_free"),
+            InlineKeyboardButton("⭐️ Start — 490 ₽/мес", callback_data="tariff_start"),
+        ],
+        [
+            InlineKeyboardButton("💎 Pro — 1 290 ₽/мес", callback_data="tariff_pro"),
+            InlineKeyboardButton("🏆 Business — 2 490 ₽/мес", callback_data="tariff_business"),
+        ],
+    ])
 
 
 def _match_reply_button(text: str) -> Optional[str]:

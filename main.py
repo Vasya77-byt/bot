@@ -87,11 +87,14 @@ def _inn_prompt_text(action: str) -> str:
     labels = {
         "mode_internal_analysis": "внутреннего анализа",
         "mode_client_proposal": "коммерческого предложения",
+        "mode_compare": "сравнения",
         "mode_request": "заявки",
         "mode_proposal": "предложения",
         "kp_pdf": "генерации КП (PDF)",
         "kp_png": "генерации КП (PNG)",
     }
+    if action == "mode_compare":
+        return "Отправьте ИНН первой компании (10 или 12 цифр):"
     label = labels.get(action, "обработки")
     return f"Для {label} отправьте ИНН компании (10 или 12 цифр):"
 
@@ -271,7 +274,7 @@ def _match_reply_button(text: str) -> Optional[str]:
     """Сопоставляет текст Reply-кнопок с действиями."""
     mapping = {
         "проверка компании": "mode_internal_analysis",
-        "сравнить": "mode_client_proposal",
+        "сравнить": "mode_compare",
         "профиль": "mode_request",
         "тарифы": "show_tariffs",
     }
@@ -319,6 +322,18 @@ async def _dispatch_action(
         await message.reply_text(reply, disable_web_page_preview=True)
 
     elif action == "mode_client_proposal":
+        parsed_with_mode = ParseResult(
+            raw_text=parsed.raw_text,
+            inn=parsed.inn,
+            mode="client_proposal",
+            is_request=False,
+            is_proposal=False,
+            company_data=company,
+        )
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        await message.reply_text(reply, disable_web_page_preview=True)
+
+    elif action == "mode_compare":
         # Шаг 1 сравнения: получили ИНН первой компании, просим вторую
         _user_state[message.from_user.id] = {"action": "compare_step2", "inn1": parsed.inn}
         await message.reply_text(

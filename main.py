@@ -17,7 +17,7 @@ from logging_config import setup_logging
 from parsers import ParseResult, parse_message
 from renderers import render_response
 from schemas import CompanyData
-from security_check import SecurityService, render_security_report
+from security_check import SecurityService
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -190,6 +190,18 @@ async def _dispatch_action(
     risk = assess_risk(message.text or "")
 
     if action == "mode_internal_analysis":
+        # Проверка безопасности — встраиваем в анализ
+        sec_result = None
+        if parsed.inn:
+            try:
+                sec_result = await security_service.check(
+                    inn=parsed.inn,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                )
+            except Exception as exc:
+                logger.error("Security check failed for INN %s: %s", parsed.inn, exc)
+
         parsed_with_mode = ParseResult(
             raw_text=parsed.raw_text,
             inn=parsed.inn,
@@ -198,22 +210,8 @@ async def _dispatch_action(
             is_proposal=False,
             company_data=company,
         )
-        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
+        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk, security=sec_result)
         await message.reply_text(reply, disable_web_page_preview=True)
-
-        # Проверка безопасности — добавляем к анализу компании
-        if parsed.inn:
-            try:
-                sec_result = await security_service.check(
-                    inn=parsed.inn,
-                    name=company.name if company else None,
-                    okved=company.okved_main if company else None,
-                )
-                sec_report = render_security_report(sec_result, company.name if company else None)
-                await message.reply_text(sec_report, disable_web_page_preview=True)
-            except Exception as exc:
-                logger.error("Security check failed for INN %s: %s", parsed.inn, exc)
-                await message.reply_text("⚠️ Не удалось выполнить проверку безопасности.")
 
     elif action == "mode_client_proposal":
         parsed_with_mode = ParseResult(

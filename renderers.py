@@ -3,9 +3,10 @@ from typing import Optional, Set
 from compliance import legal_note
 from parsers import ParseResult
 from schemas import CompanyData, empty_company
+from security_check import SecurityResult
 
 
-def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: Set[str]) -> str:
+def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     company = company or empty_company(parsed.inn)
 
     if parsed.is_request:
@@ -15,19 +16,27 @@ def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: S
 
     mode = (parsed.mode or "").lower()
     if mode == "internal_analysis":
-        return render_internal_analysis(company, risk)
+        return render_internal_analysis(company, risk, security)
     if mode == "client_proposal":
         return render_client_proposal(company, risk)
 
     return render_mixed(company, risk)
 
 
-def render_internal_analysis(company: CompanyData, risk: Set[str]) -> str:
+def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     parts = [
         "📊 Внутренний разбор: оцениваем риски по банку/115-ФЗ, структуру платежей и соответствие ОКВЭД.",
         _company_table(company),
-        _recommendations(company),
     ]
+
+    # Блок безопасности
+    if security:
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append(_security_block(security, company.name))
+
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+    parts.append(_recommendations(company))
+
     note = legal_note(risk)
     if note:
         parts.append(note)
@@ -178,6 +187,49 @@ def _mini_kp() -> str:
             "Следующий шаг: пришлите текущую схему/оборот/банк — предложим адаптированное решение.",
         ]
     )
+
+
+def _security_block(result: SecurityResult, company_name: Optional[str] = None) -> str:
+    """Блок безопасности для встраивания в общий отчёт."""
+    risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
+    risk_label = {"low": "Низкий", "medium": "Средний", "high": "Высокий", "critical": "Критический"}
+
+    emoji = risk_emoji.get(result.risk_level, "⚪")
+    label = risk_label.get(result.risk_level, "Неизвестен")
+
+    lines = [
+        f"🔒 Проверка безопасности",
+        f"{emoji} Уровень риска: {label}",
+        "",
+        "1️⃣ Росфинмониторинг (террор/экстремизм):",
+    ]
+    if result.in_terrorist_list:
+        lines.append(f"   🔴 ВНИМАНИЕ: {result.terrorist_details}")
+    else:
+        lines.append("   ✅ Не найден в списках")
+
+    lines.append("")
+    lines.append("2️⃣ ФССП (исполнительные производства):")
+    if result.has_enforcement:
+        lines.append(f"   ⚠️ Найдено производств: {result.enforcement_count}")
+        if result.enforcement_total_sum > 0:
+            lines.append(f"   💰 Общая сумма: {_fmt_money(result.enforcement_total_sum)}")
+        for detail in result.enforcement_details[:5]:
+            lines.append(f"   • {detail}")
+        if len(result.enforcement_details) > 5:
+            lines.append(f"   ... и ещё {len(result.enforcement_details) - 5}")
+    else:
+        lines.append("   ✅ Исполнительных производств не найдено")
+
+    if result.is_bank:
+        lines.append("")
+        lines.append("3️⃣ ЦБ РФ (лицензия кредитной организации):")
+        if result.bank_license_active:
+            lines.append("   ✅ Лицензия действует")
+        else:
+            lines.append(f"   🔴 {result.bank_details or 'Лицензия отозвана/ликвидирована'}")
+
+    return "\n".join(lines)
 
 
 def _fmt_money(value: Optional[float]) -> str:

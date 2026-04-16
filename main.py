@@ -107,6 +107,54 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     user_id = callback_query.from_user.id
     logger.info("Callback from user %s: %s", user_id, data)
 
+    # Кнопки действий под карточкой компании
+    if data.startswith("ca_"):
+        await callback_query.answer()
+        action_part = data.split(":")[0]  # ca_courts, ca_ai, etc.
+        inn_part = data.split(":")[1] if ":" in data else ""
+
+        wip_actions = {
+            "ca_courts": "⚖️ Суды",
+            "ca_fns": "🏦 ФНС",
+            "ca_ai": "🤖 ИИ-анализ",
+            "ca_egryl": "🏛 ЕГРЮЛ",
+            "ca_history": "📜 История",
+            "ca_links": "🔗 Связи",
+            "ca_invoice": "🧾 Запрос счёта",
+            "ca_proposal": "📝 Предложение",
+        }
+
+        if action_part == "ca_refresh" and inn_part:
+            _user_state[user_id] = "mode_internal_analysis"
+            await callback_query.message.reply_text("🔄 Обновляю данные...")
+            company = await company_service.fetch(inn_part)
+            from parsers import ParseResult as PR
+            parsed_refresh = PR(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                                is_request=False, is_proposal=False, company_data=company)
+            sec_result = None
+            try:
+                sec_result = await security_service.check(
+                    inn=inn_part,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                )
+            except Exception as exc:
+                logger.error("Security check failed: %s", exc)
+            from renderers import render_response as rr
+            reply = rr(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
+            await callback_query.message.reply_text(
+                reply,
+                disable_web_page_preview=True,
+                reply_markup=_company_actions_keyboard(inn_part),
+            )
+        elif action_part in wip_actions:
+            label = wip_actions[action_part]
+            await callback_query.message.reply_text(
+                f"⏳ {label} — раздел в разработке.\n"
+                f"Будет доступен после подключения ЗЧБ и Контур.Фокус."
+            )
+        return
+
     # Кнопки выбора тарифа
     if data.startswith("tariff_"):
         await callback_query.answer()
@@ -222,6 +270,32 @@ async def handle_text_message(client: Client, message) -> None:
     )
 
 
+def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
+    """Кнопки действий под карточкой компании."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 Предложение", callback_data=f"ca_proposal:{inn}"),
+            InlineKeyboardButton("🧾 Запрос счёта", callback_data=f"ca_invoice:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
+            InlineKeyboardButton("🏦 ФНС", callback_data=f"ca_fns:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("🤖 ИИ-анализ", callback_data=f"ca_ai:{inn}"),
+            InlineKeyboardButton("🏛 ЕГРЮЛ", callback_data=f"ca_egryl:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("📜 История", callback_data=f"ca_history:{inn}"),
+            InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf"),
+            InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
+        ],
+    ])
+
+
 def _tariffs_text() -> str:
     return (
         "💎 Тарифные планы\n"
@@ -333,7 +407,12 @@ async def _dispatch_action(
             company_data=company,
         )
         reply = render_response(parsed=parsed_with_mode, company=company, risk=risk, security=sec_result)
-        await message.reply_text(reply, disable_web_page_preview=True)
+        inn = parsed.inn or ""
+        await message.reply_text(
+            reply,
+            disable_web_page_preview=True,
+            reply_markup=_company_actions_keyboard(inn),
+        )
 
     elif action == "mode_client_proposal":
         parsed_with_mode = ParseResult(

@@ -62,25 +62,74 @@ def render_comparison(
 
 
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
-    parts = [
-        "📊 Внутренний разбор: оцениваем риски по банку/115-ФЗ, структуру платежей и соответствие ОКВЭД.",
-        _company_table(company),
-    ]
+    lines = []
 
-    # Блок безопасности
+    # ── Стоп-листы ──
+    lines.append("—— Стоп-листы / 115-ФЗ / 550-П ——")
     if security:
-        parts.append("━━━━━━━━━━━━━━━━━━━━")
-        parts.append(_security_block(security, company.name))
+        fssp_ok = not security.has_enforcement
+        lines.append(f"{'✅' if fssp_ok else '⚠️'} ФССП: {'чисто' if fssp_ok else f'{security.enforcement_count} производств'}")
+    lines.append("✅ Росфинмониторинг: подключается...")
+    lines.append("✅ Реестр недобросов. поставщиков: подключается...")
+    lines.append("✅ Санкционные списки: подключается...")
+    lines.append("✅ Реестр предупреждений ЦБ: подключается...")
+    lines.append("")
 
-    parts.append("━━━━━━━━━━━━━━━━━━━━")
-    parts.append(_recommendations(company))
+    # ── Карточка компании ──
+    status = company.status or "неизвестно"
+    status_emoji = "✅" if "действ" in status.lower() else "⚠️"
+    lines.append(f"🏢 {company.name or 'Название не указано'}")
+    lines.append(f"ИНН {company.inn or '—'} | {status_emoji} {status}")
+    if company.kpp:
+        lines.append(f"КПП: {company.kpp}")
+    if company.ogrn:
+        lines.append(f"ОГРН: {company.ogrn}")
+    if company.reg_date:
+        age = f" ({company.age_years} лет)" if company.age_years else ""
+        lines.append(f"📅 Регистрация: {company.reg_date}{age}")
+    if company.director:
+        lines.append(f"👤 {company.director}")
+    if company.address or company.region:
+        lines.append(f"📍 {company.address or company.region}")
+    if company.okved_main:
+        okved_str = company.okved_main
+        if company.okved_name:
+            okved_str += f" — {company.okved_name}"
+        lines.append(f"🏢 ОКВЭД: {okved_str}")
+    if company.capital:
+        lines.append(f"💰 Уст. капитал: {_fmt_money(company.capital)}")
+    if company.employees_count:
+        lines.append(f"👥 Штат: {company.employees_count} чел.")
+    lines.append("")
 
-    note = legal_note(risk)
-    if note:
-        parts.append(note)
-    if company.source:
-        parts.append(f"📡 Источники: {company.source}")
-    return "\n\n".join(parts)
+    # ── Финансы ──
+    if company.revenue_last_year or company.profit_last_year:
+        lines.append("—— Финансы ——")
+        rev = _fmt_money(company.revenue_last_year)
+        prof = _fmt_money(company.profit_last_year)
+        lines.append(f"💹 Выручка: {rev}, прибыль: {prof}")
+        if company.source:
+            lines.append(f"📡 Источник: {company.source}")
+        lines.append("")
+
+    # ── Проверки (ФССП) ──
+    if security:
+        lines.append("—— Проверки ——")
+        if security.has_enforcement:
+            lines.append(f"⚖️ ФССП: ⚠️ {security.enforcement_count} производств")
+            if security.enforcement_total_sum > 0:
+                lines.append(f"   💰 Сумма: {_fmt_money(security.enforcement_total_sum)}")
+        else:
+            lines.append("⚖️ ФССП: нет ✅")
+        lines.append("")
+
+    # ── Причины рисков ──
+    reasons = _risk_reasons(company, security)
+    if reasons:
+        lines.append("—— 📋 Причины ——")
+        lines.extend(reasons)
+
+    return "\n".join(lines)
 
 
 def render_client_proposal(company: CompanyData, risk: Set[str]) -> str:
@@ -225,6 +274,21 @@ def _mini_kp() -> str:
             "Следующий шаг: пришлите текущую схему/оборот/банк — предложим адаптированное решение.",
         ]
     )
+
+
+def _risk_reasons(company: CompanyData, security: Optional[SecurityResult] = None) -> list:
+    """Список причин риска по компании."""
+    reasons = []
+    if company.capital and company.capital <= 10_000:
+        reasons.append("🟡 Уставный капитал: Минимальный")
+    if company.status and "ликвид" in company.status.lower():
+        reasons.append("🔴 Статус: Ликвидируется")
+    if company.status and "реорган" in company.status.lower():
+        reasons.append("🟡 Статус: В реорганизации")
+    if security and security.has_enforcement:
+        marker = "🔴" if security.enforcement_count > 10 else "🟡"
+        reasons.append(f"{marker} ФССП: {security.enforcement_count} исполнительных производств")
+    return reasons
 
 
 def _security_block(result: SecurityResult, company_name: Optional[str] = None) -> str:

@@ -88,7 +88,7 @@ class FnsClient:
 
         # Адрес
         address_data = ul.get("Адрес") or {}
-        address = address_data.get("АдресПолworking") or address_data.get("Адрес")
+        address = address_data.get("АдресПолн") or address_data.get("Адрес")
         if not address and isinstance(address_data, dict):
             # Собираем адрес из частей
             parts = []
@@ -105,7 +105,7 @@ class FnsClient:
         # ОКВЭД
         okved_main = None
         okved_name = None
-        okved_data = ul.get("ОснВидДеworking") or ul.get("ОснВидДеworking")
+        okved_data = ul.get("ОснВидДеят") or ul.get("ОснВидДеятельности")
         if isinstance(okved_data, dict):
             okved_main = okved_data.get("Код")
             okved_name = okved_data.get("Текст") or okved_data.get("Наим")
@@ -117,7 +117,7 @@ class FnsClient:
         director = None
         rukovoditel = ul.get("Руководитель") or {}
         if isinstance(rukovoditel, dict):
-            fio = rukovoditel.get("ФИОПолworking") or ""
+            fio = rukovoditel.get("ФИОПолн") or ""
             if not fio:
                 parts = []
                 for k in ["Фамилия", "Имя", "Отчество"]:

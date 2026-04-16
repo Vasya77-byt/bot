@@ -40,7 +40,9 @@ class SecurityResult:
 
     def calculate_risk(self) -> None:
         """Рассчитать уровень риска."""
-        if self.enforcement_count > 10 or self.enforcement_total_sum > 10_000_000:
+        if self.enforcement_count > 20 or self.enforcement_total_sum > 50_000_000:
+            self.risk_level = "critical"
+        elif self.enforcement_count > 10 or self.enforcement_total_sum > 10_000_000:
             self.risk_level = "high"
         elif self.enforcement_count > 3 or self.enforcement_total_sum > 1_000_000:
             self.risk_level = "medium"

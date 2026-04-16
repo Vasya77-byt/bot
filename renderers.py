@@ -4,6 +4,7 @@ from compliance import legal_note
 from parsers import ParseResult
 from schemas import CompanyData, empty_company
 from security_check import SecurityResult
+from user_store import TARIFF_FEATURES, TARIFF_LABELS, UserProfile
 
 
 def render_response(parsed: ParseResult, company: Optional[CompanyData], risk: Set[str], security: Optional[SecurityResult] = None) -> str:
@@ -264,6 +265,35 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
         lines.append("")
         lines.append("🔍 Контур.Фокус:")
         lines.append(f"   {result.focus_details}")
+
+    return "\n".join(lines)
+
+
+def render_profile(profile: UserProfile) -> str:
+    """Рендер профиля пользователя."""
+    tariff_label = TARIFF_LABELS.get(profile.tariff, profile.tariff)
+    limit = profile.daily_limit()
+    remaining = profile.remaining_checks()
+    profile.reset_if_new_day()
+
+    limit_str = str(limit) if limit is not None else "∞"
+    remaining_str = str(remaining) if remaining is not None else "∞"
+
+    lines = [
+        "👤 Ваш профиль",
+        "",
+        f"Тариф: {tariff_label}",
+        f"Проверок сегодня: {profile.checks_today}/{limit_str}",
+        f"Осталось: {remaining_str}",
+        f"Всего проверок: {profile.checks_total}",
+        "",
+        "─── Возможности ───",
+    ]
+
+    features = TARIFF_FEATURES.get(profile.tariff, {})
+    for feature, enabled in features.items():
+        mark = "✅" if enabled else "❌"
+        lines.append(f"{mark} {feature}")
 
     return "\n".join(lines)
 

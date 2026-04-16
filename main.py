@@ -16,9 +16,10 @@ from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from parsers import ParseResult, parse_message
-from renderers import render_comparison, render_response
+from renderers import render_comparison, render_profile, render_response
 from schemas import CompanyData
 from security_check import SecurityService
+from user_store import UserStore
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -31,6 +32,7 @@ init_sentry()
 metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
+user_store = UserStore()
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -147,6 +149,11 @@ async def handle_text_message(client: Client, message) -> None:
         # Тарифы — показываем сразу, ИНН не нужен
         if reply_action == "show_tariffs":
             await message.reply_text(_tariffs_text(), reply_markup=_tariffs_keyboard())
+            return
+        # Профиль — показываем сразу, ИНН не нужен
+        if reply_action == "show_profile":
+            profile = user_store.get(user_id)
+            await message.reply_text(render_profile(profile))
             return
         # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
@@ -275,7 +282,7 @@ def _match_reply_button(text: str) -> Optional[str]:
     mapping = {
         "проверка компании": "mode_internal_analysis",
         "сравнить": "mode_compare",
-        "профиль": "mode_request",
+        "профиль": "show_profile",
         "тарифы": "show_tariffs",
     }
     # Убираем эмодзи и лишние пробелы
@@ -296,6 +303,13 @@ async def _dispatch_action(
 ) -> None:
     """Выполняет действие после получения ИНН."""
     risk = assess_risk(message.text or "")
+    user_id = message.from_user.id
+
+    # Проверяем лимит для действий, связанных с проверкой компании
+    if action in ("mode_internal_analysis", "mode_compare"):
+        allowed = await _check_limit_and_count(message, user_id)
+        if not allowed:
+            return
 
     if action == "mode_internal_analysis":
         # Проверка безопасности — встраиваем в анализ
@@ -376,6 +390,24 @@ async def _dispatch_action(
 
 async def _fetch_company(inn: str) -> Optional[CompanyData]:
     return await company_service.fetch(inn)
+
+
+async def _check_limit_and_count(message, user_id: int) -> bool:
+    """Проверяет лимит проверок и увеличивает счётчик.
+    Возвращает True если проверка разрешена, False — если лимит исчерпан."""
+    profile = user_store.get(user_id)
+    if not profile.can_check():
+        from user_store import TARIFF_LIMITS
+        limit = TARIFF_LIMITS.get(profile.tariff, 0)
+        await message.reply_text(
+            f"⛔️ Лимит проверок исчерпан.\n\n"
+            f"Ваш тариф: {profile.tariff.upper()} — {limit} проверок в день.\n"
+            f"Лимит обновится завтра.\n\n"
+            f"Для увеличения лимита перейдите на более высокий тариф — нажмите «Тарифы»."
+        )
+        return False
+    user_store.increment_checks(user_id)
+    return True
 
 
 def _extract_format(args: list[str]) -> str:

@@ -15,15 +15,21 @@ from company_service import CompanyService
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
+from offer import OFFER_TEXT
 from parsers import ParseResult, parse_message
+from payments_store import PaymentsStore
 from renderers import render_comparison, render_profile, render_response
+from renewal_scheduler import run_renewal_loop
 from schemas import CompanyData
 from security_check import SecurityService
-from user_store import UserStore
+from subscription import SubscriptionService
+from tochka_client import TochkaClient
+from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
 from telemetry import init_sentry
+from webhook_server import build_app as build_webhook_app, start_webhook_server
 
 
 setup_logging()
@@ -33,6 +39,10 @@ metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
 user_store = UserStore()
+payments_store = PaymentsStore()
+
+# Сервис подписок инициализируется в main() когда есть Settings
+subscription_service: Optional[SubscriptionService] = None
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -155,28 +165,14 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
         return
 
-    # Кнопки выбора тарифа
+    # Кнопки выбора тарифа — создаём платёж
     if data.startswith("tariff_"):
         await callback_query.answer()
-        tariff_messages = {
-            "tariff_start": (
-                "⭐️ Тариф Start — 490 ₽/мес\n\n"
-                "• 50 проверок/день\n"
-                "• Полный отчёт, ЕГРЮЛ, Суды/ФССП, Стоп-листы"
-            ),
-            "tariff_pro": (
-                "💎 Тариф Pro — 1 290 ₽/мес\n\n"
-                "• 300 проверок/день\n"
-                "• Всё из Start + ИИ-анализ, Связи, История, Мониторинг"
-            ),
-            "tariff_business": (
-                "🏆 Тариф Business — 2 490 ₽/мес\n\n"
-                "• Безлимитные проверки\n"
-                "• Всё из Pro + API доступ, Массовые проверки, PDF/1С экспорт"
-            ),
-        }
-        text = tariff_messages.get(data, "Тариф не найден.")
-        await callback_query.message.reply_text(text)
+        tariff = data.replace("tariff_", "")
+        if tariff not in TARIFF_PRICES:
+            await callback_query.message.reply_text("Тариф не найден.")
+            return
+        await _handle_buy_tariff(callback_query.message, user_id, tariff)
         return
 
     _user_state[user_id] = data
@@ -349,6 +345,37 @@ def _tariffs_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🏆 Business — 2 490 ₽/мес", callback_data="tariff_business"),
         ],
     ])
+
+
+async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
+    """Создаёт платёжную ссылку в Точке и отправляет пользователю кнопку оплаты."""
+    if subscription_service is None:
+        await message.reply_text(
+            "⚠️ Приём платежей пока не настроен. Обратитесь к администратору."
+        )
+        return
+
+    await message.reply_text("💳 Создаю платёжную ссылку...")
+    try:
+        link, op_id = await subscription_service.create_initial_payment(user_id, tariff)
+    except Exception as exc:
+        logger.exception("Payment creation failed: %s", exc)
+        await message.reply_text(
+            "❌ Не удалось создать платёж. Попробуйте позже или свяжитесь с поддержкой."
+        )
+        return
+
+    price = TARIFF_PRICES[tariff]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💳 Оплатить {price} ₽", url=link)],
+    ])
+    await message.reply_text(
+        f"Счёт на оплату тарифа *{tariff.upper()}* — {price} ₽/мес.\n\n"
+        "После успешной оплаты тариф активируется автоматически.\n"
+        "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
+        "Нажимая «Оплатить», вы принимаете условия /offer",
+        reply_markup=keyboard,
+    )
 
 
 def _match_reply_button(text: str) -> Optional[str]:
@@ -586,9 +613,82 @@ async def handle_kp_command(client: Client, message) -> None:
     await _send_kp_file(message, parsed, company, title, body, fmt)
 
 
+async def handle_my_subscription(client: Client, message) -> None:
+    """Показывает статус подписки."""
+    user_id = message.from_user.id
+    profile = user_store.get(user_id)
+    if profile.tariff == "free":
+        await message.reply_text(
+            "🆓 У вас бесплатный тариф Free — 3 проверки в день.\n\n"
+            "Чтобы оформить подписку, нажмите «Тарифы»."
+        )
+        return
+    expires = profile.tariff_expires_at[:10] if profile.tariff_expires_at else "—"
+    auto = "включено" if profile.auto_renew else "выключено"
+    active = "активна" if profile.is_subscription_active() else "истекла"
+    await message.reply_text(
+        f"📄 Ваша подписка\n\n"
+        f"Тариф: {profile.tariff.upper()}\n"
+        f"Статус: {active}\n"
+        f"Действует до: {expires}\n"
+        f"Автопродление: {auto}\n\n"
+        f"Отключить автопродление: /cancel_subscription\n"
+        f"Включить автопродление: /enable_subscription"
+    )
+
+
+async def handle_cancel_subscription(client: Client, message) -> None:
+    user_id = message.from_user.id
+    profile = user_store.disable_auto_renew(user_id)
+    expires = profile.tariff_expires_at[:10] if profile.tariff_expires_at else "—"
+    await message.reply_text(
+        "🔕 Автопродление отключено.\n\n"
+        f"Подписка останется активной до {expires}, затем переключится на Free.\n"
+        f"Включить обратно: /enable_subscription"
+    )
+
+
+async def handle_enable_subscription(client: Client, message) -> None:
+    user_id = message.from_user.id
+    profile = user_store.get(user_id)
+    if profile.tariff == "free" or not profile.is_subscription_active():
+        await message.reply_text(
+            "Сначала оформите подписку через «Тарифы»."
+        )
+        return
+    user_store.enable_auto_renew(user_id)
+    await message.reply_text("🔔 Автопродление включено.")
+
+
+async def handle_offer(client: Client, message) -> None:
+    await message.reply_text(OFFER_TEXT)
+
+
 def main() -> None:
+    global subscription_service
+
     settings = Settings.from_env()
     app = build_app(settings)
+
+    # Инициализация платёжного сервиса
+    webhook_runner = None
+    if settings.payments_enabled:
+        tochka = TochkaClient(
+            jwt_token=settings.tochka_jwt,
+            customer_code=settings.tochka_customer_code,
+            merchant_id=settings.tochka_merchant_id,
+            base_url=settings.tochka_base_url,
+            webhook_secret=settings.tochka_webhook_secret,
+        )
+        subscription_service = SubscriptionService(
+            tochka=tochka,
+            users=user_store,
+            payments=payments_store,
+            redirect_url=settings.payment_redirect_url,
+            fail_redirect_url=settings.payment_fail_redirect_url,
+        )
+    else:
+        logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")
 
     async def start_handler(client: Client, message) -> None:
         await message.reply_text(
@@ -599,7 +699,9 @@ def main() -> None:
             "• Нажмите кнопку ниже для нужного действия\n"
             "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
             "• /kp png <ИНН> — сгенерировать КП в PNG\n"
-            "• /menu — показать меню",
+            "• /menu — показать меню\n"
+            "• /my_subscription — статус подписки\n"
+            "• /offer — публичная оферта",
             reply_markup=_main_menu(),
         )
 
@@ -612,16 +714,63 @@ def main() -> None:
     app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
     app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
     app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+    app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
+    app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
+    app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
+    app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(
             handle_text_message,
-            filters.text & ~filters.command(["start", "help", "menu", "kp"]),
+            filters.text & ~filters.command([
+                "start", "help", "menu", "kp",
+                "my_subscription", "cancel_subscription", "enable_subscription", "offer",
+            ]),
         )
     )
 
+    async def run_all() -> None:
+        nonlocal webhook_runner
+        await app.start()
+        logger.info("Bot started (client)")
+
+        async def notify(user_id: int, text: str) -> None:
+            try:
+                await app.send_message(user_id, text)
+            except Exception as exc:
+                logger.error("Failed to notify %s: %s", user_id, exc)
+
+        tasks: list[asyncio.Task] = []
+        if subscription_service is not None:
+            web_app = build_webhook_app(
+                tochka=subscription_service.tochka,
+                subscription=subscription_service,
+                notify=notify,
+            )
+            webhook_runner = await start_webhook_server(
+                web_app, host=settings.webhook_host, port=settings.webhook_port
+            )
+            tasks.append(asyncio.create_task(
+                run_renewal_loop(subscription_service, notify=notify)
+            ))
+
+        logger.info("Bot is running. Press Ctrl+C to stop.")
+        try:
+            # Держим event loop живым — бот обслуживает хендлеры через Pyrogram dispatcher
+            stop_event = asyncio.Event()
+            await stop_event.wait()
+        finally:
+            for t in tasks:
+                t.cancel()
+            if webhook_runner is not None:
+                await webhook_runner.cleanup()
+            await app.stop()
+
     logger.info("Bot starting...")
-    app.run()
+    try:
+        asyncio.run(run_all())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped.")
 
 
 if __name__ == "__main__":

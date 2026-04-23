@@ -7,3 +7,14 @@
 .env
 .env.local
 *.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime data
+users.json
+payments.json
+*.session
+*.session-journal

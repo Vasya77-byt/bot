@@ -286,7 +286,7 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
-            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf"),
+            InlineKeyboardButton("📄 PDF", callback_data="kp_pdf"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])

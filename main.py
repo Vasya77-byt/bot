@@ -100,6 +100,10 @@ def _main_menu() -> InlineKeyboardMarkup:
                     callback_data="kp_png",
                 ),
             ],
+            [
+                InlineKeyboardButton("📞 Поддержка", callback_data="support"),
+                InlineKeyboardButton("💳 Тарифы", callback_data="show_tariffs"),
+            ],
         ]
     )
 
@@ -210,6 +214,26 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text("Тариф не найден.")
             return
         await _handle_buy_tariff(callback_query.message, user_id, tariff)
+        return
+
+    # Кнопка поддержки
+    if data == "support":
+        await callback_query.answer()
+        username = _settings.support_username if _settings else ""
+        text = (
+            f"📞 Поддержка\n\nНапишите нам: @{username}\n\nОтветим в течение рабочего дня."
+            if username else
+            "📞 Поддержка\n\nВоспользуйтесь командой /offer — там указан email для связи."
+        )
+        await callback_query.message.reply_text(text)
+        return
+
+    # Кнопка тарифов из меню
+    if data == "show_tariffs":
+        await callback_query.answer()
+        await callback_query.message.reply_text(
+            _tariffs_text(), reply_markup=_tariffs_keyboard()
+        )
         return
 
     _user_state[user_id] = data

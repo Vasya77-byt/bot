@@ -53,12 +53,9 @@ class SubscriptionService:
             save_card=True,
         )
 
-        # orderId у нас в purpose/meta не виден — восстановим формат sub_{uid}_{tariff}_{rand}
-        # TochkaClient.create_payment генерит его внутри, но не возвращает.
-        # Для истории пишем operation_id как order_id (Tochka возвращает свой id).
         self.payments.record_created(
             operation_id=result.operation_id,
-            order_id=result.operation_id,
+            order_id=result.order_id or result.operation_id,
             user_id=user_id,
             tariff=tariff,
             amount=amount,
@@ -96,8 +93,8 @@ class SubscriptionService:
             )
 
         if rec.status == "paid":
-            logger.info("Payment %s already processed", operation_id)
-            return self.users.get(rec.user_id)
+            logger.info("Payment %s already processed, skipping notify", operation_id)
+            return None
 
         self.payments.mark_paid(operation_id)
         profile = self.users.activate_subscription(
@@ -117,9 +114,16 @@ class SubscriptionService:
 
     def handle_webhook_failed(
         self, *, operation_id: str, error: str = ""
-    ) -> None:
+    ) -> bool:
+        """Помечает платёж failed. Возвращает True, если статус изменился
+        (первый вызов), False для повторных уведомлений — чтобы не дублировать."""
+        rec = self.payments.find_by_operation(operation_id)
+        if rec and rec.status == "failed":
+            logger.info("Payment %s already failed, skipping notify", operation_id)
+            return False
         self.payments.mark_failed(operation_id, error=error)
         logger.info("Payment %s marked failed: %s", operation_id, error)
+        return True
 
     async def try_renew(self, profile: UserProfile) -> tuple[bool, str]:
         """Пытается рекуррентно списать подписку.
@@ -144,7 +148,7 @@ class SubscriptionService:
 
         self.payments.record_created(
             operation_id=result.operation_id,
-            order_id=result.operation_id,
+            order_id=result.order_id or result.operation_id,
             user_id=profile.user_id,
             tariff=profile.tariff,
             amount=amount,

@@ -32,6 +32,7 @@ class PaymentResult:
     """Результат создания платежа."""
     operation_id: str
     payment_link: str
+    order_id: str = ""
     status: str = "created"
 
 
@@ -40,6 +41,7 @@ class RecurringResult:
     """Результат рекуррентного списания."""
     operation_id: str
     status: str  # "approved" | "declined" | "pending"
+    order_id: str = ""
     error_message: str = ""
 
 
@@ -140,7 +142,12 @@ class TochkaClient:
         if not link:
             raise TochkaError(f"Tochka: no paymentLink in response: {resp.text[:500]}")
 
-        return PaymentResult(operation_id=operation_id, payment_link=link, status="created")
+        return PaymentResult(
+            operation_id=operation_id,
+            payment_link=link,
+            order_id=order_id,
+            status="created",
+        )
 
     async def charge_recurring(
         self,
@@ -190,13 +197,14 @@ class TochkaClient:
             return RecurringResult(
                 operation_id=order_id,
                 status="declined",
+                order_id=order_id,
                 error_message=f"HTTP {resp.status_code}: {resp.text[:200]}",
             )
 
         data = resp.json().get("Data", {})
         op_id = data.get("operationId") or order_id
         status = (data.get("status") or "pending").lower()
-        return RecurringResult(operation_id=op_id, status=status)
+        return RecurringResult(operation_id=op_id, status=status, order_id=order_id)
 
     async def get_operation_status(self, operation_id: str) -> dict[str, Any]:
         """Запрос статуса операции — на случай пропущенного webhook'а."""

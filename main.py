@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from io import BytesIO
 from typing import Any, Optional
 
@@ -355,6 +356,15 @@ async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
         )
         return
 
+    profile = user_store.get(user_id)
+    if not profile.email:
+        await message.reply_text(
+            "📧 Перед оплатой укажите email для чека (54-ФЗ):\n\n"
+            "/set_email ваш@почта.ру\n\n"
+            "После этого снова выберите тариф."
+        )
+        return
+
     await message.reply_text("💳 Создаю платёжную ссылку...")
     try:
         link, op_id = await subscription_service.create_initial_payment(user_id, tariff)
@@ -660,6 +670,35 @@ async def handle_enable_subscription(client: Client, message) -> None:
     await message.reply_text("🔔 Автопродление включено.")
 
 
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+async def handle_set_email(client: Client, message) -> None:
+    """Сохраняет email пользователя для чеков 54-ФЗ."""
+    user_id = message.from_user.id
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        profile = user_store.get(user_id)
+        current = profile.email or "не задан"
+        await message.reply_text(
+            f"📧 Ваш email: {current}\n\n"
+            "Чтобы изменить, отправьте:\n"
+            "/set_email ваш@почта.ру\n\n"
+            "Email нужен для отправки чека по 54-ФЗ после оплаты."
+        )
+        return
+
+    email = parts[1].strip()
+    if not _EMAIL_RE.match(email):
+        await message.reply_text(
+            "⚠️ Некорректный email. Формат: /set_email user@example.com"
+        )
+        return
+
+    user_store.set_email(user_id, email)
+    await message.reply_text(f"✅ Email сохранён: {email}")
+
+
 async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
@@ -701,6 +740,7 @@ def main() -> None:
             "• /kp png <ИНН> — сгенерировать КП в PNG\n"
             "• /menu — показать меню\n"
             "• /my_subscription — статус подписки\n"
+            "• /set_email — email для чека 54-ФЗ\n"
             "• /offer — публичная оферта",
             reply_markup=_main_menu(),
         )
@@ -717,6 +757,7 @@ def main() -> None:
     app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
     app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
     app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
+    app.add_handler(MessageHandler(handle_set_email, filters.command(["set_email"])))
     app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
@@ -724,7 +765,8 @@ def main() -> None:
             handle_text_message,
             filters.text & ~filters.command([
                 "start", "help", "menu", "kp",
-                "my_subscription", "cancel_subscription", "enable_subscription", "offer",
+                "my_subscription", "cancel_subscription", "enable_subscription",
+                "set_email", "offer",
             ]),
         )
     )

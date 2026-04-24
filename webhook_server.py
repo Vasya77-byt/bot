@@ -72,14 +72,14 @@ def build_app(
                     logger.error("Notify failed: %s", exc)
 
         elif status in ("failed", "declined", "cancelled", "rejected"):
-            subscription.handle_webhook_failed(
+            changed = subscription.handle_webhook_failed(
                 operation_id=op,
                 error=str(parsed.get("raw", {}).get("errorMessage", "")),
             )
-            # Уведомляем пользователя только если можем определить его
+            # Уведомляем пользователя только если можем определить его и статус изменился
             from tochka_client import parse_order_id
             parsed_order = parse_order_id(order)
-            if parsed_order and notify:
+            if changed and parsed_order and notify:
                 user_id, tariff = parsed_order
                 try:
                     await notify(

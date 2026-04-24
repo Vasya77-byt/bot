@@ -4,12 +4,14 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 WorkingDirectory=/opt/bot
 EnvironmentFile=/opt/bot/.env
-ExecStart=/usr/bin/python3 /opt/bot/main.py
+ExecStart=/opt/bot/.venv/bin/python /opt/bot/main.py
 Restart=always
 RestartSec=10
+WatchdogSec=120
+NotifyAccess=main
 StandardOutput=append:/var/log/tg-bot.log
 StandardError=append:/var/log/tg-bot.log
 KillSignal=SIGINT

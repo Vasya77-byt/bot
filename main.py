@@ -38,6 +38,7 @@ from storage import save_file_bytes
 from metadata_store import MetadataStore
 from telemetry import init_sentry
 from webhook_server import build_app as build_webhook_app, start_webhook_server
+import sd_notify
 
 
 setup_logging()
@@ -854,10 +855,18 @@ def main() -> None:
         )
     )
 
+    async def _heartbeat_loop() -> None:
+        # systemd WatchdogSec — интервал должен быть в 2+ раза меньше WatchdogSec
+        while True:
+            sd_notify.watchdog()
+            await asyncio.sleep(30)
+
     async def run_all() -> None:
         nonlocal webhook_runner
         await app.start()
         logger.info("Bot started (client)")
+        sd_notify.ready()
+        sd_notify.status("Bot is running")
 
         async def notify(user_id: int, text: str) -> None:
             try:
@@ -865,7 +874,7 @@ def main() -> None:
             except Exception as exc:
                 logger.error("Failed to notify %s: %s", user_id, exc)
 
-        tasks: list[asyncio.Task] = []
+        tasks: list[asyncio.Task] = [asyncio.create_task(_heartbeat_loop())]
         if subscription_service is not None:
             web_app = build_webhook_app(
                 tochka=subscription_service.tochka,
@@ -885,6 +894,7 @@ def main() -> None:
             stop_event = asyncio.Event()
             await stop_event.wait()
         finally:
+            sd_notify.stopping()
             for t in tasks:
                 t.cancel()
             if webhook_runner is not None:

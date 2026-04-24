@@ -22,6 +22,13 @@ class CompanyData(BaseModel):
     kpp: Optional[str] = None
     capital: Optional[float] = None
     source: Optional[str] = None  # откуда данные: dadata, fns, sbis, mock
+    # Данные Rusprofile
+    courts_plaintiff: Optional[int] = None   # арбитраж: истец
+    courts_defendant: Optional[int] = None   # арбитраж: ответчик
+    courts_total: Optional[int] = None       # арбитраж: всего дел
+    gov_contracts_count: Optional[int] = None    # госконтракты: количество
+    gov_contracts_amount: Optional[float] = None # госконтракты: сумма
+    founders: Optional[List[str]] = None     # учредители
 
     model_config = {"frozen": True}
 

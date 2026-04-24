@@ -123,6 +123,39 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
             lines.append("⚖️ ФССП: нет ✅")
         lines.append("")
 
+    # ── Арбитраж / госконтракты (Rusprofile) ──
+    has_rp = any([
+        company.courts_total is not None,
+        company.gov_contracts_count is not None,
+        company.founders,
+    ])
+    if has_rp:
+        lines.append("—— Дополнительно (Rusprofile) ——")
+        if company.courts_total is not None:
+            if company.courts_total == 0:
+                lines.append("⚖️ Арбитраж: нет дел ✅")
+            else:
+                parts = []
+                if company.courts_plaintiff is not None:
+                    parts.append(f"истец: {company.courts_plaintiff}")
+                if company.courts_defendant is not None:
+                    parts.append(f"ответчик: {company.courts_defendant}")
+                detail = f" ({', '.join(parts)})" if parts else ""
+                marker = "🟡" if company.courts_total > 5 else "ℹ️"
+                lines.append(f"⚖️ Арбитраж: {marker} {company.courts_total} дел{detail}")
+        if company.gov_contracts_count is not None:
+            if company.gov_contracts_count == 0:
+                lines.append("🏛 Госконтракты: нет")
+            else:
+                amount_str = f" на {_fmt_money(company.gov_contracts_amount)}" if company.gov_contracts_amount else ""
+                lines.append(f"🏛 Госконтракты: {company.gov_contracts_count}{amount_str}")
+        if company.founders:
+            founders_str = ", ".join(company.founders[:3])
+            if len(company.founders) > 3:
+                founders_str += f" и ещё {len(company.founders) - 3}"
+            lines.append(f"👥 Учредители: {founders_str}")
+        lines.append("")
+
     # ── Причины рисков ──
     reasons = _risk_reasons(company, security)
     if reasons:
@@ -288,6 +321,8 @@ def _risk_reasons(company: CompanyData, security: Optional[SecurityResult] = Non
     if security and security.has_enforcement:
         marker = "🔴" if security.enforcement_count > 10 else "🟡"
         reasons.append(f"{marker} ФССП: {security.enforcement_count} исполнительных производств")
+    if company.courts_total and company.courts_total > 10:
+        reasons.append(f"🟡 Арбитраж: {company.courts_total} судебных дел")
     return reasons
 
 

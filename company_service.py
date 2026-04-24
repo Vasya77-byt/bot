@@ -10,6 +10,7 @@ from typing import Optional
 
 from dadata_client import DaDataClient
 from fns_client import FnsClient
+from rusprofile_client import RusprofileClient
 from sbis_client import SbisClient
 from schemas import CompanyData
 
@@ -21,6 +22,7 @@ class CompanyService:
         self.dadata = DaDataClient()
         self.fns = FnsClient()
         self.sbis = SbisClient()
+        self.rusprofile = RusprofileClient()
 
     async def fetch(self, inn: str) -> Optional[CompanyData]:
         """Получить данные о компании из всех доступных источников."""
@@ -52,6 +54,15 @@ class CompanyService:
                 logger.info("SBIS: found data for INN %s", inn)
         except Exception as exc:
             logger.warning("SBIS error for INN %s: %s", inn, exc)
+
+        # Rusprofile — суды, госконтракты, учредители
+        try:
+            rp_result = await self.rusprofile.fetch_company(inn)
+            if rp_result:
+                results.append(rp_result)
+                logger.info("Rusprofile: found data for INN %s", inn)
+        except Exception as exc:
+            logger.warning("Rusprofile error for INN %s: %s", inn, exc)
 
         if not results:
             logger.info("No data found for INN %s from any source", inn)
@@ -97,4 +108,10 @@ class CompanyService:
             kpp=pick("kpp"),
             capital=pick("capital"),
             source="+".join(sources) if sources else None,
+            courts_plaintiff=pick("courts_plaintiff"),
+            courts_defendant=pick("courts_defendant"),
+            courts_total=pick("courts_total"),
+            gov_contracts_count=pick("gov_contracts_count"),
+            gov_contracts_amount=pick("gov_contracts_amount"),
+            founders=pick("founders"),
         )

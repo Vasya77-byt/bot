@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import re
-from io import BytesIO
 from typing import Any, Optional
 
 from pyrogram import Client, filters
@@ -14,7 +13,6 @@ from pyrogram.types import (
 
 from company_service import CompanyService
 from compliance import assess_risk
-from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from offer import OFFER_TEXT
 from parsers import ParseResult, parse_message
@@ -34,8 +32,6 @@ from subscription import SubscriptionService
 from tochka_client import TochkaClient
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
-from storage import save_file_bytes
-from metadata_store import MetadataStore
 from telemetry import init_sentry
 from webhook_server import build_app as build_webhook_app, start_webhook_server
 import sd_notify
@@ -44,7 +40,6 @@ import sd_notify
 setup_logging()
 logger = logging.getLogger("financial-architect")
 init_sentry()
-metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
 user_store = UserStore()
@@ -88,12 +83,7 @@ def _main_menu() -> InlineKeyboardMarkup:
 def _inn_prompt_text(action: str) -> str:
     labels = {
         "mode_internal_analysis": "внутреннего анализа",
-        "mode_client_proposal": "коммерческого предложения",
         "mode_compare": "сравнения",
-        "mode_request": "заявки",
-        "mode_proposal": "предложения",
-        "kp_pdf": "генерации КП (PDF)",
-        "kp_png": "генерации КП (PNG)",
     }
     if action == "mode_compare":
         return "Отправьте ИНН первой компании (10 или 12 цифр):"
@@ -158,16 +148,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 render_fns_card(company), disable_web_page_preview=True
             )
-
-        elif action_part == "ca_invoice" and inn_part:
-            company = await _fetch_for_button(inn_part)
-            from renderers import render_request
-            await callback_query.message.reply_text(render_request(company))
-
-        elif action_part == "ca_proposal" and inn_part:
-            company = await _fetch_for_button(inn_part)
-            from renderers import render_proposal
-            await callback_query.message.reply_text(render_proposal(company))
 
         elif action_part == "ca_history":
             profile = user_store.get(user_id)
@@ -282,15 +262,6 @@ async def handle_text_message(client: Client, message) -> None:
     if not company and parsed.inn:
         company = await _fetch_company(parsed.inn, user_id)
 
-    # Проверка текстовых триггеров КП
-    lower_text = text.lower()
-    if "кп pdf" in lower_text or "kp pdf" in lower_text:
-        await _send_kp_auto(message, parsed, company, fmt="pdf")
-        return
-    if "кп png" in lower_text or "kp png" in lower_text:
-        await _send_kp_auto(message, parsed, company, fmt="png")
-        return
-
     # Если есть ИНН — анализируем
     if parsed.inn or parsed.company_data:
         risk = assess_risk(text)
@@ -308,10 +279,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📝 Предложение", callback_data=f"ca_proposal:{inn}"),
-            InlineKeyboardButton("🧾 Запрос счёта", callback_data=f"ca_invoice:{inn}"),
-        ],
-        [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
             InlineKeyboardButton("🏦 ФНС", callback_data=f"ca_fns:{inn}"),
         ],
@@ -324,7 +291,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
-            InlineKeyboardButton("📄 PDF", callback_data="kp_pdf"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])
@@ -488,18 +454,6 @@ async def _dispatch_action(
             reply_markup=_company_actions_keyboard(inn),
         )
 
-    elif action == "mode_client_proposal":
-        parsed_with_mode = ParseResult(
-            raw_text=parsed.raw_text,
-            inn=parsed.inn,
-            mode="client_proposal",
-            is_request=False,
-            is_proposal=False,
-            company_data=company,
-        )
-        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
-        await message.reply_text(reply, disable_web_page_preview=True)
-
     elif action == "mode_compare":
         # Шаг 1 сравнения: получили ИНН первой компании, просим вторую
         _user_state[message.from_user.id] = {"action": "compare_step2", "inn1": parsed.inn}
@@ -507,38 +461,6 @@ async def _dispatch_action(
             f"✅ Первая компания: {company.name if company else parsed.inn}\n\n"
             "Теперь отправьте ИНН второй компании для сравнения:"
         )
-
-    elif action == "mode_request":
-        parsed_with_mode = ParseResult(
-            raw_text=parsed.raw_text,
-            inn=parsed.inn,
-            mode=None,
-            is_request=True,
-            is_proposal=False,
-            company_data=company,
-        )
-        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
-        await message.reply_text(reply, disable_web_page_preview=True)
-
-    elif action == "mode_proposal":
-        parsed_with_mode = ParseResult(
-            raw_text=parsed.raw_text,
-            inn=parsed.inn,
-            mode=None,
-            is_request=False,
-            is_proposal=True,
-            company_data=company,
-        )
-        reply = render_response(parsed=parsed_with_mode, company=company, risk=risk)
-        await message.reply_text(reply, disable_web_page_preview=True)
-
-    elif action == "kp_pdf":
-        title, body = _kp_template()
-        await _send_kp_file(message, parsed, company, title, body, "pdf")
-
-    elif action == "kp_png":
-        title, body = _kp_template()
-        await _send_kp_file(message, parsed, company, title, body, "png")
 
 
 async def _fetch_company(inn: str, user_id: Optional[int] = None) -> Optional[CompanyData]:
@@ -564,103 +486,6 @@ async def _check_limit_and_count(message, user_id: int) -> bool:
         return False
     user_store.increment_checks(user_id)
     return True
-
-
-def _extract_format(args: list[str]) -> str:
-    return args[1].lower() if len(args) >= 2 else "pdf"
-
-
-def _extract_inn_arg(args: list[str]) -> Optional[str]:
-    return args[2] if len(args) >= 3 else None
-
-
-async def _resolve_company(text: str, inn_arg: Optional[str]) -> Optional[CompanyData]:
-    parsed: ParseResult = parse_message(text)
-    if parsed.company_data:
-        return parsed.company_data
-
-    inn = inn_arg or parsed.inn
-    if not inn:
-        return None
-
-    return await _fetch_company(inn)
-
-
-def _kp_template() -> tuple[str, str]:
-    title = "Коммерческое предложение"
-    body = (
-        "— Индивидуальная настройка РКО и платежной архитектуры.\n"
-        "— Согласование лимитов и назначений, чтобы не ловить стопы.\n"
-        "— Сопровождение по комплаенсу и ответы на запросы банка.\n"
-        "— Канал связи с менеджером и быстрые консультации по операциям."
-    )
-    return title, body
-
-
-def _kp_filename(company: Optional[CompanyData], parsed: ParseResult, ext: str) -> str:
-    inn = None
-    if company and company.inn:
-        inn = company.inn
-    elif parsed.inn:
-        inn = parsed.inn
-    suffix = inn or "unknown"
-    return f"kp_{suffix}.{ext}"
-
-
-async def _send_kp_auto(message, parsed: ParseResult, company: Optional[CompanyData], fmt: str) -> None:
-    title, body = _kp_template()
-    await _send_kp_file(message, parsed, company, title, body, fmt)
-
-
-async def _send_kp_file(
-    message,
-    parsed: ParseResult,
-    company: Optional[CompanyData],
-    title: str,
-    body: str,
-    fmt: str,
-) -> None:
-    filename = _kp_filename(company, parsed, fmt)
-    if fmt == "png":
-        content = build_kp_png(title, body, company)
-        save_file_bytes(content, filename)
-        metadata_store.append(filename, company, "png")
-        photo = BytesIO(content)
-        photo.name = filename
-        await message.reply_photo(photo, caption="Ваше КП (PNG)")
-    else:
-        content = build_kp_pdf(title, body, company)
-        save_file_bytes(content, filename)
-        metadata_store.append(filename, company, "pdf")
-        doc = BytesIO(content)
-        doc.name = filename
-        await message.reply_document(document=doc, file_name=filename, caption="Ваше КП (PDF)")
-
-
-async def handle_kp_command(client: Client, message) -> None:
-    """
-    Команда: /kp <pdf|png> <ИНН?>
-    Если ИНН не указан — просим прислать.
-    """
-    text = message.text or ""
-    args = text.split()
-    fmt = _extract_format(args)
-    inn = _extract_inn_arg(args)
-
-    if not inn:
-        parsed = parse_message(text)
-        inn = parsed.inn
-
-    if not inn:
-        action = "kp_pdf" if fmt == "pdf" else "kp_png"
-        _user_state[message.from_user.id] = action
-        await message.reply_text("Для генерации КП отправьте ИНН компании (10 или 12 цифр):")
-        return
-
-    company = await _fetch_company(inn)
-    parsed = parse_message(text)
-    title, body = _kp_template()
-    await _send_kp_file(message, parsed, company, title, body, fmt)
 
 
 async def handle_my_subscription(client: Client, message) -> None:
@@ -790,12 +615,10 @@ def main() -> None:
     async def start_handler(client: Client, message) -> None:
         await message.reply_text(
             "👋 Финансовый архитектор онлайн!\n\n"
-            "Я помогу с анализом компаний и подготовкой КП.\n\n"
+            "Я помогу с анализом компаний.\n\n"
             "Что умею:\n"
             "• Отправьте ИНН — получите анализ компании\n"
             "• Нажмите кнопку ниже для нужного действия\n"
-            "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
-            "• /kp png <ИНН> — сгенерировать КП в PNG\n"
             "• /menu — показать меню\n"
             "• /my_subscription — статус подписки\n"
             "• /set_email — email для чека 54-ФЗ\n"
@@ -812,7 +635,6 @@ def main() -> None:
 
     app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
     app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
     app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
     app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
     app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
@@ -824,7 +646,7 @@ def main() -> None:
         MessageHandler(
             handle_text_message,
             filters.text & ~filters.command([
-                "start", "help", "menu", "kp",
+                "start", "help", "menu",
                 "my_subscription", "cancel_subscription", "enable_subscription",
                 "set_email", "offer", "support",
             ]),

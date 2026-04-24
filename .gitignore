@@ -17,4 +17,6 @@ __pycache__/
 users.json
 payments.json
 *.session
+*.session.bak
 *.session-journal
+*.log

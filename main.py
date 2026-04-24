@@ -19,9 +19,16 @@ from logging_config import setup_logging
 from offer import OFFER_TEXT
 from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
-from renderers import render_comparison, render_profile, render_response
+from renderers import (
+    render_checks_history,
+    render_comparison,
+    render_egryl,
+    render_fns_card,
+    render_profile,
+    render_response,
+)
 from renewal_scheduler import run_renewal_loop
-from schemas import CompanyData
+from schemas import CompanyData, empty_company
 from security_check import SecurityService
 from subscription import SubscriptionService
 from tochka_client import TochkaClient
@@ -42,8 +49,9 @@ security_service = SecurityService()
 user_store = UserStore()
 payments_store = PaymentsStore()
 
-# Сервис подписок инициализируется в main() когда есть Settings
+# Сервис подписок и настройки инициализируются в main()
 subscription_service: Optional[SubscriptionService] = None
+_settings: Optional[Settings] = None
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -126,14 +134,13 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
 
         wip_actions = {
             "ca_courts": "⚖️ Суды",
-            "ca_fns": "🏦 ФНС",
             "ca_ai": "🤖 ИИ-анализ",
-            "ca_egryl": "🏛 ЕГРЮЛ",
-            "ca_history": "📜 История",
-            "ca_links": "🔗 Связи",
-            "ca_invoice": "🧾 Запрос счёта",
-            "ca_proposal": "📝 Предложение",
+            "ca_links": "🔗 Связи компании",
         }
+
+        async def _fetch_for_button(inn: str):
+            c = await company_service.fetch(inn)
+            return c or empty_company(inn)
 
         if action_part == "ca_refresh" and inn_part:
             _user_state[user_id] = "mode_internal_analysis"
@@ -158,11 +165,40 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 disable_web_page_preview=True,
                 reply_markup=_company_actions_keyboard(inn_part),
             )
+
+        elif action_part == "ca_egryl" and inn_part:
+            company = await _fetch_for_button(inn_part)
+            await callback_query.message.reply_text(
+                render_egryl(company), disable_web_page_preview=True
+            )
+
+        elif action_part == "ca_fns" and inn_part:
+            company = await _fetch_for_button(inn_part)
+            await callback_query.message.reply_text(
+                render_fns_card(company), disable_web_page_preview=True
+            )
+
+        elif action_part == "ca_invoice" and inn_part:
+            company = await _fetch_for_button(inn_part)
+            from renderers import render_request
+            await callback_query.message.reply_text(render_request(company))
+
+        elif action_part == "ca_proposal" and inn_part:
+            company = await _fetch_for_button(inn_part)
+            from renderers import render_proposal
+            await callback_query.message.reply_text(render_proposal(company))
+
+        elif action_part == "ca_history":
+            profile = user_store.get(user_id)
+            await callback_query.message.reply_text(
+                render_checks_history(profile.checks_history)
+            )
+
         elif action_part in wip_actions:
             label = wip_actions[action_part]
             await callback_query.message.reply_text(
                 f"⏳ {label} — раздел в разработке.\n"
-                f"Будет доступен после подключения ЗЧБ и Контур.Фокус."
+                f"Будет доступен в следующих обновлениях."
             )
         return
 
@@ -216,8 +252,8 @@ async def handle_text_message(client: Client, message) -> None:
             inn2 = parsed.inn
             await message.reply_text("🔍 Загружаю данные обеих компаний...")
             company1, company2 = await asyncio.gather(
-                _fetch_company(inn1),
-                _fetch_company(inn2),
+                _fetch_company(inn1, user_id),
+                _fetch_company(inn2, user_id),
             )
             reply = render_comparison(company1, inn1, company2, inn2)
             await message.reply_text(reply, disable_web_page_preview=True)
@@ -229,7 +265,7 @@ async def handle_text_message(client: Client, message) -> None:
         return
 
     if pending_action and parsed.inn:
-        company = await _fetch_company(parsed.inn)
+        company = await _fetch_company(parsed.inn, user_id)
         await _dispatch_action(message, pending_action, parsed, company)
         return
     elif pending_action and not parsed.inn:
@@ -243,7 +279,7 @@ async def handle_text_message(client: Client, message) -> None:
     # Обычная обработка текста с ИНН
     company = parsed.company_data
     if not company and parsed.inn:
-        company = await _fetch_company(parsed.inn)
+        company = await _fetch_company(parsed.inn, user_id)
 
     # Проверка текстовых триггеров КП
     lower_text = text.lower()
@@ -504,8 +540,11 @@ async def _dispatch_action(
         await _send_kp_file(message, parsed, company, title, body, "png")
 
 
-async def _fetch_company(inn: str) -> Optional[CompanyData]:
-    return await company_service.fetch(inn)
+async def _fetch_company(inn: str, user_id: Optional[int] = None) -> Optional[CompanyData]:
+    company = await company_service.fetch(inn)
+    if company and user_id:
+        user_store.add_to_history(user_id, inn, company.name or inn)
+    return company
 
 
 async def _check_limit_and_count(message, user_id: int) -> bool:
@@ -703,10 +742,28 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+async def handle_support(client: Client, message) -> None:
+    username = _settings.support_username if _settings else ""
+    if username:
+        text = (
+            f"📞 Поддержка\n\n"
+            f"Напишите нам: @{username}\n\n"
+            f"Мы ответим в течение рабочего дня."
+        )
+    else:
+        text = (
+            "📞 Поддержка\n\n"
+            "Для обращений по работе бота и вопросам подписки "
+            "воспользуйтесь командой /offer — там указан email для связи."
+        )
+    await message.reply_text(text)
+
+
 def main() -> None:
-    global subscription_service
+    global subscription_service, _settings
 
     settings = Settings.from_env()
+    _settings = settings
     app = build_app(settings)
 
     # Инициализация платёжного сервиса
@@ -741,7 +798,8 @@ def main() -> None:
             "• /menu — показать меню\n"
             "• /my_subscription — статус подписки\n"
             "• /set_email — email для чека 54-ФЗ\n"
-            "• /offer — публичная оферта",
+            "• /offer — публичная оферта\n"
+            "• /support — связаться с поддержкой",
             reply_markup=_main_menu(),
         )
 
@@ -759,6 +817,7 @@ def main() -> None:
     app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
     app.add_handler(MessageHandler(handle_set_email, filters.command(["set_email"])))
     app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+    app.add_handler(MessageHandler(handle_support, filters.command(["support"])))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(
@@ -766,7 +825,7 @@ def main() -> None:
             filters.text & ~filters.command([
                 "start", "help", "menu", "kp",
                 "my_subscription", "cancel_subscription", "enable_subscription",
-                "set_email", "offer",
+                "set_email", "offer", "support",
             ]),
         )
     )

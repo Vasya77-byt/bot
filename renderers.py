@@ -69,10 +69,10 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
     if security:
         fssp_ok = not security.has_enforcement
         lines.append(f"{'✅' if fssp_ok else '⚠️'} ФССП: {'чисто' if fssp_ok else f'{security.enforcement_count} производств'}")
-    lines.append("✅ Росфинмониторинг: подключается...")
-    lines.append("✅ Реестр недобросов. поставщиков: подключается...")
-    lines.append("✅ Санкционные списки: подключается...")
-    lines.append("✅ Реестр предупреждений ЦБ: подключается...")
+    lines.append("🔄 Росфинмониторинг: в разработке")
+    lines.append("🔄 РНП (недобросовестные поставщики): в разработке")
+    lines.append("🔄 Санкционные списки: в разработке")
+    lines.append("🔄 Реестр предупреждений ЦБ: в разработке")
     lines.append("")
 
     # ── Карточка компании ──
@@ -359,6 +359,119 @@ def render_profile(profile: UserProfile) -> str:
         mark = "✅" if enabled else "❌"
         lines.append(f"{mark} {feature}")
 
+    return "\n".join(lines)
+
+
+def render_egryl(company: CompanyData) -> str:
+    """Полная карточка ЕГРЮЛ."""
+    status = company.status or "—"
+    status_emoji = "✅" if "действ" in status.lower() else "⚠️"
+
+    lines = [
+        "🏛 Выписка ЕГРЮЛ",
+        "",
+        f"{status_emoji} {status}",
+        "",
+        "─── Реквизиты ───",
+        f"📋 {company.name or '—'}",
+        f"ИНН:  {company.inn or '—'}",
+    ]
+    if company.ogrn:
+        lines.append(f"ОГРН: {company.ogrn}")
+    if company.kpp:
+        lines.append(f"КПП:  {company.kpp}")
+    if company.reg_date:
+        age = f" ({company.age_years} лет)" if company.age_years else ""
+        lines.append(f"📅 Дата регистрации: {company.reg_date}{age}")
+    lines.append("")
+
+    lines.append("─── Адрес ───")
+    lines.append(f"📍 {company.address or company.region or '—'}")
+    lines.append("")
+
+    lines.append("─── Руководство ───")
+    lines.append(f"👤 {company.director or '—'}")
+    lines.append("")
+
+    lines.append("─── Деятельность ───")
+    okved_str = company.okved_main or "—"
+    if company.okved_name:
+        okved_str += f"\n   {company.okved_name}"
+    lines.append(f"ОКВЭД: {okved_str}")
+    if company.employees_count:
+        lines.append(f"👥 Штат: {company.employees_count} чел.")
+    if company.capital:
+        lines.append(f"💰 Уставный капитал: {_fmt_money(company.capital)}")
+    if company.licenses:
+        lines.append(f"📜 Лицензии: {', '.join(company.licenses)}")
+    lines.append("")
+
+    if company.source:
+        lines.append(f"📡 Источник данных: {company.source.upper()}")
+
+    return "\n".join(lines)
+
+
+def render_fns_card(company: CompanyData) -> str:
+    """Карточка с акцентом на налоговые и регистрационные данные."""
+    status = company.status or "—"
+    status_emoji = "✅" if "действ" in status.lower() else "⚠️"
+
+    lines = [
+        "🏦 Данные ФНС России",
+        "",
+        f"📋 {company.name or '—'}",
+        f"ИНН: {company.inn or '—'} | ОГРН: {company.ogrn or '—'}",
+        "",
+        "─── Регистрация ───",
+        f"{status_emoji} Статус: {status}",
+    ]
+    if company.reg_date:
+        age = f" ({company.age_years} лет)" if company.age_years else ""
+        lines.append(f"📅 Дата регистрации: {company.reg_date}{age}")
+    lines.append("")
+
+    lines.append("─── ОКВЭД ───")
+    if company.okved_main:
+        okved_str = company.okved_main
+        if company.okved_name:
+            okved_str += f" — {company.okved_name}"
+        lines.append(f"• Основной: {okved_str}")
+    else:
+        lines.append("• Нет данных")
+    lines.append("")
+
+    has_fin = company.capital or company.revenue_last_year or company.profit_last_year
+    if has_fin:
+        lines.append("─── Финансы ───")
+        if company.capital:
+            lines.append(f"💰 Уставный капитал: {_fmt_money(company.capital)}")
+        if company.revenue_last_year:
+            lines.append(f"💹 Выручка: {_fmt_money(company.revenue_last_year)}")
+        if company.profit_last_year:
+            lines.append(f"📈 Прибыль: {_fmt_money(company.profit_last_year)}")
+        lines.append("")
+
+    lines.append("─── Контакты ───")
+    lines.append(f"📍 {company.address or company.region or '—'}")
+    lines.append(f"👤 Руководитель: {company.director or '—'}")
+
+    return "\n".join(lines)
+
+
+def render_checks_history(history: list) -> str:
+    """История последних проверок пользователя."""
+    if not history:
+        return "📜 История проверок пуста.\n\nОтправьте ИНН компании, чтобы начать."
+
+    lines = [f"📜 История проверок (последние {len(history)}):"]
+    lines.append("")
+    for i, entry in enumerate(reversed(history), 1):
+        name = entry.get("name") or "—"
+        inn = entry.get("inn") or "—"
+        date = (entry.get("date") or "")[:10] or "—"
+        lines.append(f"{i}. {name}")
+        lines.append(f"   ИНН: {inn} | {date}")
     return "\n".join(lines)
 
 

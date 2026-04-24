@@ -11,7 +11,7 @@
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
@@ -117,6 +117,7 @@ class UserProfile:
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
     email: str = ""                  # email для чека
+    checks_history: list = field(default_factory=list)  # последние 10 проверок
 
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
@@ -282,6 +283,19 @@ class UserStore:
             profile.auto_renew = False
         self.save_profile(profile)
         return profile
+
+    def add_to_history(self, user_id: int, inn: str, name: str) -> None:
+        """Добавляет запись в историю проверок (не более 10)."""
+        profile = self.get(user_id)
+        entry = {
+            "inn": inn,
+            "name": name,
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        }
+        history = [e for e in profile.checks_history if e.get("inn") != inn]
+        history.append(entry)
+        profile.checks_history = history[-10:]
+        self.save_profile(profile)
 
     def iter_profiles(self):
         """Итератор по всем профилям (для планировщика)."""

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import signal
 from io import BytesIO
 from typing import Any, Optional
 
@@ -775,23 +776,30 @@ def main() -> None:
                 run_renewal_loop(subscription_service, notify=notify)
             ))
 
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
+
         logger.info("Bot is running. Press Ctrl+C to stop.")
+        await stop_event.wait()
+
+        for t in tasks:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        if webhook_runner is not None:
+            await webhook_runner.cleanup()
         try:
-            # Держим event loop живым — бот обслуживает хендлеры через Pyrogram dispatcher
-            stop_event = asyncio.Event()
-            await stop_event.wait()
-        finally:
-            for t in tasks:
-                t.cancel()
-            if webhook_runner is not None:
-                await webhook_runner.cleanup()
             await app.stop()
+        except RuntimeError:
+            pass
+        logger.info("Bot stopped.")
 
     logger.info("Bot starting...")
-    try:
-        asyncio.run(run_all())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped.")
+    asyncio.run(run_all())
 
 
 if __name__ == "__main__":

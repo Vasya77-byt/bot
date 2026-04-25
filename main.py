@@ -590,7 +590,6 @@ def main() -> None:
 
     settings = Settings.from_env()
     _settings = settings
-    app = build_app(settings)
 
     # Инициализация платёжного сервиса
     webhook_runner = None
@@ -633,26 +632,6 @@ def main() -> None:
             reply_markup=_main_menu(),
         )
 
-    app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
-    app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
-    app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
-    app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
-    app.add_handler(MessageHandler(handle_set_email, filters.command(["set_email"])))
-    app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
-    app.add_handler(MessageHandler(handle_support, filters.command(["support"])))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(
-        MessageHandler(
-            handle_text_message,
-            filters.text & ~filters.command([
-                "start", "help", "menu",
-                "my_subscription", "cancel_subscription", "enable_subscription",
-                "set_email", "offer", "support",
-            ]),
-        )
-    )
-
     async def _heartbeat_loop() -> None:
         # systemd WatchdogSec — интервал должен быть в 2+ раза меньше WatchdogSec
         while True:
@@ -661,6 +640,30 @@ def main() -> None:
 
     async def run_all() -> None:
         nonlocal webhook_runner
+        # Client создаётся ВНУТРИ event loop, иначе dispatcher tasks
+        # окажутся на другом loop и не будут вызываться (Pyrogram баг с asyncio.run)
+        app = build_app(settings)
+
+        app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
+        app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
+        app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
+        app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
+        app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
+        app.add_handler(MessageHandler(handle_set_email, filters.command(["set_email"])))
+        app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+        app.add_handler(MessageHandler(handle_support, filters.command(["support"])))
+        app.add_handler(CallbackQueryHandler(handle_callback))
+        app.add_handler(
+            MessageHandler(
+                handle_text_message,
+                filters.text & ~filters.command([
+                    "start", "help", "menu",
+                    "my_subscription", "cancel_subscription", "enable_subscription",
+                    "set_email", "offer", "support",
+                ]),
+            )
+        )
+
         await app.start()
         logger.info("Bot started (client)")
         sd_notify.ready()

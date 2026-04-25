@@ -1,7 +1,7 @@
 """Единый сервис получения данных о компании.
 
-Объединяет данные из DaData, API ФНС и СБИС.
-Приоритет: DaData (база) → FNS (официальные) → SBIS (финансы).
+Объединяет данные из DaData, API ФНС и Руспрофайл.
+Приоритет: DaData (база) → FNS (официальные) → Rusprofile (финансы + доп. данные).
 Данные мержатся — пустые поля одного источника заполняются из другого.
 """
 
@@ -10,7 +10,7 @@ from typing import Optional
 
 from dadata_client import DaDataClient
 from fns_client import FnsClient
-from sbis_client import SbisClient
+from rusprofile_client import RusprofileClient
 from schemas import CompanyData
 
 logger = logging.getLogger("financial-architect")
@@ -20,7 +20,7 @@ class CompanyService:
     def __init__(self) -> None:
         self.dadata = DaDataClient()
         self.fns = FnsClient()
-        self.sbis = SbisClient()
+        self.rusprofile = RusprofileClient()
 
     async def fetch(self, inn: str) -> Optional[CompanyData]:
         """Получить данные о компании из всех доступных источников."""
@@ -44,14 +44,14 @@ class CompanyService:
         except Exception as exc:
             logger.warning("FNS error for INN %s: %s", inn, exc)
 
-        # СБИС — финансовые данные (если настроен)
+        # Руспрофайл — финансовые данные и дополнительная информация
         try:
-            sbis_result = await self.sbis.fetch_company_data(inn)
-            if sbis_result:
-                results.append(sbis_result)
-                logger.info("SBIS: found data for INN %s", inn)
+            rusprofile_result = await self.rusprofile.fetch_company(inn)
+            if rusprofile_result:
+                results.append(rusprofile_result)
+                logger.info("Rusprofile: found data for INN %s", inn)
         except Exception as exc:
-            logger.warning("SBIS error for INN %s: %s", inn, exc)
+            logger.warning("Rusprofile error for INN %s: %s", inn, exc)
 
         if not results:
             logger.info("No data found for INN %s from any source", inn)

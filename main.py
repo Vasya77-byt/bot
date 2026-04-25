@@ -704,8 +704,6 @@ def main() -> None:
     global subscription_service
 
     settings = Settings.from_env()
-    app = build_app(settings)
-
     # Инициализация платёжного сервиса
     webhook_runner = None
     if settings.payments_enabled:
@@ -726,48 +724,52 @@ def main() -> None:
     else:
         logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")
 
-    async def start_handler(client: Client, message) -> None:
-        await message.reply_text(
-            "👋 Финансовый архитектор онлайн!\n\n"
-            "Я помогу с анализом компаний и подготовкой КП.\n\n"
-            "Что умею:\n"
-            "• Отправьте ИНН — получите анализ компании\n"
-            "• Нажмите кнопку ниже для нужного действия\n"
-            "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
-            "• /kp png <ИНН> — сгенерировать КП в PNG\n"
-            "• /menu — показать меню\n"
-            "• /my_subscription — статус подписки\n"
-            "• /offer — публичная оферта\n\n"
-            "По всем вопросам: @YRS75",
-            reply_markup=_main_menu(),
-        )
-
-    async def menu_handler(client: Client, message) -> None:
-        await message.reply_text(
-            "Выберите действие:",
-            reply_markup=_main_menu(),
-        )
-
-    app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
-    app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
-    app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
-    app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
-    app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
-    app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(
-        MessageHandler(
-            handle_text_message,
-            filters.text & ~filters.command([
-                "start", "help", "menu", "kp",
-                "my_subscription", "cancel_subscription", "enable_subscription", "offer",
-            ]),
-        )
-    )
-
     async def run_all() -> None:
         nonlocal webhook_runner
+        # Client создаётся ВНУТРИ event loop — иначе dispatcher tasks
+        # окажутся на другом loop и не будут вызываться (Pyrogram + asyncio.run)
+        app = build_app(settings)
+
+        async def start_handler(client: Client, message) -> None:
+            await message.reply_text(
+                "👋 Финансовый архитектор онлайн!\n\n"
+                "Я помогу с анализом компаний и подготовкой КП.\n\n"
+                "Что умею:\n"
+                "• Отправьте ИНН — получите анализ компании\n"
+                "• Нажмите кнопку ниже для нужного действия\n"
+                "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
+                "• /kp png <ИНН> — сгенерировать КП в PNG\n"
+                "• /menu — показать меню\n"
+                "• /my_subscription — статус подписки\n"
+                "• /offer — публичная оферта\n\n"
+                "По всем вопросам: @YRS75",
+                reply_markup=_main_menu(),
+            )
+
+        async def menu_handler(client: Client, message) -> None:
+            await message.reply_text(
+                "Выберите действие:",
+                reply_markup=_main_menu(),
+            )
+
+        app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
+        app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
+        app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+        app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
+        app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
+        app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
+        app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+        app.add_handler(CallbackQueryHandler(handle_callback))
+        app.add_handler(
+            MessageHandler(
+                handle_text_message,
+                filters.text & ~filters.command([
+                    "start", "help", "menu", "kp",
+                    "my_subscription", "cancel_subscription", "enable_subscription", "offer",
+                ]),
+            )
+        )
+
         await app.start()
         logger.info("Bot started (client)")
 

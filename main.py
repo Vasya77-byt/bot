@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import signal
+import socket
 from io import BytesIO
 from typing import Any, Optional
 
@@ -35,6 +37,19 @@ from webhook_server import build_app as build_webhook_app, start_webhook_server
 
 setup_logging()
 logger = logging.getLogger("financial-architect")
+
+
+def _sd_notify(state: str) -> None:
+    """Отправляет уведомление systemd через NOTIFY_SOCKET."""
+    sock_path = os.getenv("NOTIFY_SOCKET")
+    if not sock_path:
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(sock_path)
+            s.sendall(state.encode())
+    except OSError:
+        pass
 init_sentry()
 metadata_store = MetadataStore()
 company_service = CompanyService()
@@ -781,7 +796,15 @@ def main() -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop_event.set)
 
+        _sd_notify("READY=1\nSTATUS=Bot is running")
         logger.info("Bot is running. Press Ctrl+C to stop.")
+
+        async def watchdog_loop() -> None:
+            while not stop_event.is_set():
+                _sd_notify("WATCHDOG=1")
+                await asyncio.sleep(30)
+
+        tasks.append(asyncio.create_task(watchdog_loop()))
         await stop_event.wait()
 
         for t in tasks:

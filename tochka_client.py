@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ logger = logging.getLogger("financial-architect")
 class PaymentResult:
     """Результат создания платежа."""
     operation_id: str
+    order_id: str
     payment_link: str
     status: str = "created"
 
@@ -141,7 +141,7 @@ class TochkaClient:
         if not link:
             raise TochkaError(f"Tochka: no paymentLink in response: {resp.text[:500]}")
 
-        return PaymentResult(operation_id=operation_id, payment_link=link, status="created")
+        return PaymentResult(operation_id=operation_id, order_id=order_id, payment_link=link, status="created")
 
     async def charge_recurring(
         self,

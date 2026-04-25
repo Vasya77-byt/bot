@@ -53,12 +53,9 @@ class SubscriptionService:
             save_card=True,
         )
 
-        # orderId у нас в purpose/meta не виден — восстановим формат sub_{uid}_{tariff}_{rand}
-        # TochkaClient.create_payment генерит его внутри, но не возвращает.
-        # Для истории пишем operation_id как order_id (Tochka возвращает свой id).
         self.payments.record_created(
             operation_id=result.operation_id,
-            order_id=result.operation_id,
+            order_id=result.order_id,
             user_id=user_id,
             tariff=tariff,
             amount=amount,

@@ -24,7 +24,7 @@ from schemas import CompanyData
 from security_check import SecurityService
 from subscription import SubscriptionService
 from tochka_client import TochkaClient
-from user_store import TARIFF_PRICES, UserStore
+from user_store import TARIFF_LIMITS, TARIFF_PRICES, UserStore
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -165,6 +165,20 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
         return
 
+    # Кнопки генерации КП из карточки компании (содержат ИНН в callback)
+    if data.startswith("kp_") and ":" in data:
+        await callback_query.answer()
+        action, inn_part = data.split(":", 1)
+        if inn_part:
+            from parsers import ParseResult as PR
+            parsed_kp = PR(raw_text=inn_part, inn=inn_part, mode=None,
+                           is_request=False, is_proposal=False)
+            company = await company_service.fetch(inn_part)
+            fmt = "pdf" if action == "kp_pdf" else "png"
+            title, body = _kp_template()
+            await _send_kp_file(callback_query.message, parsed_kp, company, title, body, fmt)
+        return
+
     # Кнопки выбора тарифа — создаём платёж
     if data.startswith("tariff_"):
         await callback_query.answer()
@@ -286,7 +300,7 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
-            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf"),
+            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf:{inn}"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])
@@ -503,11 +517,11 @@ async def _check_limit_and_count(message, user_id: int) -> bool:
     Возвращает True если проверка разрешена, False — если лимит исчерпан."""
     profile = user_store.get(user_id)
     if not profile.can_check():
-        from user_store import TARIFF_LIMITS
-        limit = TARIFF_LIMITS.get(profile.tariff, 0)
+        effective = profile.effective_tariff()
+        limit = TARIFF_LIMITS.get(effective, 0)
         await message.reply_text(
             f"⛔️ Лимит проверок исчерпан.\n\n"
-            f"Ваш тариф: {profile.tariff.upper()} — {limit} проверок в день.\n"
+            f"Ваш тариф: {effective.upper()} — {limit} проверок в день.\n"
             f"Лимит обновится завтра.\n\n"
             f"Для увеличения лимита перейдите на более высокий тариф — нажмите «Тарифы»."
         )

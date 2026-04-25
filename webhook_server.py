@@ -13,7 +13,7 @@ from typing import Awaitable, Callable, Optional
 from aiohttp import web
 
 from subscription import SubscriptionService
-from tochka_client import TochkaClient
+from tochka_client import TochkaClient, parse_order_id
 
 logger = logging.getLogger("financial-architect")
 
@@ -77,7 +77,6 @@ def build_app(
                 error=str(parsed.get("raw", {}).get("errorMessage", "")),
             )
             # Уведомляем пользователя только если можем определить его
-            from tochka_client import parse_order_id
             parsed_order = parse_order_id(order)
             if parsed_order and notify:
                 user_id, tariff = parsed_order

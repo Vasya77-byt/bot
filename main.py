@@ -91,6 +91,12 @@ def _main_menu() -> InlineKeyboardMarkup:
                     callback_data="kp_png",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    "🆘 Поддержка",
+                    url="https://t.me/YRS75",
+                ),
+            ],
         ]
     )
 
@@ -715,7 +721,8 @@ def main() -> None:
             "• /kp png <ИНН> — сгенерировать КП в PNG\n"
             "• /menu — показать меню\n"
             "• /my_subscription — статус подписки\n"
-            "• /offer — публичная оферта",
+            "• /offer — публичная оферта\n\n"
+            "По всем вопросам: @YRS75",
             reply_markup=_main_menu(),
         )
 

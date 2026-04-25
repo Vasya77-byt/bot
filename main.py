@@ -79,32 +79,8 @@ def _main_menu() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "📊 Внутренний анализ",
+                    "📊 Проверить компанию",
                     callback_data="mode_internal_analysis",
-                ),
-                InlineKeyboardButton(
-                    "📝 Коммерческое предложение",
-                    callback_data="mode_client_proposal",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📋 Дай заявку",
-                    callback_data="mode_request",
-                ),
-                InlineKeyboardButton(
-                    "💼 Дай предложение",
-                    callback_data="mode_proposal",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📄 Сгенерировать КП (PDF)",
-                    callback_data="kp_pdf",
-                ),
-                InlineKeyboardButton(
-                    "🖼 Сгенерировать КП (PNG)",
-                    callback_data="kp_png",
                 ),
             ],
             [

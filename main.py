@@ -15,6 +15,7 @@ from pyrogram.types import (
     Message,
 )
 
+from admin_report import build_report, is_admin
 from ai_analyst import analyse_company
 from bulk_check import (
     BULK_LIMITS,
@@ -84,6 +85,9 @@ _gigachat_credentials: str = ""
 
 # Username бота — заполняется при старте
 _bot_username: str = ""
+
+# Список администраторов — заполняется при старте
+_admin_ids: list[int] = []
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -1061,11 +1065,37 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+async def handle_admin_report(client: Client, message) -> None:
+    """Команда /report — отчёт администратору за последние 30 дней.
+
+    Принимает опциональный аргумент — количество дней: /report 7
+    """
+    user_id = message.from_user.id
+    if not is_admin(user_id, _admin_ids):
+        # Тихо игнорируем — не палим существование команды
+        return
+
+    args = (message.text or "").split()
+    period_days = 30
+    if len(args) >= 2 and args[1].isdigit():
+        period_days = max(1, min(365, int(args[1])))
+
+    try:
+        report = build_report(user_store, payments_store, period_days=period_days)
+    except Exception as exc:
+        logger.exception("Admin report failed: %s", exc)
+        await message.reply_text(f"⚠️ Ошибка формирования отчёта: {exc}")
+        return
+
+    await message.reply_text(report)
+
+
 def main() -> None:
-    global subscription_service, _gigachat_credentials, _bot_username
+    global subscription_service, _gigachat_credentials, _bot_username, _admin_ids
 
     settings = Settings.from_env()
     _gigachat_credentials = settings.gigachat_credentials
+    _admin_ids = list(settings.admin_ids)
     # Инициализация платёжного сервиса
     webhook_runner = None
     if settings.payments_enabled:
@@ -1142,6 +1172,7 @@ def main() -> None:
         app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
         app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
         app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+        app.add_handler(MessageHandler(handle_admin_report, filters.command(["report"])))
         app.add_handler(CallbackQueryHandler(handle_callback))
         app.add_handler(MessageHandler(handle_document_message, filters.document))
         app.add_handler(
@@ -1149,7 +1180,7 @@ def main() -> None:
                 handle_text_message,
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
-                    "my_subscription", "cancel_subscription", "enable_subscription", "offer",
+                    "my_subscription", "cancel_subscription", "enable_subscription", "offer", "report",
                 ]),
             )
         )

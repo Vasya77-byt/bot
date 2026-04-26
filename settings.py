@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -22,6 +22,8 @@ class Settings:
     webhook_port: int = 8080
     # AI analysis (GigaChat)
     gigachat_credentials: str = ""
+    # Администраторы (доступ к /report)
+    admin_ids: list[int] = field(default_factory=list)
 
     @property
     def payments_enabled(self) -> bool:
@@ -34,6 +36,14 @@ class Settings:
         bot_token = os.getenv("TG_BOT_TOKEN", "")
         if not (api_id and api_hash and bot_token):
             raise RuntimeError("Environment variables TG_API_ID, TG_API_HASH, TG_BOT_TOKEN are required")
+
+        admin_ids_raw = os.getenv("ADMIN_IDS", "")
+        admin_ids: list[int] = []
+        for piece in admin_ids_raw.split(","):
+            piece = piece.strip()
+            if piece.isdigit():
+                admin_ids.append(int(piece))
+
         return Settings(
             api_id=api_id,
             api_hash=api_hash,
@@ -48,4 +58,5 @@ class Settings:
             webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
             webhook_port=int(os.getenv("WEBHOOK_PORT", "8080")),
             gigachat_credentials=os.getenv("GIGACHAT_CREDENTIALS", ""),
+            admin_ids=admin_ids,
         )

@@ -50,7 +50,8 @@ class CompanyService:
 
         # Руспрофайл и Федресурс параллельно
         rusprofile_task = asyncio.create_task(self.rusprofile.fetch_company(inn))
-        fedresurs_task = asyncio.create_task(self.fedresurs.fetch(inn))
+        # Федресурс отключён — блокирует серверные IP. Будет заменён на DaData Премиум.
+        fedresurs_task = None
 
         try:
             rusprofile_result = await rusprofile_task
@@ -61,12 +62,13 @@ class CompanyService:
             logger.warning("Rusprofile error for INN %s: %s", inn, exc)
 
         fedresurs_data = None
-        try:
-            fedresurs_data = await fedresurs_task
-            if fedresurs_data:
-                logger.info("Fedresurs: status=%s for INN %s", fedresurs_data.get("status"), inn)
-        except Exception as exc:
-            logger.warning("Fedresurs error for INN %s: %s", inn, exc)
+        if fedresurs_task is not None:
+            try:
+                fedresurs_data = await fedresurs_task
+                if fedresurs_data:
+                    logger.info("Fedresurs: status=%s for INN %s", fedresurs_data.get("status"), inn)
+            except Exception as exc:
+                logger.warning("Fedresurs error for INN %s: %s", inn, exc)
 
         if not results and not fedresurs_data:
             logger.info("No data found for INN %s from any source", inn)

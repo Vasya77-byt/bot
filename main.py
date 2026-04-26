@@ -112,6 +112,8 @@ def _inn_prompt_text(action: str) -> str:
     }
     if action == "mode_compare":
         return "Отправьте ИНН первой компании (10 или 12 цифр):"
+    if action == "mode_internal_analysis":
+        return "Для внутреннего анализа отправьте ИНН или название компании (10 или 12 цифр):"
     label = labels.get(action, "обработки")
     return f"Для {label} отправьте ИНН компании (10 или 12 цифр):"
 

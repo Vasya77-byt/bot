@@ -198,6 +198,39 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 await callback_query.message.reply_text(
                     f"ℹ️ Компания {name} уже есть в вашем списке отслеживания."
                 )
+        elif action_part == "ca_pdf" and inn_part:
+            await callback_query.message.reply_text("📄 Формирую PDF, секунду...")
+            company = await company_service.fetch(inn_part)
+            from parsers import ParseResult as PR
+            parsed_pdf = PR(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                            is_request=False, is_proposal=False, company_data=company)
+            sec_result = None
+            try:
+                sec_result = await security_service.check(
+                    inn=inn_part,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                )
+            except Exception as exc:
+                logger.error("Security check failed: %s", exc)
+            from renderers import render_response as rr
+            from exports import build_company_report_pdf
+            body_text = rr(parsed=parsed_pdf, company=company, risk=set(), security=sec_result)
+            try:
+                pdf_bytes = build_company_report_pdf(company, body_text)
+                buf = BytesIO(pdf_bytes)
+                safe_name = (company.name if company else inn_part) or inn_part
+                safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in safe_name)[:50]
+                buf.name = f"report_{safe_name}_{inn_part}.pdf"
+                await callback_query.message.reply_document(
+                    document=buf,
+                    caption=f"📄 Отчёт по компании {company.name if company else inn_part}",
+                )
+            except Exception as exc:
+                logger.error("PDF generation failed: %s", exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось сформировать PDF. Попробуйте позже."
+                )
         elif action_part in wip_actions:
             label = wip_actions[action_part]
             await callback_query.message.reply_text(
@@ -389,6 +422,9 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🔔 Отслеживать", callback_data=f"ca_watch:{inn}"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("📄 Скачать PDF", callback_data=f"ca_pdf:{inn}"),
         ],
     ])
 

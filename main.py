@@ -14,6 +14,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
 )
 
+from ai_analyst import analyse_company
 from company_service import CompanyService
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
@@ -59,6 +60,9 @@ payments_store = PaymentsStore()
 
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
+
+# API-ключ для ИИ-анализа, устанавливается в main()
+_gigachat_credentials: str = ""
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -124,7 +128,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         wip_actions = {
             "ca_courts": "⚖️ Суды",
             "ca_fns": "🏦 ФНС",
-            "ca_ai": "🤖 ИИ-анализ",
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
             "ca_links": "🔗 Связи",
@@ -155,6 +158,27 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 disable_web_page_preview=True,
                 reply_markup=_company_actions_keyboard(inn_part),
             )
+        elif action_part == "ca_ai" and inn_part:
+            if not _gigachat_credentials:
+                await callback_query.message.reply_text(
+                    "⚙️ ИИ-анализ временно недоступен: не задан GIGACHAT_CREDENTIALS."
+                )
+            else:
+                await callback_query.message.reply_text("🤖 Анализирую компанию, подождите...")
+                company = await company_service.fetch(inn_part)
+                if not company:
+                    await callback_query.message.reply_text("Не удалось получить данные о компании.")
+                else:
+                    result = await analyse_company(company, _gigachat_credentials)
+                    if result:
+                        name = company.name or inn_part
+                        await callback_query.message.reply_text(
+                            f"🤖 ИИ-анализ: {name}\n\n{result}"
+                        )
+                    else:
+                        await callback_query.message.reply_text(
+                            "⚠️ Не удалось выполнить ИИ-анализ. Попробуйте позже."
+                        )
         elif action_part in wip_actions:
             label = wip_actions[action_part]
             await callback_query.message.reply_text(
@@ -677,9 +701,10 @@ async def handle_offer(client: Client, message) -> None:
 
 
 def main() -> None:
-    global subscription_service
+    global subscription_service, _gigachat_credentials
 
     settings = Settings.from_env()
+    _gigachat_credentials = settings.gigachat_credentials
     # Инициализация платёжного сервиса
     webhook_runner = None
     if settings.payments_enabled:

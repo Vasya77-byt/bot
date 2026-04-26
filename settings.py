@@ -20,6 +20,8 @@ class Settings:
     # Webhook server
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
+    # AI analysis (GigaChat)
+    gigachat_credentials: str = ""
 
     @property
     def payments_enabled(self) -> bool:
@@ -45,4 +47,5 @@ class Settings:
             payment_fail_redirect_url=os.getenv("PAYMENT_FAIL_REDIRECT_URL", "https://t.me/"),
             webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
             webhook_port=int(os.getenv("WEBHOOK_PORT", "8080")),
+            gigachat_credentials=os.getenv("GIGACHAT_CREDENTIALS", ""),
         )

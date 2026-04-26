@@ -96,5 +96,9 @@ class CompanyService:
             status=pick("status"),
             kpp=pick("kpp"),
             capital=pick("capital"),
+            reliability_rating=pick("reliability_rating"),
+            reliability_obligations=pick("reliability_obligations"),
+            reliability_shell=pick("reliability_shell"),
+            reliability_tax=pick("reliability_tax"),
             source="+".join(sources) if sources else None,
         )

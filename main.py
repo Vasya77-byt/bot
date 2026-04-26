@@ -1065,6 +1065,34 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+DISCLAIMER_TEXT = (
+    "ДИСКЛЕЙМЕР\n"
+    "\n"
+    "⚠️ Внимание: Данный сервис предназначен исключительно для справочной и аналитической информации. "
+    "Все данные, предоставляемые ботом, получены из открытых источников, в том числе государственных "
+    "реестров, официальных публикаций, открытых баз и общедоступных онлайн-ресурсов.\n"
+    "\n"
+    "📝 Сервис не является государственным органом, не гарантирует полноту и актуальность сведений "
+    "на момент запроса, и не может использоваться как единственное основание для принятия "
+    "юридически значимых решений.\n"
+    "\n"
+    "🔐 Используя данный сервис, вы подтверждаете, что:\n"
+    "\n"
+    "• действуете в соответствии с законодательством РФ (включая 152-ФЗ «О персональных данных»);\n"
+    "\n"
+    "• не используете полученную информацию для дискриминации, шантажа, вторжения в частную жизнь "
+    "или противоправных действий;\n"
+    "\n"
+    "• понимаете, что ответственность за использование информации лежит на пользователе.\n"
+    "\n"
+    "💬 При наличии вопросов, неточностей или претензий — просьба обратиться через обратную связь в боте."
+)
+
+
+async def handle_disclaimer(client: Client, message) -> None:
+    await message.reply_text(DISCLAIMER_TEXT)
+
+
 async def handle_admin_report(client: Client, message) -> None:
     """Команда /report — отчёт администратору за последние 30 дней.
 
@@ -1172,6 +1200,7 @@ def main() -> None:
         app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
         app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
         app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+        app.add_handler(MessageHandler(handle_disclaimer, filters.command(["disclaimer"])))
         app.add_handler(MessageHandler(handle_admin_report, filters.command(["report"])))
         app.add_handler(CallbackQueryHandler(handle_callback))
         app.add_handler(MessageHandler(handle_document_message, filters.document))
@@ -1180,7 +1209,7 @@ def main() -> None:
                 handle_text_message,
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
-                    "my_subscription", "cancel_subscription", "enable_subscription", "offer", "report",
+                    "my_subscription", "cancel_subscription", "enable_subscription", "offer", "disclaimer", "report",
                 ]),
             )
         )

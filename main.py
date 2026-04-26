@@ -16,6 +16,8 @@ from pyrogram.types import (
 
 from ai_analyst import analyse_company
 from company_service import CompanyService
+from watchlist_store import WatchlistStore
+from watch_scheduler import run_watch_loop, make_snapshot
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
@@ -57,6 +59,7 @@ company_service = CompanyService()
 security_service = SecurityService()
 user_store = UserStore()
 payments_store = PaymentsStore()
+watchlist_store = WatchlistStore()
 
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
@@ -179,6 +182,20 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                         await callback_query.message.reply_text(
                             "⚠️ Не удалось выполнить ИИ-анализ. Попробуйте позже."
                         )
+        elif action_part == "ca_watch" and inn_part:
+            company = await company_service.fetch(inn_part)
+            name = (company.name if company else None) or inn_part
+            added = watchlist_store.add(user_id, inn_part, name)
+            if added:
+                if company:
+                    watchlist_store.update_snapshot(user_id, inn_part, make_snapshot(company))
+                await callback_query.message.reply_text(
+                    f"✅ Компания {name} успешно добавлена в ваш список для отслеживания изменений."
+                )
+            else:
+                await callback_query.message.reply_text(
+                    f"ℹ️ Компания {name} уже есть в вашем списке отслеживания."
+                )
         elif action_part in wip_actions:
             label = wip_actions[action_part]
             await callback_query.message.reply_text(
@@ -199,6 +216,25 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             fmt = "pdf" if action == "kp_pdf" else "png"
             title, body = _kp_template()
             await _send_kp_file(callback_query.message, parsed_kp, company, title, body, fmt)
+        return
+
+    # Кнопка "Мой список отслеживания" из профиля
+    if data == "show_watchlist":
+        await callback_query.answer()
+        entries = watchlist_store.get_list(user_id)
+        if not entries:
+            await callback_query.message.reply_text(
+                "📋 Ваш список отслеживания пуст.\n\n"
+                "Чтобы добавить компанию — получите отчёт и нажмите кнопку 🔔 Отслеживать."
+            )
+        else:
+            lines = ["📋 Ваши компании для отслеживания:\n"]
+            for i, e in enumerate(entries, 1):
+                added = e.added_at[:10] if e.added_at else "—"
+                checked = e.last_checked[:10] if e.last_checked else "ещё не проверялась"
+                lines.append(f"{i}. {e.name}\n   ИНН: {e.inn} | добавлена: {added} | проверена: {checked}")
+            lines.append("\nОтправьте ИНН компании чтобы получить свежий отчёт.")
+            await callback_query.message.reply_text("\n".join(lines))
         return
 
     # Кнопки выбора тарифа — создаём платёж
@@ -233,7 +269,14 @@ async def handle_text_message(client: Client, message) -> None:
         # Профиль — показываем сразу, ИНН не нужен
         if reply_action == "show_profile":
             profile = user_store.get(user_id)
-            await message.reply_text(render_profile(profile))
+            watchlist_count = len(watchlist_store.get_list(user_id))
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"📋 Мои компании для отслеживания ({watchlist_count})",
+                    callback_data="show_watchlist",
+                )
+            ]])
+            await message.reply_text(render_profile(profile), reply_markup=keyboard)
             return
         # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
@@ -318,6 +361,7 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
+            InlineKeyboardButton("🔔 Отслеживать", callback_data=f"ca_watch:{inn}"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])
@@ -788,6 +832,10 @@ def main() -> None:
             tasks.append(asyncio.create_task(
                 run_renewal_loop(subscription_service, notify=notify)
             ))
+
+        tasks.append(asyncio.create_task(
+            run_watch_loop(watchlist_store, company_service, notify)
+        ))
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

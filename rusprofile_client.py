@@ -205,6 +205,7 @@ class RusprofileClient:
             "reliability_obligations": facts.get("риски неисполнения обязательств"),
             "reliability_shell": facts.get("признаки однодневки"),
             "reliability_tax": facts.get("налоговые риски"),
+            "reliability_financial": facts.get("финансовое положение"),
         }
 
     async def _find_url(self, inn: str) -> Optional[str]:

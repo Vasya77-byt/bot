@@ -100,5 +100,6 @@ class CompanyService:
             reliability_obligations=pick("reliability_obligations"),
             reliability_shell=pick("reliability_shell"),
             reliability_tax=pick("reliability_tax"),
+            reliability_financial=pick("reliability_financial"),
             source="+".join(sources) if sources else None,
         )

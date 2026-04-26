@@ -25,6 +25,7 @@ class CompanyData(BaseModel):
     reliability_obligations: Optional[str] = None  # Риски неисполнения обязательств
     reliability_shell: Optional[str] = None        # Признаки однодневки
     reliability_tax: Optional[str] = None          # Налоговые риски
+    reliability_financial: Optional[str] = None    # Финансовое положение
     source: Optional[str] = None
 
     model_config = {"frozen": True}

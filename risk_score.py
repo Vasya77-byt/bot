@@ -124,6 +124,17 @@ def calculate(company: Optional[CompanyData], security: Optional[SecurityResult]
         score -= 10
         reasons.append(f"Убыток за последний год: {company.profit_last_year:,.0f} ₽")
 
+    # ── Бонус за размер (крупные компании несут меньший контрагентский риск) ──
+    # Бонус компенсирует штрафы за мелкие ФССП-производства у больших компаний
+    revenue = company.revenue_last_year or 0
+    employees = company.employees_count or 0
+    if revenue >= 10_000_000_000 or employees >= 1000:
+        score = min(100, score + 15)
+    elif revenue >= 1_000_000_000 or employees >= 250:
+        score = min(100, score + 8)
+    elif revenue >= 100_000_000 or employees >= 50:
+        score = min(100, score + 3)
+
     score = max(0, min(100, score))
     color, label = _classify(score)
     return RiskScore(score=score, color=color, label=label, reasons=reasons)

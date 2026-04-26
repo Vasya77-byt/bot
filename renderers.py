@@ -69,6 +69,9 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
     score = calculate_risk(company, security)
     if score:
         lines.append(f"{score.color} Риск-балл: {score.score}/100 — {score.label}")
+        if score.reasons:
+            for reason in score.reasons:
+                lines.append(f"  ↳ {reason}")
         lines.append("")
 
     # ── Стоп-листы ──

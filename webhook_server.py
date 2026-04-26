@@ -53,7 +53,7 @@ def build_app(
         order = parsed["order_id"]
 
         if status in ("paid", "approved", "confirmed", "completed"):
-            profile = subscription.handle_webhook_paid(
+            profile, referrer_id = subscription.handle_webhook_paid(
                 operation_id=op,
                 order_id=order,
                 card_token=parsed["card_token"],
@@ -70,6 +70,18 @@ def build_app(
                     await notify(profile.user_id, text)
                 except Exception as exc:
                     logger.error("Notify failed: %s", exc)
+            if referrer_id and notify:
+                try:
+                    ref_profile = subscription.users.get(referrer_id)
+                    expires = ref_profile.tariff_expires_at[:10] if ref_profile.tariff_expires_at else "—"
+                    await notify(
+                        referrer_id,
+                        f"🎁 Ваш реферал оплатил подписку!\n\n"
+                        f"Вам начислено +15 дней к тарифу {ref_profile.tariff.upper()}.\n"
+                        f"Подписка действует до: {expires}",
+                    )
+                except Exception as exc:
+                    logger.error("Notify referrer failed: %s", exc)
 
         elif status in ("failed", "declined", "cancelled", "rejected"):
             subscription.handle_webhook_failed(

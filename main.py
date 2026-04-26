@@ -31,6 +31,13 @@ from logging_config import setup_logging
 from offer import OFFER_TEXT
 from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
+from referral_store import (
+    REFERRAL_BONUS_DAYS,
+    REFERRAL_DISCOUNT_PCT,
+    ReferralStore,
+    make_referral_code,
+    parse_referral_code,
+)
 from renderers import render_comparison, render_profile, render_response
 from renewal_scheduler import run_renewal_loop
 from schemas import CompanyData
@@ -67,12 +74,16 @@ security_service = SecurityService()
 user_store = UserStore()
 payments_store = PaymentsStore()
 watchlist_store = WatchlistStore()
+referral_store = ReferralStore()
 
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
 
 # API-ключ для ИИ-анализа, устанавливается в main()
 _gigachat_credentials: str = ""
+
+# Username бота — заполняется при старте
+_bot_username: str = ""
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -266,6 +277,12 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await _send_kp_file(callback_query.message, parsed_kp, company, title, body, fmt)
         return
 
+    # Кнопка "Реферальная программа" из профиля
+    if data == "show_referral":
+        await callback_query.answer()
+        await _show_referral(callback_query.message, user_id)
+        return
+
     # Кнопка "Мой список отслеживания" из профиля
     if data == "show_watchlist":
         await callback_query.answer()
@@ -353,12 +370,16 @@ async def handle_text_message(client: Client, message) -> None:
         if reply_action == "show_profile":
             profile = user_store.get(user_id)
             watchlist_count = len(watchlist_store.get_list(user_id))
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
                     f"📋 Мои компании для отслеживания ({watchlist_count})",
                     callback_data="show_watchlist",
-                )
-            ]])
+                )],
+                [InlineKeyboardButton(
+                    "🎁 Реферальная программа",
+                    callback_data="show_referral",
+                )],
+            ])
             await message.reply_text(render_profile(profile), reply_markup=keyboard)
             return
         # Массовая проверка — просим загрузить файл
@@ -517,7 +538,9 @@ async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
 
     await message.reply_text("💳 Создаю платёжную ссылку...")
     try:
-        link, op_id = await subscription_service.create_initial_payment(user_id, tariff)
+        link, op_id, amount, discount_applied = await subscription_service.create_initial_payment(
+            user_id, tariff
+        )
     except Exception as exc:
         logger.exception("Payment creation failed: %s", exc)
         await message.reply_text(
@@ -525,17 +548,28 @@ async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
         )
         return
 
-    price = TARIFF_PRICES[tariff]
+    base_price = TARIFF_PRICES[tariff]
+    amount_int = int(round(amount))
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💳 Оплатить {price} ₽", url=link)],
+        [InlineKeyboardButton(f"💳 Оплатить {amount_int} ₽", url=link)],
     ])
-    await message.reply_text(
-        f"Счёт на оплату тарифа *{tariff.upper()}* — {price} ₽/мес.\n\n"
-        "После успешной оплаты тариф активируется автоматически.\n"
-        "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
-        "Нажимая «Оплатить», вы принимаете условия /offer",
-        reply_markup=keyboard,
-    )
+    if discount_applied:
+        invoice_text = (
+            f"Счёт на оплату тарифа *{tariff.upper()}*.\n\n"
+            f"Цена: ~{base_price} ₽~ → *{amount_int} ₽* "
+            f"(скидка {REFERRAL_DISCOUNT_PCT}% по реферальной программе)\n\n"
+            "После успешной оплаты тариф активируется автоматически.\n"
+            "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
+            "Нажимая «Оплатить», вы принимаете условия /offer"
+        )
+    else:
+        invoice_text = (
+            f"Счёт на оплату тарифа *{tariff.upper()}* — {amount_int} ₽/мес.\n\n"
+            "После успешной оплаты тариф активируется автоматически.\n"
+            "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
+            "Нажимая «Оплатить», вы принимаете условия /offer"
+        )
+    await message.reply_text(invoice_text, reply_markup=keyboard)
 
 
 def _match_reply_button(text: str) -> Optional[str]:
@@ -830,6 +864,37 @@ async def handle_document_message(client: Client, message: Message) -> None:
         pass
 
 
+def _build_referral_link(user_id: int) -> str:
+    code = make_referral_code(user_id)
+    if _bot_username:
+        return f"https://t.me/{_bot_username}?start={code}"
+    return f"start={code}"
+
+
+async def _show_referral(message, user_id: int) -> None:
+    """Показывает реферальную ссылку и статистику."""
+    link = _build_referral_link(user_id)
+    stats = referral_store.stats(user_id)
+    text = (
+        "🎁 Реферальная программа\n"
+        "\n"
+        "Приглашайте коллег и партнёров — получайте бонусы:\n"
+        f"• Друг получает скидку {REFERRAL_DISCOUNT_PCT}% на первый платёж\n"
+        f"• Вы получаете +{REFERRAL_BONUS_DAYS} дней подписки за каждого оплатившего\n"
+        "\n"
+        "🔗 Ваша персональная ссылка:\n"
+        f"`{link}`\n"
+        "\n"
+        "📊 Ваша статистика:\n"
+        f"• Перешли по ссылке: {stats['total']}\n"
+        f"• Оплатили подписку: {stats['converted']}\n"
+        f"• Всего начислено бонусных дней: {stats['bonus_days']}\n"
+        "\n"
+        "Поделитесь ссылкой в чате — Telegram сразу превратит её в кнопку «Открыть бота»."
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
+
+
 async def _check_limit_and_count(message, user_id: int) -> bool:
     """Проверяет лимит проверок и увеличивает счётчик.
     Возвращает True если проверка разрешена, False — если лимит исчерпан."""
@@ -997,7 +1062,7 @@ async def handle_offer(client: Client, message) -> None:
 
 
 def main() -> None:
-    global subscription_service, _gigachat_credentials
+    global subscription_service, _gigachat_credentials, _bot_username
 
     settings = Settings.from_env()
     _gigachat_credentials = settings.gigachat_credentials
@@ -1017,17 +1082,37 @@ def main() -> None:
             payments=payments_store,
             redirect_url=settings.payment_redirect_url,
             fail_redirect_url=settings.payment_fail_redirect_url,
+            referrals=referral_store,
         )
     else:
         logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")
 
     async def run_all() -> None:
         nonlocal webhook_runner
+        global _bot_username
         # Client создаётся ВНУТРИ event loop — иначе dispatcher tasks
         # окажутся на другом loop и не будут вызываться (Pyrogram + asyncio.run)
         app = build_app(settings)
 
         async def start_handler(client: Client, message) -> None:
+            user_id = message.from_user.id
+            # Парсим параметр /start ref_XXXXX — это переход по реферальной ссылке
+            args = (message.text or "").split(maxsplit=1)
+            referral_note = ""
+            if len(args) == 2:
+                referrer_id = parse_referral_code(args[1].strip())
+                if referrer_id and referrer_id != user_id:
+                    if not referral_store.has_active_referrer(user_id):
+                        # Связываем только новых пользователей, у которых ещё нет реферера
+                        # и которые ещё ни разу не платили
+                        profile = user_store.get(user_id)
+                        if not profile.tariff_expires_at:
+                            linked = referral_store.link(user_id, referrer_id)
+                            if linked:
+                                referral_note = (
+                                    f"\n🎁 Вы получили скидку {REFERRAL_DISCOUNT_PCT}% "
+                                    f"на первый платёж по реферальной ссылке!\n"
+                                )
             await message.reply_text(
                 "👋 Финансовый архитектор онлайн!\n\n"
                 "Я помогу с анализом компаний и подготовкой КП.\n\n"
@@ -1038,7 +1123,8 @@ def main() -> None:
                 "• /kp png <ИНН> — сгенерировать КП в PNG\n"
                 "• /menu — показать меню\n"
                 "• /my_subscription — статус подписки\n"
-                "• /offer — публичная оферта\n\n"
+                "• /offer — публичная оферта\n"
+                f"{referral_note}\n"
                 "По всем вопросам: @YRS75",
                 reply_markup=_main_menu(),
             )
@@ -1069,7 +1155,13 @@ def main() -> None:
         )
 
         await app.start()
-        logger.info("Bot started (client)")
+        try:
+            me = await app.get_me()
+            _bot_username = me.username or ""
+            logger.info("Bot started (client) as @%s", _bot_username)
+        except Exception as exc:
+            logger.warning("Failed to fetch bot username: %s", exc)
+            logger.info("Bot started (client)")
 
         async def notify(user_id: int, text: str) -> None:
             try:

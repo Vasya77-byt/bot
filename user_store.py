@@ -256,6 +256,30 @@ class UserStore:
         self.save_profile(profile)
         return profile
 
+    def add_referral_bonus_days(
+        self, user_id: int, days: int = 15, default_tariff: str = "start"
+    ) -> UserProfile:
+        """Начисляет реферальные бонусные дни.
+
+        - Если у пользователя активна платная подписка — продлевает её на N дней.
+        - Иначе — выдаёт N дней тарифа default_tariff от текущего момента.
+        """
+        profile = self.get(user_id)
+        now = datetime.now(timezone.utc)
+        if profile.is_subscription_active() and profile.tariff != "free":
+            try:
+                base = datetime.fromisoformat(profile.tariff_expires_at)
+            except ValueError:
+                base = now
+            new_expires = base + timedelta(days=days)
+        else:
+            profile.tariff = default_tariff
+            new_expires = now + timedelta(days=days)
+        profile.tariff_expires_at = new_expires.isoformat()
+        profile.auto_renew = profile.auto_renew  # не меняем флаг
+        self.save_profile(profile)
+        return profile
+
     def disable_auto_renew(self, user_id: int) -> UserProfile:
         profile = self.get(user_id)
         profile.auto_renew = False

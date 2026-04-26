@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -12,6 +12,7 @@ from schemas import CompanyData
 logger = logging.getLogger("financial-architect")
 
 DADATA_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party"
+DADATA_SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party"
 
 
 class DaDataClient:
@@ -51,6 +52,59 @@ class DaDataClient:
             return None
 
         return self._parse(raw, inn)
+
+    async def search_by_name(self, query: str, count: int = 5) -> List[Dict[str, Any]]:
+        """Поиск компаний по названию. Возвращает список {inn, name, address, status}."""
+        if not self.api_key:
+            return []
+
+        def _call() -> Optional[Dict[str, Any]]:
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": f"Token {self.api_key}",
+                }
+                resp = requests.post(
+                    DADATA_SUGGEST_URL,
+                    json={"query": query, "count": count, "status": ["ACTIVE"]},
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                logger.warning("DaData suggest status %s", resp.status_code)
+            except Exception as exc:
+                logger.warning("DaData suggest failed: %s", exc)
+            return None
+
+        raw = await asyncio.to_thread(_call)
+        if not raw:
+            return []
+
+        results = []
+        for item in raw.get("suggestions", []):
+            d = item.get("data", {})
+            inn = d.get("inn")
+            if not inn:
+                continue
+            name = item.get("value") or ""
+            address_data = d.get("address") or {}
+            city = None
+            if isinstance(address_data.get("data"), dict):
+                city = address_data["data"].get("city") or address_data["data"].get("region_with_type")
+            state = d.get("state") or {}
+            status_map = {
+                "ACTIVE": "действующая",
+                "LIQUIDATING": "ликвидируется",
+                "LIQUIDATED": "ликвидирована",
+                "BANKRUPT": "банкрот",
+                "REORGANIZING": "реорганизация",
+            }
+            status = status_map.get(state.get("status", ""), "")
+            results.append({"inn": inn, "name": name, "city": city, "status": status})
+
+        return results
 
     @staticmethod
     def _parse(data: Dict[str, Any], inn: str) -> Optional[CompanyData]:

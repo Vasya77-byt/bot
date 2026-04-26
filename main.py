@@ -237,6 +237,35 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text("\n".join(lines))
         return
 
+    # Выбор компании из результатов поиска по названию
+    if data.startswith("name_select:"):
+        await callback_query.answer()
+        inn_part = data.split(":", 1)[1]
+        if not await _check_limit_and_count(callback_query.message, user_id):
+            return
+        await callback_query.message.reply_text("🔍 Загружаю данные о компании...")
+        company = await _fetch_company(inn_part)
+        from parsers import ParseResult as PR
+        parsed_sel = PR(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                        is_request=False, is_proposal=False, company_data=company)
+        sec_result = None
+        try:
+            sec_result = await security_service.check(
+                inn=inn_part,
+                name=company.name if company else None,
+                okved=company.okved_main if company else None,
+            )
+        except Exception as exc:
+            logger.error("Security check failed: %s", exc)
+        from renderers import render_response as rr
+        reply = rr(parsed=parsed_sel, company=company, risk=set(), security=sec_result)
+        await callback_query.message.reply_text(
+            reply,
+            disable_web_page_preview=True,
+            reply_markup=_company_actions_keyboard(inn_part),
+        )
+        return
+
     # Кнопки выбора тарифа — создаём платёж
     if data.startswith("tariff_"):
         await callback_query.answer()
@@ -311,11 +340,8 @@ async def handle_text_message(client: Client, message) -> None:
         await _dispatch_action(message, pending_action, parsed, company)
         return
     elif pending_action and not parsed.inn:
-        # Не ИНН — сбрасываем состояние, не застреваем
-        await message.reply_text(
-            "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
-            "Отправьте ИНН (10 или 12 цифр) или нажмите /menu для выбора действия."
-        )
+        # Нет ИНН — пробуем поиск по названию
+        await _handle_name_search(message, text, user_id)
         return
 
     # Обычная обработка текста с ИНН
@@ -339,10 +365,8 @@ async def handle_text_message(client: Client, message) -> None:
         await message.reply_text(reply, disable_web_page_preview=True)
         return
 
-    # Если ни ИНН, ни команды — подсказка
-    await message.reply_text(
-        "👋 Отправьте ИНН компании или нажмите /menu для выбора действия."
-    )
+    # Нет ИНН и нет состояния — пробуем поиск по названию
+    await _handle_name_search(message, text, user_id)
 
 
 def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
@@ -571,6 +595,37 @@ async def _dispatch_action(
 
 async def _fetch_company(inn: str) -> Optional[CompanyData]:
     return await company_service.fetch(inn)
+
+
+async def _handle_name_search(message, query: str, user_id: int) -> None:
+    """Поиск компании по названию через DaData. Показывает список кнопок для выбора."""
+    stripped = query.strip()
+    if len(stripped) < 3:
+        await message.reply_text(
+            "👋 Отправьте ИНН компании (10 или 12 цифр) или название для поиска."
+        )
+        return
+
+    results = await company_service.dadata.search_by_name(stripped, count=5)
+    if not results:
+        await message.reply_text(
+            f"🔍 По запросу «{stripped}» ничего не найдено.\n\n"
+            "Попробуйте уточнить название или введите ИНН напрямую."
+        )
+        return
+
+    buttons = []
+    for r in results:
+        city = f", {r['city']}" if r.get("city") else ""
+        label = f"{r['name']}{city}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        buttons.append([InlineKeyboardButton(label, callback_data=f"name_select:{r['inn']}")])
+
+    await message.reply_text(
+        f"🔍 Найдено компаний по запросу «{stripped}»:\nВыберите нужную:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def _check_limit_and_count(message, user_id: int) -> bool:

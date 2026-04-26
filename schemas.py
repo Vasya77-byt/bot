@@ -21,7 +21,11 @@ class CompanyData(BaseModel):
     status: Optional[str] = None
     kpp: Optional[str] = None
     capital: Optional[float] = None
-    source: Optional[str] = None  # откуда данные: dadata, fns, sbis, mock
+    reliability_rating: Optional[str] = None       # Высокая / Средняя / Низкая
+    reliability_obligations: Optional[str] = None  # Риски неисполнения обязательств
+    reliability_shell: Optional[str] = None        # Признаки однодневки
+    reliability_tax: Optional[str] = None          # Налоговые риски
+    source: Optional[str] = None
 
     model_config = {"frozen": True}
 

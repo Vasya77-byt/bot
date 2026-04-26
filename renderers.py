@@ -123,6 +123,24 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
             lines.append("⚖️ ФССП: нет ✅")
         lines.append("")
 
+    # ── Надежность (Руспрофайл) ──
+    if any([company.reliability_rating, company.reliability_obligations,
+            company.reliability_shell, company.reliability_tax]):
+        rating_emoji = {"высокая": "🟢", "средняя": "🟡", "низкая": "🔴"}
+        r = (company.reliability_rating or "").lower()
+        emoji = rating_emoji.get(r, "⚪")
+        header = f"{emoji} Надежность"
+        if company.reliability_rating:
+            header += f": {company.reliability_rating}"
+        lines.append(f"—— {header} ——")
+        if company.reliability_obligations:
+            lines.append(f"Риски неисполнения обязательств: {company.reliability_obligations}")
+        if company.reliability_shell:
+            lines.append(f"Признаки однодневки: {company.reliability_shell}")
+        if company.reliability_tax:
+            lines.append(f"Налоговые риски: {company.reliability_tax}")
+        lines.append("")
+
     # ── Причины рисков ──
     reasons = _risk_reasons(company, security)
     if reasons:

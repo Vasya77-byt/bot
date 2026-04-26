@@ -163,12 +163,49 @@ class RusprofileClient:
             if not html:
                 return None
             result = _parse_page(html, inn)
-            if result:
-                logger.info("Rusprofile: got data for INN %s", inn)
+            if not result:
+                return None
+            logger.info("Rusprofile: got data for INN %s", inn)
+
+            # Подгружаем страницу надёжности
+            company_id = re.search(r"/id/(\d+)", company_url)
+            if company_id:
+                rel = await self._fetch_reliability(company_id.group(1))
+                if rel:
+                    result = result.model_copy(update=rel)
             return result
         except Exception as exc:
             logger.warning("Rusprofile error for INN %s: %s", inn, exc)
             return None
+
+    async def _fetch_reliability(self, company_id: str) -> Optional[dict]:
+        """Парсит страницу надёжности и возвращает dict с полями reliability_*."""
+        url = f"{_BASE_URL}/reliability/{company_id}"
+        html = await self._get_html(url)
+        if not html:
+            return None
+        soup = BeautifulSoup(html, "lxml")
+
+        facts: dict[str, str] = {}
+        for el in soup.select(".facts__title"):
+            spans = el.select("span")
+            if len(spans) >= 2:
+                label = spans[0].get_text(strip=True).rstrip(":").lower()
+                value = spans[1].get_text(strip=True).capitalize()
+                facts[label] = value
+
+        rating_el = soup.select_one(".content-frame__title .rating")
+        rating = rating_el.get_text(strip=True) if rating_el else None
+
+        if not facts and not rating:
+            return None
+
+        return {
+            "reliability_rating": rating,
+            "reliability_obligations": facts.get("риски неисполнения обязательств"),
+            "reliability_shell": facts.get("признаки однодневки"),
+            "reliability_tax": facts.get("налоговые риски"),
+        }
 
     async def _find_url(self, inn: str) -> Optional[str]:
         entity_type = "ip" if len(inn) == 12 else "ul"

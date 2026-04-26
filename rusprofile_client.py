@@ -57,86 +57,77 @@ def _parse_page(html: str, inn: str) -> Optional[CompanyData]:
     soup = BeautifulSoup(html, "lxml")
 
     # Название компании
-    name = _text(
-        soup,
-        "h1.company-name",
-        "h1[itemprop='name']",
-        ".company__name h1",
-        "h1",
-    )
+    name = _text(soup, "h1.company-name", "h1[itemprop='name']", ".company__name h1", "h1")
     if not name:
         return None
 
-    def field(label: str) -> Optional[str]:
-        """Ищет значение поля по тексту метки в таблице реквизитов."""
-        for row in soup.select(".requisites-row, .company-info__row, dl.requisites dt"):
-            if label.lower() in row.get_text().lower():
-                # Берём следующий sibling или dd
-                sibling = row.find_next_sibling()
-                val_el = (
-                    sibling
-                    or row.select_one("dd, .company-info__text, .requisites-row__value")
-                )
-                if val_el:
-                    return val_el.get_text(" ", strip=True) or None
-        # Fallback: data-атрибуты
-        mapping = {
-            "огрн": "[data-field='PSRN'], [data-field='ogrn']",
-            "кпп": "[data-field='KPP'], [data-field='kpp']",
-            "адрес": "[data-field='address']",
-            "дата регистрации": "[data-field='registration_date']",
-            "руководитель": "[data-field='director'], [data-field='ceo']",
-            "оквэд": "[data-field='okved']",
-            "статус": ".company-status, .company__status, [data-field='status']",
-        }
-        sel = mapping.get(label.lower())
-        if sel:
-            return _text(soup, *sel.split(", "))
-        return None
+    # Строим словарь: метка → значение из пар .company-info__title / следующий элемент
+    info: dict[str, str] = {}
+    for title_el in soup.select(".company-info__title"):
+        label = title_el.get_text(strip=True).lower()
+        # Значение — следующий sibling или ближайший .company-info__text в родителе
+        val_el = title_el.find_next_sibling()
+        if val_el is None:
+            parent = title_el.parent
+            if parent:
+                val_el = parent.find(class_="company-info__text")
+        if val_el:
+            val = val_el.get_text(" ", strip=True)
+            if val:
+                info[label] = val
 
-    ogrn = field("огрн")
-    kpp = field("кпп")
-    address = field("адрес")
-    reg_date = field("дата регистрации")
-    director = field("руководитель")
-    status = field("статус") or _text(soup, ".company-status", ".status-label")
+    ogrn = info.get("огрн")
+    reg_date = info.get("дата регистрации")
+    capital_raw = info.get("уставный капитал")
+    capital: Optional[float] = float(_clean_num(capital_raw)) if capital_raw and _clean_num(capital_raw) else None
+    address = info.get("юридический адрес")
+    director_raw = info.get("руководитель", "")
+    status = _text(soup, ".company-status", ".status-label", ".company__status")
 
-    # ОКВЭД
-    okved_raw = field("оквэд")
+    # Из "Председатель правления Акимов Андрей Игоревич с 27 февраля 2003 г."
+    # убираем должность и дату — оставляем только ФИО
+    director: Optional[str] = None
+    if director_raw:
+        m = re.search(r"([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)", director_raw)
+        director = m.group(1) if m else director_raw.split(" с ")[0].strip()
+
+    # ИНН/КПП — в одной ячейке "7744001497 / 774401001"
+    inn_kpp = info.get("инн/кпп", "")
+    kpp: Optional[str] = None
+    if "/" in inn_kpp:
+        kpp = inn_kpp.split("/")[-1].strip()
+
+    # ОКВЭД — "Денежное посредничество прочее (64.19)"
+    okved_raw = info.get("основной вид деятельности", "")
     okved_code: Optional[str] = None
     okved_name: Optional[str] = None
     if okved_raw:
-        m = re.match(r"^([\d.]+)\s*(.*)", okved_raw)
+        m = re.search(r"\((\d[\d.]+)\)", okved_raw)
         if m:
             okved_code = m.group(1)
-            okved_name = m.group(2) or None
+            okved_name = okved_raw[:okved_raw.rfind("(")].strip() or None
         else:
-            okved_code = okved_raw
+            okved_name = okved_raw
 
     # Сотрудники
     employees: Optional[int] = None
-    emp_text = field("сотрудник") or field("численность")
-    if emp_text:
-        employees = _clean_num(emp_text)
+    emp_raw = info.get("среднесписочная численность", "")
+    if emp_raw and emp_raw != "нет данных":
+        employees = _clean_num(emp_raw)
 
-    # Финансы: ищем в таблице финансовых показателей
+    # Финансы из таблицы
     revenue: Optional[int] = None
     profit: Optional[int] = None
-    for row in soup.select(
-        ".financial-index__item, .finance-table tr, .company-finance__row"
-    ):
-        row_text = row.get_text(" ", strip=True).lower()
-        val_el = row.select_one(
-            ".financial-index__value, td:last-child, .company-finance__value"
-        )
-        if not val_el:
+    for row in soup.select("table tr"):
+        cells = row.select("td")
+        if len(cells) < 2:
             continue
-        val = _clean_num(val_el.get_text())
-        if val is None:
-            continue
-        if "выручка" in row_text and revenue is None:
-            revenue = val * 1000  # тыс. руб. → руб.
-        elif "прибыль" in row_text and profit is None:
+        label_text = cells[0].get_text(strip=True).lower()
+        val_text = cells[-1].get_text(strip=True)
+        val = _clean_num(val_text)
+        if val and "выручка" in label_text and revenue is None:
+            revenue = val * 1000
+        elif val and "прибыль" in label_text and profit is None:
             profit = val * 1000
 
     return CompanyData(
@@ -153,6 +144,7 @@ def _parse_page(html: str, inn: str) -> Optional[CompanyData]:
         employees_count=employees,
         revenue_last_year=revenue,
         profit_last_year=profit,
+        capital=capital,
         source="rusprofile",
     )
 

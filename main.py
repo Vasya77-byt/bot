@@ -12,9 +12,16 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
 )
 
 from ai_analyst import analyse_company
+from bulk_check import (
+    BULK_LIMITS,
+    check_companies as bulk_check_companies,
+    format_bulk_results,
+    parse_inns,
+)
 from company_service import CompanyService
 from watchlist_store import WatchlistStore
 from watch_scheduler import run_watch_loop, make_snapshot
@@ -88,6 +95,12 @@ def _main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "📊 Проверить компанию",
                     callback_data="mode_internal_analysis",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📋 Массовая проверка",
+                    callback_data="mode_bulk_check",
                 ),
             ],
             [
@@ -311,6 +324,12 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         await _handle_buy_tariff(callback_query.message, user_id, tariff)
         return
 
+    # Массовая проверка — переводим пользователя в режим ожидания файла
+    if data == "mode_bulk_check":
+        await callback_query.answer()
+        await _start_bulk_check(callback_query.message, user_id)
+        return
+
     _user_state[user_id] = data
     await callback_query.answer()
     await callback_query.message.reply_text(_inn_prompt_text(data))
@@ -341,6 +360,10 @@ async def handle_text_message(client: Client, message) -> None:
                 )
             ]])
             await message.reply_text(render_profile(profile), reply_markup=keyboard)
+            return
+        # Массовая проверка — просим загрузить файл
+        if reply_action == "mode_bulk_check":
+            await _start_bulk_check(message, user_id)
             return
         # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
@@ -519,6 +542,7 @@ def _match_reply_button(text: str) -> Optional[str]:
     """Сопоставляет текст Reply-кнопок с действиями."""
     mapping = {
         "проверка компании": "mode_internal_analysis",
+        "массовая проверка": "mode_bulk_check",
         "сравнить": "mode_compare",
         "профиль": "show_profile",
         "тарифы": "show_tariffs",
@@ -664,6 +688,146 @@ async def _handle_name_search(message, query: str, user_id: int) -> None:
         f"🔍 Найдено компаний по запросу «{stripped}»:\nВыберите нужную:",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+async def _start_bulk_check(message, user_id: int) -> None:
+    """Запускает режим массовой проверки — просит загрузить файл."""
+    profile = user_store.get(user_id)
+    tariff = profile.effective_tariff()
+    limit = BULK_LIMITS.get(tariff, 0)
+    if limit == 0:
+        await message.reply_text(
+            "⛔️ Массовая проверка недоступна на тарифе Free.\n\n"
+            "Перейдите на платный тариф — нажмите «Тарифы»."
+        )
+        return
+
+    _user_state[user_id] = "bulk_check_await_file"
+    await message.reply_text(
+        f"📋 Массовая проверка компаний\n\n"
+        f"Отправьте файл со списком ИНН:\n"
+        f"• .txt — по одному ИНН в строке\n"
+        f"• .xlsx — ИНН в любой ячейке\n\n"
+        f"Лимит на ваш тариф ({tariff.upper()}): до {limit} компаний за раз.\n"
+        f"Время обработки: ~3-5 секунд на компанию."
+    )
+
+
+async def handle_document_message(client: Client, message: Message) -> None:
+    """Обработка загруженных документов для массовой проверки."""
+    user_id = message.from_user.id
+    state = _user_state.get(user_id)
+
+    if state != "bulk_check_await_file":
+        await message.reply_text(
+            "📎 Я получил файл, но сейчас не жду загрузку.\n\n"
+            "Чтобы запустить массовую проверку — нажмите «Массовая проверка» в меню."
+        )
+        return
+
+    _user_state.pop(user_id, None)
+
+    doc = message.document
+    if not doc:
+        return
+
+    filename = doc.file_name or "file"
+    name_lower = filename.lower()
+    if not (name_lower.endswith(".txt") or name_lower.endswith(".xlsx") or name_lower.endswith(".xls")):
+        await message.reply_text(
+            "⚠️ Поддерживаются только файлы .txt и .xlsx. Попробуйте ещё раз."
+        )
+        return
+
+    if doc.file_size and doc.file_size > 5 * 1024 * 1024:
+        await message.reply_text("⚠️ Файл слишком большой (>5 МБ).")
+        return
+
+    await message.reply_text("📥 Загружаю файл...")
+    try:
+        buf = await client.download_media(message, in_memory=True)
+        content = bytes(buf.getbuffer()) if hasattr(buf, "getbuffer") else buf
+    except Exception as exc:
+        logger.error("Failed to download bulk file: %s", exc)
+        await message.reply_text("⚠️ Не удалось загрузить файл. Попробуйте ещё раз.")
+        return
+
+    inns = parse_inns(filename, content)
+    if not inns:
+        await message.reply_text(
+            "⚠️ В файле не найдено ИНН (10 или 12 цифр).\n\n"
+            "Проверьте формат: один ИНН в строке (.txt) или в ячейках (.xlsx)."
+        )
+        return
+
+    profile = user_store.get(user_id)
+    tariff = profile.effective_tariff()
+    limit = BULK_LIMITS.get(tariff, 0)
+    if limit == 0:
+        await message.reply_text("⛔️ Массовая проверка недоступна на вашем тарифе.")
+        return
+
+    truncated = False
+    if len(inns) > limit:
+        inns = inns[:limit]
+        truncated = True
+
+    # Дневной лимит проверок
+    daily_limit = TARIFF_LIMITS.get(tariff)
+    if daily_limit is not None:
+        remaining = max(0, daily_limit - profile.checks_today)
+        if remaining < len(inns):
+            await message.reply_text(
+                f"⛔️ Сегодня осталось {remaining} проверок из дневного лимита {daily_limit} "
+                f"(тариф {tariff.upper()}), а в файле {len(inns)}.\n\n"
+                f"Сократите файл или дождитесь завтрашнего обновления лимита."
+            )
+            return
+
+    header = f"🔄 Запускаю проверку {len(inns)} компаний"
+    if truncated:
+        header += f" (превышен лимит тарифа — взял первые {limit})"
+    status_msg = await message.reply_text(header + "...")
+
+    last_edit = [0]
+
+    async def progress_cb(done: int, total: int) -> None:
+        # Обновляем статус каждые 5 компаний или на последней
+        if done == total or done - last_edit[0] >= 5:
+            last_edit[0] = done
+            try:
+                await status_msg.edit_text(f"🔄 Обработано {done}/{total} компаний...")
+            except Exception:
+                pass
+
+    results = await bulk_check_companies(
+        inns,
+        company_service,
+        security_service=security_service,
+        progress_cb=progress_cb,
+    )
+
+    # Списываем дневные проверки за фактически обработанные
+    for _ in results:
+        user_store.increment_checks(user_id)
+
+    report = format_bulk_results(results)
+
+    # Если отчёт длинный — отправляем как файл
+    if len(report) > 3500:
+        buf2 = BytesIO(report.encode("utf-8"))
+        buf2.name = f"bulk_results_{user_id}.txt"
+        await message.reply_document(
+            document=buf2,
+            caption=f"📊 Результаты массовой проверки ({len(results)} компаний)",
+        )
+    else:
+        await message.reply_text(report)
+
+    try:
+        await status_msg.edit_text(f"✅ Готово: {len(results)} компаний обработано.")
+    except Exception:
+        pass
 
 
 async def _check_limit_and_count(message, user_id: int) -> bool:
@@ -893,6 +1057,7 @@ def main() -> None:
         app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
         app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
         app.add_handler(CallbackQueryHandler(handle_callback))
+        app.add_handler(MessageHandler(handle_document_message, filters.document))
         app.add_handler(
             MessageHandler(
                 handle_text_message,

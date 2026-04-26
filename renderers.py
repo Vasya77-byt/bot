@@ -2,6 +2,7 @@ from typing import Optional, Set
 
 from compliance import legal_note
 from parsers import ParseResult
+from risk_score import calculate as calculate_risk
 from schemas import CompanyData, empty_company
 from security_check import SecurityResult
 from user_store import TARIFF_FEATURES, TARIFF_LABELS, UserProfile
@@ -63,6 +64,12 @@ def render_comparison(
 
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     lines = []
+
+    # ── Сводный риск-балл ──
+    score = calculate_risk(company, security)
+    if score:
+        lines.append(f"{score.color} Риск-балл: {score.score}/100 — {score.label}")
+        lines.append("")
 
     # ── Стоп-листы ──
     lines.append("—— Стоп-листы / 115-ФЗ / 550-П ——")

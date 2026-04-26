@@ -144,6 +144,17 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
             lines.append(f"Финансовое положение: {company.reliability_financial}")
         lines.append("")
 
+    # ── Банкротство и реорганизация (Федресурс) ──
+    if company.bankruptcy_status or company.bankruptcy_messages:
+        lines.append("—— 📰 Федресурс ——")
+        if company.bankruptcy_status:
+            lines.append(f"Статус: {company.bankruptcy_status}")
+        if company.bankruptcy_messages:
+            lines.append("Последние публикации:")
+            for msg in company.bankruptcy_messages[:3]:
+                lines.append(f"  • {msg}")
+        lines.append("")
+
     # ── Причины рисков ──
     reasons = _risk_reasons(company, security)
     if reasons:

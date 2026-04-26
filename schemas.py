@@ -26,6 +26,8 @@ class CompanyData(BaseModel):
     reliability_shell: Optional[str] = None        # Признаки однодневки
     reliability_tax: Optional[str] = None          # Налоговые риски
     reliability_financial: Optional[str] = None    # Финансовое положение
+    bankruptcy_status: Optional[str] = None        # Статус банкротства (Федресурс)
+    bankruptcy_messages: Optional[List[str]] = None  # Последние публикации Федресурса
     source: Optional[str] = None
 
     model_config = {"frozen": True}

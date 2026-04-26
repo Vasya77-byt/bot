@@ -1,14 +1,17 @@
 """Единый сервис получения данных о компании.
 
-Объединяет данные из DaData, API ФНС и Руспрофайл.
+Объединяет данные из DaData, API ФНС, Руспрофайла и Федресурса.
 Приоритет: DaData (база) → FNS (официальные) → Rusprofile (финансы + доп. данные).
+Федресурс добавляет данные о банкротстве/реорганизации/ликвидации.
 Данные мержатся — пустые поля одного источника заполняются из другого.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
 from dadata_client import DaDataClient
+from fedresurs_client import FedresursClient
 from fns_client import FnsClient
 from rusprofile_client import RusprofileClient
 from schemas import CompanyData
@@ -21,6 +24,7 @@ class CompanyService:
         self.dadata = DaDataClient()
         self.fns = FnsClient()
         self.rusprofile = RusprofileClient()
+        self.fedresurs = FedresursClient()
 
     async def fetch(self, inn: str) -> Optional[CompanyData]:
         """Получить данные о компании из всех доступных источников."""
@@ -44,26 +48,37 @@ class CompanyService:
         except Exception as exc:
             logger.warning("FNS error for INN %s: %s", inn, exc)
 
-        # Руспрофайл — финансовые данные и дополнительная информация
+        # Руспрофайл и Федресурс параллельно
+        rusprofile_task = asyncio.create_task(self.rusprofile.fetch_company(inn))
+        fedresurs_task = asyncio.create_task(self.fedresurs.fetch(inn))
+
         try:
-            rusprofile_result = await self.rusprofile.fetch_company(inn)
+            rusprofile_result = await rusprofile_task
             if rusprofile_result:
                 results.append(rusprofile_result)
                 logger.info("Rusprofile: found data for INN %s", inn)
         except Exception as exc:
             logger.warning("Rusprofile error for INN %s: %s", inn, exc)
 
-        if not results:
+        fedresurs_data = None
+        try:
+            fedresurs_data = await fedresurs_task
+            if fedresurs_data:
+                logger.info("Fedresurs: status=%s for INN %s", fedresurs_data.get("status"), inn)
+        except Exception as exc:
+            logger.warning("Fedresurs error for INN %s: %s", inn, exc)
+
+        if not results and not fedresurs_data:
             logger.info("No data found for INN %s from any source", inn)
             return None
 
         # Мержим данные — первый результат как база, остальные дополняют
-        merged = self._merge(results, inn)
+        merged = self._merge(results, inn, fedresurs_data)
         logger.info("Merged company data for INN %s from %d source(s)", inn, len(results))
         return merged
 
     @staticmethod
-    def _merge(results: list[CompanyData], inn: str) -> CompanyData:
+    def _merge(results: list[CompanyData], inn: str, fedresurs_data: Optional[dict] = None) -> CompanyData:
         """Объединяет данные из нескольких источников.
 
         Для каждого поля берётся первое непустое значение.
@@ -77,6 +92,13 @@ class CompanyService:
             return None
 
         sources = [r.source for r in results if r.source]
+        bankruptcy_status = None
+        bankruptcy_messages = None
+        if fedresurs_data:
+            bankruptcy_status = fedresurs_data.get("status")
+            msgs = fedresurs_data.get("messages") or []
+            bankruptcy_messages = msgs if msgs else None
+            sources.append("fedresurs")
 
         return CompanyData(
             inn=pick("inn") or inn,
@@ -101,5 +123,7 @@ class CompanyService:
             reliability_shell=pick("reliability_shell"),
             reliability_tax=pick("reliability_tax"),
             reliability_financial=pick("reliability_financial"),
+            bankruptcy_status=bankruptcy_status,
+            bankruptcy_messages=bankruptcy_messages,
             source="+".join(sources) if sources else None,
         )

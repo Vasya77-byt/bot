@@ -12,7 +12,9 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 
 from admin_report import build_report, is_admin
@@ -124,6 +126,18 @@ def _main_menu() -> InlineKeyboardMarkup:
                 ),
             ],
         ]
+    )
+
+
+def _reply_menu() -> ReplyKeyboardMarkup:
+    """Постоянное нижнее меню (Reply keyboard) — показывается всем пользователям."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📊 Проверка компании"), KeyboardButton("📋 Массовая проверка")],
+            [KeyboardButton("👤 Профиль"), KeyboardButton("💼 Тарифы")],
+        ],
+        resize_keyboard=True,
+        persistent=True,
     )
 
 
@@ -1199,21 +1213,20 @@ def main() -> None:
                 "Я помогу с анализом компаний и подготовкой КП.\n\n"
                 "Что умею:\n"
                 "• Отправьте ИНН — получите анализ компании\n"
-                "• Нажмите кнопку ниже для нужного действия\n"
+                "• Используйте кнопки меню внизу экрана\n"
                 "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
                 "• /kp png <ИНН> — сгенерировать КП в PNG\n"
-                "• /menu — показать меню\n"
                 "• /my_subscription — статус подписки\n"
                 "• /documents — правовые документы\n"
                 f"{referral_note}\n"
                 "По всем вопросам: @YRS75",
-                reply_markup=_main_menu(),
+                reply_markup=_reply_menu(),
             )
 
         async def menu_handler(client: Client, message) -> None:
             await message.reply_text(
                 "Выберите действие:",
-                reply_markup=_main_menu(),
+                reply_markup=_reply_menu(),
             )
 
         app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))

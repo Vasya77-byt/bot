@@ -1067,8 +1067,8 @@ async def handle_offer(client: Client, message) -> None:
 
 # Ссылки на документы — обновите после публикации на Telegraph
 _DOC_OFFER_URL = "https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27"
-_DOC_AGREEMENT_URL = ""   # вставьте ссылку после публикации
-_DOC_PRIVACY_URL = ""     # вставьте ссылку после публикации
+_DOC_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-27-19"
+_DOC_PRIVACY_URL = "https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-04-27"
 
 
 async def handle_documents(client: Client, message) -> None:

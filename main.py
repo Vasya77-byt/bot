@@ -29,7 +29,6 @@ from watch_scheduler import run_watch_loop, make_snapshot
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
-from offer import OFFER_TEXT
 from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
 from referral_store import (
@@ -564,14 +563,14 @@ async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
             f"(скидка {REFERRAL_DISCOUNT_PCT}% по реферальной программе)\n\n"
             "После успешной оплаты тариф активируется автоматически.\n"
             "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
-            "Нажимая «Оплатить», вы принимаете условия /offer"
+            "Нажимая «Оплатить», вы принимаете условия публичной оферты — /documents"
         )
     else:
         invoice_text = (
             f"Счёт на оплату тарифа *{tariff.upper()}* — {amount_int} ₽/мес.\n\n"
             "После успешной оплаты тариф активируется автоматически.\n"
             "Карта сохранится для автопродления — отключить: /cancel_subscription\n\n"
-            "Нажимая «Оплатить», вы принимаете условия /offer"
+            "Нажимая «Оплатить», вы принимаете условия публичной оферты — /documents"
         )
     await message.reply_text(invoice_text, reply_markup=keyboard)
 
@@ -1061,10 +1060,6 @@ async def handle_enable_subscription(client: Client, message) -> None:
     await message.reply_text("🔔 Автопродление включено.")
 
 
-async def handle_offer(client: Client, message) -> None:
-    await message.reply_text(OFFER_TEXT)
-
-
 # Ссылки на документы — обновите после публикации на Telegraph
 _DOC_OFFER_URL = "https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27"
 _DOC_AGREEMENT_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-04-27-19"
@@ -1208,7 +1203,7 @@ def main() -> None:
                 "• /kp png <ИНН> — сгенерировать КП в PNG\n"
                 "• /menu — показать меню\n"
                 "• /my_subscription — статус подписки\n"
-                "• /offer — публичная оферта\n"
+                "• /documents — правовые документы\n"
                 f"{referral_note}\n"
                 "По всем вопросам: @YRS75",
                 reply_markup=_main_menu(),
@@ -1226,7 +1221,6 @@ def main() -> None:
         app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
         app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
         app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
-        app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
         app.add_handler(MessageHandler(handle_disclaimer, filters.command(["disclaimer"])))
         app.add_handler(MessageHandler(handle_documents, filters.command(["documents"])))
         app.add_handler(MessageHandler(handle_admin_report, filters.command(["report"])))
@@ -1238,7 +1232,7 @@ def main() -> None:
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
-                    "offer", "disclaimer", "documents", "report",
+                    "disclaimer", "documents", "report",
                 ]),
             )
         )

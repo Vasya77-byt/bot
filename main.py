@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from io import BytesIO
 from typing import Any, Optional
 
@@ -9,6 +10,8 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
 )
 
 from company_service import CompanyService
@@ -61,37 +64,20 @@ def build_app(settings: Settings) -> Client:
 def _main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton(
-                    "📊 Внутренний анализ",
-                    callback_data="mode_internal_analysis",
-                ),
-                InlineKeyboardButton(
-                    "📝 Коммерческое предложение",
-                    callback_data="mode_client_proposal",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📋 Дай заявку",
-                    callback_data="mode_request",
-                ),
-                InlineKeyboardButton(
-                    "💼 Дай предложение",
-                    callback_data="mode_proposal",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "📄 Сгенерировать КП (PDF)",
-                    callback_data="kp_pdf",
-                ),
-                InlineKeyboardButton(
-                    "🖼 Сгенерировать КП (PNG)",
-                    callback_data="kp_png",
-                ),
-            ],
+            [InlineKeyboardButton("📊 Проверить компанию", callback_data="mode_internal_analysis")],
+            [InlineKeyboardButton("📋 Массовая проверка", callback_data="mode_mass_check")],
+            [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/YRS75")],
         ]
+    )
+
+
+def _reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📋 Проверка компании"), KeyboardButton("⚖️ Сравнить")],
+            [KeyboardButton("👤 Профиль"), KeyboardButton("💎 Тарифы")],
+        ],
+        resize_keyboard=True,
     )
 
 
@@ -104,6 +90,7 @@ def _inn_prompt_text(action: str) -> str:
         "mode_proposal": "предложения",
         "kp_pdf": "генерации КП (PDF)",
         "kp_png": "генерации КП (PNG)",
+        "mode_mass_check": "массовой проверки",
     }
     if action == "mode_compare":
         return "Отправьте ИНН первой компании (10 или 12 цифр):"
@@ -175,6 +162,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         await _handle_buy_tariff(callback_query.message, user_id, tariff)
         return
 
+    if data == "mode_mass_check":
+        await callback_query.answer()
+        profile = user_store.get(user_id)
+        if profile.tariff != "business":
+            await callback_query.message.reply_text(
+                "📋 Массовая проверка доступна только на тарифе Business.\n\n"
+                "Перейдите на Business для получения доступа — нажмите «💎 Тарифы»."
+            )
+            return
+        _user_state[user_id] = "mode_mass_check"
+        await callback_query.message.reply_text(
+            "Отправьте несколько ИНН — по одному в строке или через запятую:"
+        )
+        return
+
     _user_state[user_id] = data
     await callback_query.answer()
     await callback_query.message.reply_text(_inn_prompt_text(data))
@@ -224,6 +226,42 @@ async def handle_text_message(client: Client, message) -> None:
             await message.reply_text(
                 "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
                 "Нажмите /menu для выбора действия."
+            )
+        return
+
+    if pending_action == "mode_mass_check":
+        inns = re.findall(r'\b\d{10}(?:\d{2})?\b', text)
+        if not inns:
+            await message.reply_text(
+                "⚠️ Не найдено ни одного ИНН.\n\n"
+                "Отправьте ИНН через запятую или по одному в строке:"
+            )
+            _user_state[user_id] = "mode_mass_check"
+            return
+        await message.reply_text(f"🔍 Начинаю проверку {len(inns)} ИНН...")
+        for inn in inns:
+            allowed = await _check_limit_and_count(message, user_id)
+            if not allowed:
+                break
+            company = await _fetch_company(inn)
+            sec_result = None
+            try:
+                sec_result = await security_service.check(
+                    inn=inn,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                )
+            except Exception as exc:
+                logger.error("Security check failed: %s", exc)
+            parsed_inner = ParseResult(
+                raw_text=inn, inn=inn, mode="internal_analysis",
+                is_request=False, is_proposal=False, company_data=company,
+            )
+            reply = render_response(parsed=parsed_inner, company=company, risk=set(), security=sec_result)
+            await message.reply_text(
+                reply,
+                disable_web_page_preview=True,
+                reply_markup=_company_actions_keyboard(inn),
             )
         return
 
@@ -664,6 +702,10 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+async def handle_documents(client: Client, message) -> None:
+    await message.reply_text(OFFER_TEXT)
+
+
 def main() -> None:
     global subscription_service
 
@@ -692,7 +734,6 @@ def main() -> None:
 
     async def start_handler(client: Client, message) -> None:
         await message.reply_text(
-            "👋 Финансовый архитектор онлайн!\n\n"
             "Я помогу с анализом компаний и подготовкой КП.\n\n"
             "Что умею:\n"
             "• Отправьте ИНН — получите анализ компании\n"
@@ -701,7 +742,12 @@ def main() -> None:
             "• /kp png <ИНН> — сгенерировать КП в PNG\n"
             "• /menu — показать меню\n"
             "• /my_subscription — статус подписки\n"
-            "• /offer — публичная оферта",
+            "• /documents — правовые документы\n\n"
+            "По всем вопросам: @YRS75",
+            reply_markup=_reply_keyboard(),
+        )
+        await message.reply_text(
+            "Выберите действие:",
             reply_markup=_main_menu(),
         )
 
@@ -718,13 +764,15 @@ def main() -> None:
     app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
     app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
     app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+    app.add_handler(MessageHandler(handle_documents, filters.command(["documents"])))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(
         MessageHandler(
             handle_text_message,
             filters.text & ~filters.command([
                 "start", "help", "menu", "kp",
-                "my_subscription", "cancel_subscription", "enable_subscription", "offer",
+                "my_subscription", "cancel_subscription", "enable_subscription",
+                "offer", "documents",
             ]),
         )
     )

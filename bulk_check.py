@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Coroutine, List, Optional
 
+from parsers import _inn_valid
 from risk_score import RiskScore, calculate as calculate_risk
 
 # Лимиты по тарифам для массовой проверки (компаний за раз)
@@ -28,11 +29,10 @@ def parse_inns_from_txt(content: bytes) -> List[str]:
     """Извлекает ИНН из текстового файла."""
     text = content.decode("utf-8", errors="replace")
     found = re.findall(r'\b(\d{10}|\d{12})\b', text)
-    # убираем дубликаты, сохраняя порядок
     seen: set[str] = set()
     result = []
     for inn in found:
-        if inn not in seen:
+        if inn not in seen and _inn_valid(inn):
             seen.add(inn)
             result.append(inn)
     return result
@@ -51,7 +51,7 @@ def parse_inns_from_xlsx(content: bytes) -> List[str]:
                 if cell is None:
                     continue
                 val = str(cell).strip().split(".")[0]  # убираем .0 из числовых ячеек
-                if re.match(r'^\d{10}$|^\d{12}$', val) and val not in seen:
+                if re.match(r'^\d{10}$|^\d{12}$', val) and val not in seen and _inn_valid(val):
                     seen.add(val)
                     result.append(val)
         wb.close()

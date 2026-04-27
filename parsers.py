@@ -38,9 +38,27 @@ def parse_message(text: str) -> ParseResult:
     )
 
 
+def _inn_valid(inn: str) -> bool:
+    """Проверяет контрольную сумму ИНН (10 или 12 цифр)."""
+    d = [int(c) for c in inn]
+    if len(d) == 10:
+        w = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+        return (sum(w[i] * d[i] for i in range(9)) % 11 % 10) == d[9]
+    if len(d) == 12:
+        w1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        w2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        c1 = (sum(w1[i] * d[i] for i in range(10)) % 11 % 10)
+        c2 = (sum(w2[i] * d[i] for i in range(11)) % 11 % 10)
+        return c1 == d[10] and c2 == d[11]
+    return False
+
+
 def extract_inn(text: str) -> Optional[str]:
-    match = INN_PATTERN.search(text)
-    return match.group(1) if match else None
+    for match in INN_PATTERN.finditer(text):
+        inn = match.group(1)
+        if _inn_valid(inn):
+            return inn
+    return None
 
 
 def extract_mode(text: str) -> Optional[str]:

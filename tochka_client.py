@@ -216,8 +216,8 @@ class TochkaClient:
         в заголовке 'X-Signature' или 'Signature' как hex.
         """
         if not self.webhook_secret:
-            logger.warning("Tochka webhook_secret not set — signature check skipped")
-            return True
+            logger.error("Tochka webhook_secret not set — rejecting all webhook requests")
+            return False
         if not signature:
             return False
         expected = hmac.new(

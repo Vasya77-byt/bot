@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -47,8 +48,12 @@ class WatchlistStore:
 
     def _save(self) -> None:
         try:
-            with open(self.filepath, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            dir_ = os.path.dirname(os.path.abspath(self.filepath))
+            with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False,
+                                            suffix=".tmp", encoding="utf-8") as tf:
+                json.dump(self._data, tf, ensure_ascii=False, indent=2)
+                tmp_path = tf.name
+            os.replace(tmp_path, self.filepath)
         except Exception as exc:
             logger.error("WatchlistStore: failed to save %s: %s", self.filepath, exc)
 

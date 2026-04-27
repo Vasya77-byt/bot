@@ -154,8 +154,9 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     # Кнопки действий под карточкой компании
     if data.startswith("ca_"):
         await callback_query.answer()
-        action_part = data.split(":")[0]  # ca_courts, ca_ai, etc.
-        inn_part = data.split(":")[1] if ":" in data else ""
+        parts = data.split(":", 1)
+        action_part = parts[0]
+        inn_part = parts[1] if len(parts) == 2 else ""
 
         wip_actions = {
             "ca_courts": "⚖️ Суды",

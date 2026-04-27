@@ -137,7 +137,6 @@ def _reply_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton("👤 Профиль"), KeyboardButton("💼 Тарифы")],
         ],
         resize_keyboard=True,
-        persistent=True,
     )
 
 

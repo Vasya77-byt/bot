@@ -757,29 +757,31 @@ def main() -> None:
             reply_markup=_main_menu(),
         )
 
-    app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
-    app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-    app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
-    app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
-    app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
-    app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
-    app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
-    app.add_handler(MessageHandler(handle_documents, filters.command(["documents"])))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(
-        MessageHandler(
-            handle_text_message,
-            filters.text & ~filters.command([
-                "start", "help", "menu", "kp",
-                "my_subscription", "cancel_subscription", "enable_subscription",
-                "offer", "documents",
-            ]),
+    def register_handlers() -> None:
+        app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
+        app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
+        app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
+        app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
+        app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
+        app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
+        app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
+        app.add_handler(MessageHandler(handle_documents, filters.command(["documents"])))
+        app.add_handler(CallbackQueryHandler(handle_callback))
+        app.add_handler(
+            MessageHandler(
+                handle_text_message,
+                filters.text & ~filters.command([
+                    "start", "help", "menu", "kp",
+                    "my_subscription", "cancel_subscription", "enable_subscription",
+                    "offer", "documents",
+                ]),
+            )
         )
-    )
 
     async def run_all() -> None:
         nonlocal webhook_runner
         await app.start()
+        register_handlers()
         logger.info("Bot started (client)")
 
         async def notify(user_id: int, text: str) -> None:

@@ -831,7 +831,12 @@ def main() -> None:
 
     logger.info("Bot starting...")
     try:
-        asyncio.run(run_all())
+        # Use Pyrogram's own runner instead of asyncio.run. Pyrogram internally
+        # uses asyncio.get_event_loop() / loop.run_until_complete; using
+        # asyncio.run() creates a brand-new loop on every invocation and leaves
+        # Pyrogram's pre-created Queue / scheduled tasks bound to a different
+        # loop, so updates queued by the session never reach the handler workers.
+        app.run(run_all())
     except KeyboardInterrupt:
         logger.info("Bot stopped.")
 

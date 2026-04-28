@@ -7,6 +7,10 @@ import uuid
 from typing import Optional
 
 import requests
+import urllib3
+
+# GigaChat использует сертификат Сбера, не входящий в стандартные CA
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger("financial-architect")
 

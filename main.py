@@ -155,9 +155,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             _user_state[user_id] = "mode_internal_analysis"
             await callback_query.message.reply_text("🔄 Обновляю данные...")
             company = await company_service.fetch(inn_part)
-            from parsers import ParseResult as PR
-            parsed_refresh = PR(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
-                                is_request=False, is_proposal=False, company_data=company)
+            parsed_refresh = ParseResult(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                                         is_request=False, is_proposal=False, company_data=company)
             sec_result = None
             try:
                 sec_result = await security_service.check(
@@ -167,8 +166,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             except Exception as exc:
                 logger.error("Security check failed: %s", exc)
-            from renderers import render_response as rr
-            reply = rr(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
+            reply = render_response(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
             await callback_query.message.reply_text(
                 reply,
                 disable_web_page_preview=True,

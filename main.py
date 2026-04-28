@@ -19,6 +19,7 @@ from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from offer import OFFER_TEXT
+from privacy import PRIVACY_TEXT
 from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
 from renderers import render_comparison, render_profile, render_response
@@ -150,6 +151,17 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 f"⏳ {label} — раздел в разработке.\n"
                 f"Будет доступен после подключения ЗЧБ и Контур.Фокус."
             )
+        return
+
+    # Кнопки документов
+    if data == "doc_offer":
+        await callback_query.answer()
+        await callback_query.message.reply_text(OFFER_TEXT)
+        return
+
+    if data == "doc_privacy":
+        await callback_query.answer()
+        await callback_query.message.reply_text(PRIVACY_TEXT)
         return
 
     # Кнопки выбора тарифа — создаём платёж
@@ -702,8 +714,18 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+def _documents_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Публичная оферта", callback_data="doc_offer")],
+        [InlineKeyboardButton("🔒 Политика конфиденциальности", callback_data="doc_privacy")],
+    ])
+
+
 async def handle_documents(client: Client, message) -> None:
-    await message.reply_text(OFFER_TEXT)
+    await message.reply_text(
+        "📂 Правовые документы\n\nВыберите документ для просмотра:",
+        reply_markup=_documents_keyboard(),
+    )
 
 
 def main() -> None:

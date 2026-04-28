@@ -181,6 +181,118 @@ class TestHandleWebhookPaid:
         assert second.card_token == "tok-A"
 
 
+class TestHandleWebhookPaidReferralBonus:
+    """Бонус референту за первую оплату приглашённого."""
+
+    def test_no_referrer_no_bonus(self, service, users, payments):
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+        # Профиль 42 не привязан ни к кому — никаких бонусов
+        assert users.get(42).referral_bonus_granted is False
+
+    def test_first_payment_grants_bonus_to_free_referrer(
+        self, service, users, payments
+    ):
+        # Референт - free, его пригласил никто
+        referrer = users.get(1)
+        # Приглашённый привязан к референту
+        users.set_referrer_by_code(42, referrer.referral_code)
+
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+
+        # Референт получил start на 15 дней
+        ref = users.get(1)
+        assert ref.tariff == "start"
+        assert ref.is_subscription_active() is True
+        assert ref.referrals_paid_count == 1
+        assert ref.referral_bonus_days_total == 15
+        # Приглашённый помечен
+        assert users.get(42).referral_bonus_granted is True
+
+    def test_first_payment_extends_paid_referrer(self, service, users, payments):
+        # Референт уже на pro
+        users.activate_subscription(1, "pro", days=10, card_token="t")
+        before_expires = users.get(1).tariff_expires_at
+
+        users.set_referrer_by_code(42, users.get(1).referral_code)
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+
+        from datetime import datetime, timedelta
+        new_expires = datetime.fromisoformat(users.get(1).tariff_expires_at)
+        old_expires = datetime.fromisoformat(before_expires)
+        delta = new_expires - old_expires
+        assert timedelta(days=14, hours=23) < delta < timedelta(days=15, minutes=1)
+
+    def test_duplicate_webhook_does_not_grant_twice(
+        self, service, users, payments
+    ):
+        users.set_referrer_by_code(42, users.get(1).referral_code)
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        # Первый webhook
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+        # Дубликат webhook'а
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+        # Бонус начислен только один раз
+        assert users.get(1).referrals_paid_count == 1
+        assert users.get(1).referral_bonus_days_total == 15
+
+    def test_second_payment_by_same_user_no_extra_bonus(
+        self, service, users, payments
+    ):
+        # Первый платёж выдал бонус
+        users.set_referrer_by_code(42, users.get(1).referral_code)
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+
+        # Второй ПЛАТЁЖ от того же приглашённого (например, продление)
+        payments.record_created(
+            operation_id="op-2", order_id="sub_42_pro_y",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-2", order_id="sub_42_pro_y",
+            card_token="tok", amount=1290.0,
+        )
+        # Бонус только один — на первую оплату
+        assert users.get(1).referrals_paid_count == 1
+        assert users.get(1).referral_bonus_days_total == 15
+
+
 class TestHandleWebhookFailed:
     def test_marks_failed_in_store(self, service, payments):
         payments.record_created(

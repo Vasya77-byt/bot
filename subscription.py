@@ -113,6 +113,16 @@ class SubscriptionService:
             profile.tariff,
             profile.tariff_expires_at,
         )
+
+        # Если у пользователя есть реферер и это первая оплата —
+        # выдаём референту бонусные дни. Метод идемпотентен.
+        referrer = self.users.award_referral_bonus(rec.user_id)
+        if referrer is not None:
+            logger.info(
+                "Referral bonus granted: referrer=%s days_total=%s",
+                referrer.user_id, referrer.referral_bonus_days_total,
+            )
+
         return profile
 
     def handle_webhook_failed(

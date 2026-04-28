@@ -1187,3 +1187,116 @@ class TestHandleMonitoringList:
         msg = FakeMessage(text="/monitoring", user_id=1)
         await main.handle_monitoring_list(client=None, message=msg)
         assert "∞" in msg.replies[0]["text"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Партнёрская программа: /start ref_<code> + /referral
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHandleStartReferral:
+    @pytest.mark.asyncio
+    async def test_plain_start_no_referral_message(self):
+        msg = FakeMessage(text="/start", user_id=1)
+        await main.handle_start(client=None, message=msg)
+        # Два ответа: welcome + меню
+        assert len(msg.replies) == 2
+        assert "реферальной" not in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_help_command_uses_same_handler(self):
+        msg = FakeMessage(text="/help", user_id=1)
+        await main.handle_start(client=None, message=msg)
+        assert any("умею" in r["text"].lower() for r in msg.replies)
+
+    @pytest.mark.asyncio
+    async def test_valid_referral_code_attaches_user(self):
+        # Сначала создаём референта и берём его код
+        referrer = main.user_store.get(100)
+        ref_code = referrer.referral_code
+
+        msg = FakeMessage(text=f"/start {ref_code}", user_id=42)
+        await main.handle_start(client=None, message=msg)
+
+        # Приглашённый привязан
+        assert main.user_store.get(42).referrer_id == 100
+        # Welcome содержит сообщение о реферале
+        assert "реферальной" in msg.replies[0]["text"].lower()
+        assert "15" in msg.replies[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_self_referral_silently_ignored(self):
+        # Юзер взял свой собственный код
+        profile = main.user_store.get(1)
+        msg = FakeMessage(text=f"/start {profile.referral_code}", user_id=1)
+        await main.handle_start(client=None, message=msg)
+        # Не привязали к самому себе
+        assert main.user_store.get(1).referrer_id is None
+        # И сообщения «реферал» нет
+        assert "реферальной" not in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_invalid_referral_code_silent(self):
+        msg = FakeMessage(text="/start ref_unknown", user_id=42)
+        await main.handle_start(client=None, message=msg)
+        assert main.user_store.get(42).referrer_id is None
+        assert "реферальной" not in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_non_ref_argument_ignored(self):
+        # /start <что-то-не-ref> — не должно ломать
+        msg = FakeMessage(text="/start payment_success", user_id=42)
+        await main.handle_start(client=None, message=msg)
+        assert main.user_store.get(42).referrer_id is None
+
+
+class TestHandleReferral:
+    @pytest.mark.asyncio
+    async def test_shows_code_and_link(self):
+        # Эмулируем pyrogram client с .me.username
+        import types
+        client = types.SimpleNamespace(me=types.SimpleNamespace(username="my_bot"))
+        msg = FakeMessage(text="/referral", user_id=1)
+        await main.handle_referral(client=client, message=msg)
+        text = msg.replies[0]["text"]
+        code = main.user_store.get(1).referral_code
+        assert code in text
+        assert f"https://t.me/my_bot?start={code}" in text
+
+    @pytest.mark.asyncio
+    async def test_no_username_fallback(self):
+        msg = FakeMessage(text="/referral", user_id=1)
+        # client без атрибута me — fallback на /start <код>
+        await main.handle_referral(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        code = main.user_store.get(1).referral_code
+        assert code in text
+
+    @pytest.mark.asyncio
+    async def test_shows_stats(self):
+        # Создаём референта с историей
+        referrer = main.user_store.get(1)
+        # Привязываем 3 приглашённых, у двух из них фейк-флаг bonus_granted
+        main.user_store.set_referrer_by_code(2, referrer.referral_code)
+        main.user_store.set_referrer_by_code(3, referrer.referral_code)
+        main.user_store.set_referrer_by_code(4, referrer.referral_code)
+        main.user_store.award_referral_bonus(2)
+        main.user_store.award_referral_bonus(3)
+
+        msg = FakeMessage(text="/referral", user_id=1)
+        await main.handle_referral(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        # 3 приглашено, 2 оплатили, 30 дней суммарно
+        assert "Приглашено всего: 3" in text
+        assert "Из них оплатили: 2" in text
+        assert "30" in text
+
+
+class TestReferralLinkHelper:
+    def test_with_username(self):
+        link = main._referral_link("my_bot", "ref_abc12345")
+        assert link == "https://t.me/my_bot?start=ref_abc12345"
+
+    def test_without_username_fallback(self):
+        link = main._referral_link("", "ref_abc12345")
+        assert link == "/start ref_abc12345"

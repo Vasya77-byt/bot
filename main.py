@@ -35,7 +35,7 @@ from monitoring import make_snapshot
 from monitoring_scheduler import run_monitoring_loop
 from monitoring_store import MonitoringStore
 from telemetry import init_sentry
-from user_store import TARIFF_MONITORING_LIMITS
+from user_store import REFERRAL_BONUS_DAYS, TARIFF_MONITORING_LIMITS
 from webhook_server import build_app as build_webhook_app, start_webhook_server
 
 
@@ -838,6 +838,81 @@ async def handle_monitoring_list(client: Client, message) -> None:
     await message.reply_text("\n".join(lines))
 
 
+async def handle_start(client: Client, message) -> None:
+    """Команды /start и /help. Поддерживает /start ref_<code> для
+    привязки приглашённого к рефереру."""
+    user_id = message.from_user.id
+    text = message.text or ""
+    parts = text.split()
+
+    referral_message = ""
+    if len(parts) >= 2 and parts[1].startswith("ref_"):
+        # Создаём профиль приглашённого, если его ещё нет, и привязываем
+        user_store.get(user_id)
+        if user_store.set_referrer_by_code(user_id, parts[1]):
+            referral_message = (
+                "🎁 Вы пришли по реферальной ссылке. "
+                "Когда оформите подписку — пригласившему начислится "
+                f"+{REFERRAL_BONUS_DAYS} дней тарифа.\n\n"
+            )
+
+    welcome = (
+        f"{referral_message}"
+        "Я помогу с анализом компаний и подготовкой КП.\n\n"
+        "Что умею:\n"
+        "• Отправьте ИНН — получите анализ компании\n"
+        "• Нажмите кнопку ниже для нужного действия\n"
+        "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
+        "• /kp png <ИНН> — сгенерировать КП в PNG\n"
+        "• /menu — показать меню\n"
+        "• /monitoring — мониторинг ИНН\n"
+        "• /referral — реферальная программа\n"
+        "• /my_subscription — статус подписки\n"
+        "• /documents — правовые документы\n\n"
+        "По всем вопросам: @YRS75"
+    )
+    await message.reply_text(welcome, reply_markup=_reply_keyboard())
+    await message.reply_text(
+        "Выберите действие:",
+        reply_markup=_main_menu(),
+    )
+
+
+def _referral_link(bot_username: str, code: str) -> str:
+    """Формирует deep-link для приглашения."""
+    if not bot_username:
+        return f"/start {code}"
+    return f"https://t.me/{bot_username}?start={code}"
+
+
+async def handle_referral(client: Client, message) -> None:
+    """Команда /referral — показывает реф-код, ссылку и статистику."""
+    user_id = message.from_user.id
+    profile = user_store.get(user_id)
+
+    bot_username = ""
+    me = getattr(client, "me", None)
+    if me is not None:
+        bot_username = getattr(me, "username", "") or ""
+
+    link = _referral_link(bot_username, profile.referral_code)
+    text = (
+        "🤝 Партнёрская программа\n\n"
+        f"Ваша ссылка:\n{link}\n\n"
+        f"Код: {profile.referral_code}\n\n"
+        "Как это работает:\n"
+        f"• За каждого приглашённого, который оформит подписку, вам "
+        f"начислится +{REFERRAL_BONUS_DAYS} дней тарифа.\n"
+        "• Если у вас Free — получите Start на бонусный период.\n"
+        "• Если у вас платный тариф — продлим текущий.\n\n"
+        f"📊 Статистика:\n"
+        f"Приглашено всего: {profile.referrals_count}\n"
+        f"Из них оплатили: {profile.referrals_paid_count}\n"
+        f"Получено бонусных дней: {profile.referral_bonus_days_total}"
+    )
+    await message.reply_text(text, disable_web_page_preview=True)
+
+
 async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
@@ -872,25 +947,6 @@ def main() -> None:
     else:
         logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")
 
-    async def start_handler(client: Client, message) -> None:
-        await message.reply_text(
-            "Я помогу с анализом компаний и подготовкой КП.\n\n"
-            "Что умею:\n"
-            "• Отправьте ИНН — получите анализ компании\n"
-            "• Нажмите кнопку ниже для нужного действия\n"
-            "• /kp pdf <ИНН> — сгенерировать КП в PDF\n"
-            "• /kp png <ИНН> — сгенерировать КП в PNG\n"
-            "• /menu — показать меню\n"
-            "• /my_subscription — статус подписки\n"
-            "• /documents — правовые документы\n\n"
-            "По всем вопросам: @YRS75",
-            reply_markup=_reply_keyboard(),
-        )
-        await message.reply_text(
-            "Выберите действие:",
-            reply_markup=_main_menu(),
-        )
-
     async def menu_handler(client: Client, message) -> None:
         await message.reply_text(
             "Выберите действие:",
@@ -899,7 +955,7 @@ def main() -> None:
 
     def _build_handlers() -> list:
         return [
-            MessageHandler(start_handler, filters.command(["start", "help"])),
+            MessageHandler(handle_start, filters.command(["start", "help"])),
             MessageHandler(menu_handler, filters.command(["menu"])),
             MessageHandler(handle_kp_command, filters.command(["kp"])),
             MessageHandler(handle_my_subscription, filters.command(["my_subscription"])),
@@ -908,6 +964,7 @@ def main() -> None:
             MessageHandler(handle_monitor_add, filters.command(["monitor"])),
             MessageHandler(handle_monitor_remove, filters.command(["unmonitor"])),
             MessageHandler(handle_monitoring_list, filters.command(["monitoring"])),
+            MessageHandler(handle_referral, filters.command(["referral"])),
             MessageHandler(handle_offer, filters.command(["offer"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
@@ -916,7 +973,7 @@ def main() -> None:
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
-                    "monitor", "unmonitor", "monitoring",
+                    "monitor", "unmonitor", "monitoring", "referral",
                     "offer", "documents",
                 ]),
             ),

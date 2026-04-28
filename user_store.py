@@ -11,9 +11,15 @@
 import json
 import logging
 import os
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
+
+# Сколько дней даём референту за каждую первую оплату приглашённого
+REFERRAL_BONUS_DAYS = 15
+# Тариф, который активируется референту-Free при первой оплате его приглашённого
+REFERRAL_BONUS_TARIFF_FOR_FREE = "start"
 
 logger = logging.getLogger("financial-architect")
 
@@ -125,6 +131,13 @@ class UserProfile:
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
     email: str = ""                  # email для чека
+    # Партнёрская программа
+    referral_code: str = ""              # личный код вида "ref_<8 hex>"
+    referrer_id: Optional[int] = None    # кто пригласил этого пользователя
+    referral_bonus_granted: bool = False # бонус референту уже выдан (one-shot)
+    referrals_count: int = 0             # сколько привлёк (включая Free)
+    referrals_paid_count: int = 0        # сколько привлечённых оплатили
+    referral_bonus_days_total: int = 0   # сколько дней получил суммарно
 
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
@@ -210,11 +223,37 @@ class UserStore:
     def get(self, user_id: int) -> UserProfile:
         key = str(user_id)
         if key not in self._data:
-            profile = UserProfile(user_id=user_id)
+            profile = UserProfile(
+                user_id=user_id,
+                referral_code=self._generate_referral_code(),
+            )
             self._data[key] = asdict(profile)
             self._save()
             return profile
-        return self._profile_from_raw(self._data[key])
+
+        profile = self._profile_from_raw(self._data[key])
+        # Бэкфилл: у старых пользователей без кода — генерируем при первом get
+        if not profile.referral_code:
+            profile.referral_code = self._generate_referral_code()
+            self._data[key] = asdict(profile)
+            self._save()
+        return profile
+
+    def _generate_referral_code(self) -> str:
+        """Генерирует уникальный реферальный код. Защита от коллизий —
+        проверка по уже выданным."""
+        existing = {
+            raw.get("referral_code")
+            for raw in self._data.values()
+            if raw.get("referral_code")
+        }
+        for _ in range(20):
+            code = f"ref_{uuid.uuid4().hex[:8]}"
+            if code not in existing:
+                return code
+        # На практике 20 итераций uuid4 дают вероятность коллизии ~10^-50.
+        # Если попали сюда — что-то сломано, кидаем явно.
+        raise RuntimeError("Failed to generate unique referral code")
 
     def save_profile(self, profile: UserProfile) -> None:
         self._data[str(profile.user_id)] = asdict(profile)
@@ -295,3 +334,94 @@ class UserStore:
         """Итератор по всем профилям (для планировщика)."""
         for raw in self._data.values():
             yield self._profile_from_raw(raw)
+
+    # ── Партнёрская программа ─────────────────────────────────────────
+
+    def find_by_referral_code(self, code: str) -> Optional[UserProfile]:
+        """Поиск пользователя по его реферальному коду."""
+        if not code:
+            return None
+        for raw in self._data.values():
+            if raw.get("referral_code") == code:
+                return self._profile_from_raw(raw)
+        return None
+
+    def set_referrer_by_code(self, invited_user_id: int, code: str) -> bool:
+        """Привязывает приглашённого к референту по его коду.
+        Возвращает True, если привязка прошла; False — если нельзя
+        (само-реферал, нет такого кода, уже есть реферер)."""
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is not None:
+            return False  # уже привязан
+        referrer = self.find_by_referral_code(code)
+        if referrer is None:
+            return False  # неизвестный код
+        if referrer.user_id == invited_user_id:
+            return False  # само-реферал
+
+        invited.referrer_id = referrer.user_id
+        self.save_profile(invited)
+
+        # Инкрементируем счётчик у референта
+        referrer.referrals_count += 1
+        self.save_profile(referrer)
+        return True
+
+    def award_referral_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Выдаёт референту бонусные дни тарифа за первую оплату
+        приглашённого. Идемпотентно: если бонус уже выдан для этого
+        приглашённого, повторно не начислит.
+
+        Возвращает обновлённый профиль референта, либо None, если
+        бонуса не положено (нет реферера / уже выдан / приглашённый
+        неизвестен).
+
+        Логика дней:
+        - Если у референта free и подписка не активна — активируем
+          start на N дней без auto_renew (карты у него нет).
+        - Если у референта активна платная подписка — продлеваем на
+          тот же тариф на N дней. activate_subscription знает, что
+          add'ить к текущему expires.
+        """
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is None:
+            return None
+        if invited.referral_bonus_granted:
+            return None
+
+        referrer = self._raw_profile(invited.referrer_id)
+        if referrer is None:
+            return None
+
+        if referrer.tariff == "free" or not referrer.is_subscription_active():
+            # Free-референт получает start на 15 дней. activate_subscription
+            # выставит auto_renew=True; тут же гасим, т.к. карты нет.
+            self.activate_subscription(
+                referrer.user_id,
+                REFERRAL_BONUS_TARIFF_FOR_FREE,
+                days=days,
+            )
+            self.disable_auto_renew(referrer.user_id)
+        else:
+            # Активный платник — продлеваем текущий тариф
+            self.activate_subscription(referrer.user_id, referrer.tariff, days=days)
+
+        # Финальные обновления статистики
+        referrer = self._raw_profile(referrer.user_id)
+        referrer.referrals_paid_count += 1
+        referrer.referral_bonus_days_total += days
+        self.save_profile(referrer)
+
+        # Помечаем приглашённого, чтобы не выдать повторно
+        invited = self.get(invited_user_id)
+        invited.referral_bonus_granted = True
+        self.save_profile(invited)
+
+        return referrer
+
+    def _raw_profile(self, user_id: int) -> Optional[UserProfile]:
+        """Возвращает профиль, не создавая его если нет."""
+        raw = self._data.get(str(user_id))
+        return self._profile_from_raw(raw) if raw else None

@@ -19,7 +19,6 @@ from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
 from offer import OFFER_TEXT
-from privacy import PRIVACY_TEXT
 from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
 from renderers import render_comparison, render_profile, render_response
@@ -151,17 +150,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 f"⏳ {label} — раздел в разработке.\n"
                 f"Будет доступен после подключения ЗЧБ и Контур.Фокус."
             )
-        return
-
-    # Кнопки документов
-    if data == "doc_offer":
-        await callback_query.answer()
-        await callback_query.message.reply_text(OFFER_TEXT)
-        return
-
-    if data == "doc_privacy":
-        await callback_query.answer()
-        await callback_query.message.reply_text(PRIVACY_TEXT)
         return
 
     # Кнопки выбора тарифа — создаём платёж
@@ -716,8 +704,9 @@ async def handle_offer(client: Client, message) -> None:
 
 def _documents_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📜 Публичная оферта", callback_data="doc_offer")],
-        [InlineKeyboardButton("🔒 Политика конфиденциальности", callback_data="doc_privacy")],
+        [InlineKeyboardButton("📜 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27")],
+        [InlineKeyboardButton("📋 Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-04-27-19")],
+        [InlineKeyboardButton("🔒 Обработка персональных данных", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-04-27")],
     ])
 
 

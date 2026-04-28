@@ -27,6 +27,14 @@ TARIFF_LIMITS: Dict[str, Optional[int]] = {
     "business": None,  # безлимит
 }
 
+# Лимиты подписок на мониторинг ИНН (одновременно отслеживаемых)
+TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
+    "free": 0,         # на free мониторинг недоступен
+    "start": 5,
+    "pro": 50,
+    "business": None,  # безлимит
+}
+
 # Цены тарифов в рублях (месячная подписка)
 TARIFF_PRICES: Dict[str, int] = {
     "start": 490,

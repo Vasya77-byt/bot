@@ -31,7 +31,11 @@ from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
 from storage import save_file_bytes
 from metadata_store import MetadataStore
+from monitoring import make_snapshot
+from monitoring_scheduler import run_monitoring_loop
+from monitoring_store import MonitoringStore
 from telemetry import init_sentry
+from user_store import TARIFF_MONITORING_LIMITS
 from webhook_server import build_app as build_webhook_app, start_webhook_server
 
 
@@ -43,6 +47,7 @@ company_service = CompanyService()
 security_service = SecurityService()
 user_store = UserStore()
 payments_store = PaymentsStore()
+monitoring_store = MonitoringStore()
 
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
@@ -226,6 +231,15 @@ async def handle_text_message(client: Client, message) -> None:
             await message.reply_text(
                 "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
                 "Нажмите /menu для выбора действия."
+            )
+        return
+
+    if pending_action == "monitor_add":
+        if parsed.inn:
+            await _do_monitor_add(message, user_id, parsed.inn)
+        else:
+            await message.reply_text(
+                "⚠️ Не распознала ИНН. Подписка не создана. /monitor <ИНН>"
             )
         return
 
@@ -698,6 +712,132 @@ async def handle_enable_subscription(client: Client, message) -> None:
     await message.reply_text("🔔 Автопродление включено.")
 
 
+def _monitoring_limit(profile) -> Optional[int]:
+    return TARIFF_MONITORING_LIMITS.get(profile.effective_tariff(), 0)
+
+
+async def handle_monitor_add(client: Client, message) -> None:
+    """Команда: /monitor <ИНН> — подписаться на мониторинг."""
+    text = message.text or ""
+    args = text.split()
+    user_id = message.from_user.id
+    inn = args[1] if len(args) >= 2 else None
+
+    if not inn:
+        # Запросим ИНН
+        _user_state[user_id] = "monitor_add"
+        await message.reply_text(
+            "👁 Отправьте ИНН компании для подписки на мониторинг (10 или 12 цифр):"
+        )
+        return
+
+    await _do_monitor_add(message, user_id, inn)
+
+
+async def _do_monitor_add(message, user_id: int, inn: str) -> None:
+    profile = user_store.get(user_id)
+    limit = _monitoring_limit(profile)
+    current = monitoring_store.count_for_user(user_id)
+
+    if limit == 0:
+        await message.reply_text(
+            "👁 Мониторинг ИНН недоступен на тарифе Free.\n\n"
+            "Перейдите на Start или выше — нажмите «💎 Тарифы»."
+        )
+        return
+
+    # Проверяем лимит до того, как тратить запрос на DaData/FNS
+    existing = monitoring_store.get(user_id, inn)
+    if not existing and limit is not None and current >= limit:
+        await message.reply_text(
+            f"⛔️ Лимит мониторинга исчерпан: {current}/{limit}.\n\n"
+            "Удалите одну из подписок (/unmonitor <ИНН>) или перейдите на "
+            "более высокий тариф."
+        )
+        return
+
+    company = await company_service.fetch(inn)
+    if not company:
+        await message.reply_text(
+            f"⚠️ Не удалось получить данные по ИНН {inn}. Подписка не создана."
+        )
+        return
+
+    security = None
+    try:
+        security = await security_service.check(
+            inn=inn,
+            name=company.name,
+            okved=company.okved_main,
+        )
+    except Exception as exc:
+        logger.error("Monitoring add: security check failed for %s: %s", inn, exc)
+
+    snapshot = make_snapshot(company, security)
+    monitoring_store.add(
+        user_id=user_id,
+        inn=inn,
+        name=company.name or "",
+        snapshot=snapshot,
+    )
+
+    if existing:
+        await message.reply_text(
+            f"🔄 Подписка обновлена: {company.name or inn} (ИНН {inn}).\n"
+            "Уведомлю при изменениях статуса, директора, ФССП и т.п."
+        )
+    else:
+        await message.reply_text(
+            f"✅ Подписка создана: {company.name or inn} (ИНН {inn}).\n"
+            "Проверка раз в сутки. Уведомлю при изменениях."
+        )
+
+
+async def handle_monitor_remove(client: Client, message) -> None:
+    """Команда: /unmonitor <ИНН>"""
+    text = message.text or ""
+    args = text.split()
+    user_id = message.from_user.id
+
+    if len(args) < 2:
+        await message.reply_text(
+            "Укажите ИНН для отписки: /unmonitor 7707083893"
+        )
+        return
+
+    inn = args[1]
+    removed = monitoring_store.remove(user_id, inn)
+    if removed:
+        await message.reply_text(f"🔕 Подписка на ИНН {inn} удалена.")
+    else:
+        await message.reply_text(f"Подписки на ИНН {inn} нет.")
+
+
+async def handle_monitoring_list(client: Client, message) -> None:
+    """Команда: /monitoring — список активных подписок."""
+    user_id = message.from_user.id
+    subs = monitoring_store.list_for_user(user_id)
+    profile = user_store.get(user_id)
+    limit = _monitoring_limit(profile)
+    limit_str = "∞" if limit is None else str(limit)
+
+    if not subs:
+        await message.reply_text(
+            f"👁 Активных подписок нет (лимит {limit_str}).\n\n"
+            "Добавить: /monitor <ИНН>"
+        )
+        return
+
+    lines = [f"👁 Ваши подписки ({len(subs)}/{limit_str}):", ""]
+    for sub in subs:
+        title = sub.name or sub.inn
+        last = sub.last_checked[:10] if sub.last_checked else "—"
+        lines.append(f"• {title} (ИНН {sub.inn}) — проверено {last}")
+    lines.append("")
+    lines.append("Удалить: /unmonitor <ИНН>")
+    await message.reply_text("\n".join(lines))
+
+
 async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
@@ -765,6 +905,9 @@ def main() -> None:
             MessageHandler(handle_my_subscription, filters.command(["my_subscription"])),
             MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])),
             MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])),
+            MessageHandler(handle_monitor_add, filters.command(["monitor"])),
+            MessageHandler(handle_monitor_remove, filters.command(["unmonitor"])),
+            MessageHandler(handle_monitoring_list, filters.command(["monitoring"])),
             MessageHandler(handle_offer, filters.command(["offer"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
@@ -773,6 +916,7 @@ def main() -> None:
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
+                    "monitor", "unmonitor", "monitoring",
                     "offer", "documents",
                 ]),
             ),
@@ -816,6 +960,16 @@ def main() -> None:
             tasks.append(asyncio.create_task(
                 run_renewal_loop(subscription_service, notify=notify)
             ))
+
+        # Мониторинг подписок на ИНН — запускаем независимо от платежей
+        tasks.append(asyncio.create_task(
+            run_monitoring_loop(
+                monitoring=monitoring_store,
+                company_service=company_service,
+                security_service=security_service,
+                notify=notify,
+            )
+        ))
 
         logger.info("Bot is running. Press Ctrl+C to stop.")
         try:

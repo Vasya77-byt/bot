@@ -136,6 +136,7 @@ _install_fake_pyrogram()
 import pytest  # noqa: E402
 
 import main  # noqa: E402
+from monitoring_store import MonitoringStore  # noqa: E402
 from parsers import ParseResult  # noqa: E402
 from payments_store import PaymentsStore  # noqa: E402
 from schemas import CompanyData  # noqa: E402
@@ -191,8 +192,10 @@ def isolated_main(tmp_path, monkeypatch):
     """Перед каждым тестом подменяем глобальные сторы в main на свежие."""
     fresh_users = UserStore(filepath=str(tmp_path / "users.json"))
     fresh_payments = PaymentsStore(filepath=str(tmp_path / "payments.json"))
+    fresh_monitoring = MonitoringStore(filepath=str(tmp_path / "monitoring.json"))
     monkeypatch.setattr(main, "user_store", fresh_users)
     monkeypatch.setattr(main, "payments_store", fresh_payments)
+    monkeypatch.setattr(main, "monitoring_store", fresh_monitoring)
     monkeypatch.setattr(main, "_user_state", {})
     # subscription_service по умолчанию None
     monkeypatch.setattr(main, "subscription_service", None)
@@ -1010,3 +1013,177 @@ class TestResolveCompany:
     async def test_returns_none_when_no_inn(self):
         result = await main._resolve_company("просто текст", inn_arg=None)
         assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Monitoring handlers: /monitor /unmonitor /monitoring
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHandleMonitorAdd:
+    @pytest.mark.asyncio
+    async def test_no_inn_arg_prompts_for_inn(self):
+        msg = FakeMessage(text="/monitor", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        assert main._user_state[1] == "monitor_add"
+        assert "ИНН" in msg.replies[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_free_user_blocked(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="X")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        msg = FakeMessage(text="/monitor 7707083893", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        assert "Free" in msg.replies[0]["text"]
+        # Подписка не создана
+        assert main.monitoring_store.count_for_user(1) == 0
+
+    @pytest.mark.asyncio
+    async def test_start_user_can_subscribe(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="ООО Тест", status="Действующая")
+
+        async def fake_security(**kw):
+            return SecurityResult(risk_level="low")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.security_service, "check", fake_security)
+        main.user_store.activate_subscription(1, "start", days=30, card_token="t")
+
+        msg = FakeMessage(text="/monitor 7707083893", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        assert "Подписка создана" in msg.replies[0]["text"]
+        assert main.monitoring_store.count_for_user(1) == 1
+        sub = main.monitoring_store.get(1, "7707083893")
+        assert sub.snapshot.get("status") == "Действующая"
+
+    @pytest.mark.asyncio
+    async def test_limit_exhausted_blocks_new_subscription(self, monkeypatch):
+        # На start лимит = 5; занимаем все
+        for i in range(5):
+            main.monitoring_store.add(1, f"ИНН-{i}", f"Компания {i}")
+        main.user_store.activate_subscription(1, "start", days=30, card_token="t")
+
+        async def fake_fetch(inn):
+            raise AssertionError("must not fetch when limit exhausted")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        msg = FakeMessage(text="/monitor 7707083893", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        assert "Лимит" in msg.replies[0]["text"]
+        assert main.monitoring_store.count_for_user(1) == 5
+
+    @pytest.mark.asyncio
+    async def test_existing_subscription_updates_in_place(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="ООО Свежая", status="Действующая")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.security_service, "check",
+                            lambda **kw: __import__("asyncio").sleep(0)
+                            if False else None)
+        # Простая заглушка под async
+        async def fake_security(**kw):
+            return SecurityResult(risk_level="low")
+
+        monkeypatch.setattr(main.security_service, "check", fake_security)
+        main.user_store.activate_subscription(1, "start", days=30, card_token="t")
+
+        # Существующая подписка
+        main.monitoring_store.add(1, "7707083893", "Старое имя")
+
+        msg = FakeMessage(text="/monitor 7707083893", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        # Не было превышения лимита, существующая подписка
+        assert main.monitoring_store.count_for_user(1) == 1
+        # Уведомление о ОБНОВЛЕНИИ, а не СОЗДАНИИ
+        text = msg.replies[0]["text"]
+        assert "обновлена" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_company_not_found_no_subscription_created(self, monkeypatch):
+        async def fake_fetch(inn):
+            return None
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        main.user_store.activate_subscription(1, "start", days=30, card_token="t")
+
+        msg = FakeMessage(text="/monitor 7707083893", user_id=1)
+        await main.handle_monitor_add(client=None, message=msg)
+        assert "не удалось" in msg.replies[0]["text"].lower()
+        assert main.monitoring_store.count_for_user(1) == 0
+
+    @pytest.mark.asyncio
+    async def test_pending_monitor_add_via_text_message(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="X", status="Действующая")
+
+        async def fake_security(**kw):
+            return SecurityResult(risk_level="low")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.security_service, "check", fake_security)
+        main.user_store.activate_subscription(1, "pro", days=30, card_token="t")
+
+        # Сценарий: /monitor без ИНН → state=monitor_add → текстовый ИНН
+        main._user_state[1] = "monitor_add"
+        msg = FakeMessage(text="7707083893", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        assert main.monitoring_store.count_for_user(1) == 1
+
+
+class TestHandleMonitorRemove:
+    @pytest.mark.asyncio
+    async def test_no_inn_arg_shows_usage(self):
+        msg = FakeMessage(text="/unmonitor", user_id=1)
+        await main.handle_monitor_remove(client=None, message=msg)
+        assert "/unmonitor" in msg.replies[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_removes_existing(self):
+        main.monitoring_store.add(1, "7707083893", "X")
+        msg = FakeMessage(text="/unmonitor 7707083893", user_id=1)
+        await main.handle_monitor_remove(client=None, message=msg)
+        assert "удалена" in msg.replies[0]["text"].lower()
+        assert main.monitoring_store.count_for_user(1) == 0
+
+    @pytest.mark.asyncio
+    async def test_remove_missing_friendly_message(self):
+        msg = FakeMessage(text="/unmonitor 7707083893", user_id=1)
+        await main.handle_monitor_remove(client=None, message=msg)
+        assert "нет" in msg.replies[0]["text"].lower()
+
+
+class TestHandleMonitoringList:
+    @pytest.mark.asyncio
+    async def test_empty_list(self):
+        msg = FakeMessage(text="/monitoring", user_id=1)
+        await main.handle_monitoring_list(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        assert "нет" in text.lower()
+        # Free → лимит 0
+        assert "0" in text
+
+    @pytest.mark.asyncio
+    async def test_list_shows_subscriptions(self):
+        main.user_store.activate_subscription(1, "pro", days=30, card_token="t")
+        main.monitoring_store.add(1, "111", "ООО Альфа")
+        main.monitoring_store.add(1, "222", "ООО Бета")
+
+        msg = FakeMessage(text="/monitoring", user_id=1)
+        await main.handle_monitoring_list(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        assert "ООО Альфа" in text
+        assert "ООО Бета" in text
+        assert "111" in text
+        assert "222" in text
+
+    @pytest.mark.asyncio
+    async def test_business_shows_infinity_limit(self):
+        main.user_store.activate_subscription(1, "business", days=30, card_token="t")
+        main.monitoring_store.add(1, "111", "X")
+        msg = FakeMessage(text="/monitoring", user_id=1)
+        await main.handle_monitoring_list(client=None, message=msg)
+        assert "∞" in msg.replies[0]["text"]

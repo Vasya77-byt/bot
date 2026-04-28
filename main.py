@@ -723,6 +723,10 @@ async def handle_disclaimer(client: Client, message) -> None:
     await message.reply_text(DISCLAIMER_TEXT)
 
 
+async def handle_tarifs(client: Client, message) -> None:
+    await message.reply_text(_tariffs_text(), reply_markup=_tariffs_keyboard())
+
+
 def _documents_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📜 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27")],
@@ -799,6 +803,7 @@ def main() -> None:
             MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])),
             MessageHandler(handle_offer, filters.command(["offer"])),
             MessageHandler(handle_disclaimer, filters.command(["disclaimer"])),
+            MessageHandler(handle_tarifs, filters.command(["tarifs"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
             MessageHandler(
@@ -806,7 +811,7 @@ def main() -> None:
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
-                    "offer", "disclaimer", "documents",
+                    "offer", "disclaimer", "tarifs", "documents",
                 ]),
             ),
         ]

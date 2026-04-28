@@ -500,10 +500,29 @@ class TestHandleTextMessage:
         assert "Ваш профиль" in msg.replies[0]["text"]
 
     @pytest.mark.asyncio
-    async def test_unknown_text_falls_back_to_help(self):
-        msg = FakeMessage(text="привет", user_id=1)
+    async def test_short_text_falls_back_to_help(self, monkeypatch):
+        # Текст короче 3 символов / без букв → не идёт в поиск,
+        # а попадает в подсказку
+        async def fake_suggest(query, count=5):
+            raise AssertionError("suggest must not be called for short text")
+
+        monkeypatch.setattr(main.company_service, "suggest", fake_suggest)
+        msg = FakeMessage(text="!!", user_id=1)
         await main.handle_text_message(client=None, message=msg)
         assert "/menu" in msg.replies[-1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_text_triggers_search_with_no_results(self, monkeypatch):
+        # «привет» проходит как кандидат на название → поиск
+        async def empty_suggest(query, count=5):
+            return []
+
+        monkeypatch.setattr(main.company_service, "suggest", empty_suggest)
+        msg = FakeMessage(text="привет", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        text = msg.replies[-1]["text"]
+        assert "ничего не найдено" in text.lower()
+        assert "ИНН" in text
 
     @pytest.mark.asyncio
     async def test_reply_button_without_inn_asks_for_inn(self):
@@ -1300,3 +1319,192 @@ class TestReferralLinkHelper:
     def test_without_username_fallback(self):
         link = main._referral_link("", "ref_abc12345")
         assert link == "/start ref_abc12345"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Поиск по названию: _looks_like_company_query, search results keyboard,
+# handle_text_message → suggest, handle_callback search_select:
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestLooksLikeCompanyQuery:
+    @pytest.mark.parametrize("text", [
+        "Сбер", "ООО Альфа", "Lukoil", "Зелёный банк",
+    ])
+    def test_valid_queries(self, text):
+        assert main._looks_like_company_query(text) is True
+
+    @pytest.mark.parametrize("text", ["", " ", "12", "ab", "  ab "])
+    def test_too_short(self, text):
+        assert main._looks_like_company_query(text) is False
+
+    def test_only_digits_or_punct_rejected(self):
+        assert main._looks_like_company_query("12345") is False
+        assert main._looks_like_company_query("!!!@@@") is False
+
+    def test_command_rejected(self):
+        assert main._looks_like_company_query("/help") is False
+
+    def test_mixed_alpha_digit_accepted(self):
+        assert main._looks_like_company_query("ABC123") is True
+
+
+class TestSearchResultsKeyboard:
+    def test_button_per_company(self):
+        c1 = CompanyData(inn="111", name="A")
+        c2 = CompanyData(inn="222", name="B")
+        kb = main._search_results_keyboard([c1, c2])
+        assert len(kb.inline_keyboard) == 2
+
+    def test_skips_companies_without_inn(self):
+        c1 = CompanyData(inn="111", name="A")
+        c2 = CompanyData(inn=None, name="B")
+        kb = main._search_results_keyboard([c1, c2])
+        assert len(kb.inline_keyboard) == 1
+
+    def test_callback_data_format(self):
+        c = CompanyData(inn="7707083893", name="X")
+        kb = main._search_results_keyboard([c])
+        btn = kb.inline_keyboard[0][0]
+        assert btn.callback_data == "search_select:7707083893"
+
+    def test_label_includes_inn(self):
+        c = CompanyData(inn="7707083893", name="ООО Тест")
+        kb = main._search_results_keyboard([c])
+        assert "7707083893" in kb.inline_keyboard[0][0].text
+
+    def test_long_name_truncated_to_64_chars(self):
+        c = CompanyData(inn="111", name="A" * 200)
+        kb = main._search_results_keyboard([c])
+        # Telegram-лимит ~64 символа
+        assert len(kb.inline_keyboard[0][0].text) <= 64
+
+    def test_empty_list(self):
+        kb = main._search_results_keyboard([])
+        assert kb.inline_keyboard == []
+
+
+class TestSearchTrigger:
+    @pytest.mark.asyncio
+    async def test_search_triggered_for_alpha_text(self, monkeypatch):
+        results = [
+            CompanyData(inn="111", name="ПАО Сбербанк"),
+            CompanyData(inn="222", name="ООО Сбер Авто"),
+        ]
+        captured = {}
+
+        async def fake_suggest(query, count=5):
+            captured["query"] = query
+            captured["count"] = count
+            return results
+
+        monkeypatch.setattr(main.company_service, "suggest", fake_suggest)
+        msg = FakeMessage(text="Сбер", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+
+        assert captured["query"] == "Сбер"
+        assert captured["count"] == 5
+        # Ответ — заголовок и клавиатура
+        assert "найдено" in msg.replies[0]["text"].lower()
+        kb = msg.replies[0]["reply_markup"]
+        assert len(kb.inline_keyboard) == 2
+
+    @pytest.mark.asyncio
+    async def test_search_with_no_results_shows_friendly_message(self, monkeypatch):
+        async def empty_suggest(query, count=5):
+            return []
+
+        monkeypatch.setattr(main.company_service, "suggest", empty_suggest)
+        msg = FakeMessage(text="ОченьРедкоеНазваниеXYZ", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        assert "ничего не найдено" in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_search_skipped_for_inn_input(self, monkeypatch):
+        # ИНН должен идти в обычный INN-флоу, не в поиск
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="X")
+
+        async def must_not_be_called(query, count=5):
+            raise AssertionError("suggest must not be called for INN input")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.company_service, "suggest", must_not_be_called)
+        msg = FakeMessage(text="7707083893", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        # Просто проверим что не было исключения и ответ есть
+        assert msg.replies
+
+    @pytest.mark.asyncio
+    async def test_search_skipped_when_pending_action(self, monkeypatch):
+        # При активном pending state поиск не должен запускаться
+        async def must_not_be_called(query, count=5):
+            raise AssertionError("suggest must not be called with pending state")
+
+        monkeypatch.setattr(main.company_service, "suggest", must_not_be_called)
+        main._user_state[1] = "mode_internal_analysis"
+        msg = FakeMessage(text="название без инн", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        # Должно быть сообщение про сброс состояния
+        assert "сброшено" in msg.replies[0]["text"].lower()
+
+
+class TestSearchSelectCallback:
+    @pytest.mark.asyncio
+    async def test_select_runs_full_analysis(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="ПАО Сбербанк", status="Действующая")
+
+        async def fake_security(**kw):
+            return SecurityResult(risk_level="low")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.security_service, "check", fake_security)
+
+        cb = FakeCallbackQuery("search_select:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # Ответ — полный анализ + кнопки действий
+        assert any("Стоп-листы" in r["text"] for r in cb.message.replies)
+        # Лимит инкрементнулся (free=3, после 1 проверки → checks_today=1)
+        assert main.user_store.get(1).checks_today == 1
+
+    @pytest.mark.asyncio
+    async def test_select_blocked_when_limit_exhausted(self, monkeypatch):
+        # Исчерпываем лимит
+        for _ in range(3):
+            await main._check_limit_and_count(FakeMessage(user_id=1), 1)
+
+        async def fake_fetch(inn):
+            raise AssertionError("must not fetch when limit exhausted")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        cb = FakeCallbackQuery("search_select:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        assert "Лимит" in cb.message.replies[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_select_with_empty_inn_does_nothing(self, monkeypatch):
+        async def fake_fetch(inn):
+            raise AssertionError("must not fetch for empty INN")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        cb = FakeCallbackQuery("search_select:", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # Колбэк ответил, но без сообщений
+        assert cb.answered
+        assert cb.message.replies == []
+
+    @pytest.mark.asyncio
+    async def test_select_security_failure_does_not_crash(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="X")
+
+        async def boom_security(**kw):
+            raise RuntimeError("FSSP down")
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.security_service, "check", boom_security)
+        cb = FakeCallbackQuery("search_select:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # Ответ всё равно пришёл
+        assert cb.message.replies

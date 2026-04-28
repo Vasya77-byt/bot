@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from dadata_client import DaDataClient
 from fns_client import FnsClient
@@ -61,6 +61,17 @@ class CompanyService:
         merged = self._merge(results, inn)
         logger.info("Merged company data for INN %s from %d source(s)", inn, len(results))
         return merged
+
+    async def suggest(self, query: str, count: int = 5) -> List[CompanyData]:
+        """Поиск компаний по началу названия. Возвращает список
+        кандидатов от DaData; пустой список при ошибке/пустом запросе."""
+        if not query or not query.strip():
+            return []
+        try:
+            return await self.dadata.suggest_by_name(query, count=count)
+        except Exception as exc:
+            logger.warning("CompanyService suggest failed for '%s': %s", query, exc)
+            return []
 
     @staticmethod
     def _merge(results: list[CompanyData], inn: str) -> CompanyData:

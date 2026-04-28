@@ -237,3 +237,146 @@ class TestDaDataFetchCompany:
             lambda *a, **kw: FakeResponse(200, {"suggestions": []}),
         )
         assert await client.fetch_company("123") is None
+
+
+class TestDaDataSuggestByName:
+    @pytest.mark.asyncio
+    async def test_no_api_key_returns_empty(self, monkeypatch):
+        monkeypatch.delenv("DADATA_API_KEY", raising=False)
+        client = DaDataClient()
+        assert await client.suggest_by_name("Сбер") == []
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        assert await client.suggest_by_name("") == []
+        assert await client.suggest_by_name("   ") == []
+
+    @pytest.mark.asyncio
+    async def test_returns_list_of_companies(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+
+        sug1 = _suggestion()
+        sug2 = _suggestion()
+        sug2["data"]["inn"] = "9999999999"
+        sug2["data"]["name"] = {"full_with_opf": "ООО Альфа"}
+        sug2["value"] = "ООО Альфа"
+
+        monkeypatch.setattr(
+            dadata_client.requests, "post",
+            lambda *a, **kw: FakeResponse(200, {"suggestions": [sug1, sug2]}),
+        )
+        result = await client.suggest_by_name("Сбер")
+        assert len(result) == 2
+        assert isinstance(result[0], CompanyData)
+        assert result[0].source == "dadata"
+        assert result[1].name == "ООО Альфа"
+        assert result[1].inn == "9999999999"
+
+    @pytest.mark.asyncio
+    async def test_passes_query_and_count_to_api(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse(200, {"suggestions": []})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.suggest_by_name("Сбер", count=7)
+
+        assert captured["url"].endswith("/suggest/party")
+        assert captured["json"] == {"query": "Сбер", "count": 7}
+
+    @pytest.mark.asyncio
+    async def test_count_clamped_to_max_20(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return FakeResponse(200, {"suggestions": []})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.suggest_by_name("Сбер", count=100)
+        assert captured["json"]["count"] == 20
+
+    @pytest.mark.asyncio
+    async def test_count_clamped_to_min_1(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return FakeResponse(200, {"suggestions": []})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.suggest_by_name("Сбер", count=0)
+        assert captured["json"]["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_query_trimmed(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["json"] = json
+            return FakeResponse(200, {"suggestions": []})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.suggest_by_name("  Сбер  ")
+        assert captured["json"]["query"] == "Сбер"
+
+    @pytest.mark.asyncio
+    async def test_non_200_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        monkeypatch.setattr(
+            dadata_client.requests, "post",
+            lambda *a, **kw: FakeResponse(500, {}, text="server error"),
+        )
+        assert await client.suggest_by_name("Сбер") == []
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+
+        def boom(*a, **kw):
+            raise ConnectionError("dns fail")
+
+        monkeypatch.setattr(dadata_client.requests, "post", boom)
+        assert await client.suggest_by_name("Сбер") == []
+
+    @pytest.mark.asyncio
+    async def test_authorization_header_passed(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "secret-token")
+        client = DaDataClient()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["headers"] = headers
+            return FakeResponse(200, {"suggestions": []})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.suggest_by_name("Сбер")
+        assert captured["headers"]["Authorization"] == "Token secret-token"
+
+    @pytest.mark.asyncio
+    async def test_each_result_has_source_dadata(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        monkeypatch.setattr(
+            dadata_client.requests, "post",
+            lambda *a, **kw: FakeResponse(200, {"suggestions": [_suggestion(), _suggestion()]}),
+        )
+        result = await client.suggest_by_name("Сбер")
+        assert all(c.source == "dadata" for c in result)

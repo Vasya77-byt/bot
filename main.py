@@ -157,6 +157,40 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
         return
 
+    # Выбор компании из результатов поиска по названию
+    if data.startswith("search_select:"):
+        await callback_query.answer()
+        inn = data.split(":", 1)[1]
+        if not inn:
+            return
+        # Засчитываем как обычную проверку — лимиты должны работать
+        allowed = await _check_limit_and_count(callback_query.message, user_id)
+        if not allowed:
+            return
+        company = await company_service.fetch(inn)
+        sec_result = None
+        try:
+            sec_result = await security_service.check(
+                inn=inn,
+                name=company.name if company else None,
+                okved=company.okved_main if company else None,
+            )
+        except Exception as exc:
+            logger.error("Security check failed for INN %s: %s", inn, exc)
+        parsed_inner = ParseResult(
+            raw_text=inn, inn=inn, mode="internal_analysis",
+            is_request=False, is_proposal=False, company_data=company,
+        )
+        reply = render_response(
+            parsed=parsed_inner, company=company, risk=set(), security=sec_result,
+        )
+        await callback_query.message.reply_text(
+            reply,
+            disable_web_page_preview=True,
+            reply_markup=_company_actions_keyboard(inn),
+        )
+        return
+
     # Кнопки выбора тарифа — создаём платёж
     if data.startswith("tariff_"):
         await callback_query.answer()
@@ -312,10 +346,58 @@ async def handle_text_message(client: Client, message) -> None:
         await message.reply_text(reply, disable_web_page_preview=True)
         return
 
+    # Поиск по началу названия компании (DaData suggest)
+    if _looks_like_company_query(text):
+        suggestions = await company_service.suggest(text.strip(), count=5)
+        if suggestions:
+            await message.reply_text(
+                f"🔎 По запросу «{text.strip()}» найдено {len(suggestions)}. "
+                "Выберите компанию для проверки:",
+                reply_markup=_search_results_keyboard(suggestions),
+            )
+            return
+        # Поиск выполнен, но пусто — сообщим пользователю
+        await message.reply_text(
+            f"🔎 По запросу «{text.strip()}» ничего не найдено.\n\n"
+            "Попробуйте другое начало названия или отправьте ИНН напрямую."
+        )
+        return
+
     # Если ни ИНН, ни команды — подсказка
     await message.reply_text(
         "👋 Отправьте ИНН компании или нажмите /menu для выбора действия."
     )
+
+
+def _search_results_keyboard(suggestions) -> InlineKeyboardMarkup:
+    """Inline-клавиатура с результатами поиска по названию.
+    callback_data = search_select:<инн>; кнопки без ИНН не добавляются."""
+    rows = []
+    for company in suggestions:
+        if not company.inn:
+            continue
+        name = (company.name or company.inn).strip()
+        # Telegram-лимит на текст кнопки — около 64 символов
+        max_name = 64 - len(company.inn) - 4  # учитываем " (" и ")"
+        if len(name) > max_name and max_name > 0:
+            name = name[:max_name].rstrip() + "…"
+        label = f"{name} ({company.inn})"
+        rows.append([
+            InlineKeyboardButton(label, callback_data=f"search_select:{company.inn}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _looks_like_company_query(text: str) -> bool:
+    """Эвристика: похож ли текст на запрос названия компании.
+    Используем перед DaData-запросом, чтобы не платить за «привет»."""
+    clean = text.strip()
+    if len(clean) < 3:
+        return False
+    if clean.startswith("/"):
+        return False
+    # Должна быть хотя бы одна буква (кириллическая или латинская)
+    return any(c.isalpha() for c in clean)
 
 
 def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:

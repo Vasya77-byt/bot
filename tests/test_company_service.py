@@ -207,3 +207,68 @@ class TestFetch:
         assert result.name == "FNS only"
         # Один источник — суффикс без "+"
         assert result.source == "fns"
+
+
+class FakeDaDataWithSuggest:
+    """Полный мок DaDataClient: и fetch_company, и suggest_by_name."""
+
+    def __init__(
+        self,
+        result=None,
+        suggest_results=None,
+        suggest_exception=None,
+    ):
+        self.result = result
+        self.suggest_results = suggest_results or []
+        self.suggest_exception = suggest_exception
+        self.suggest_calls: list[tuple[str, int]] = []
+
+    async def fetch_company(self, inn):
+        return self.result
+
+    async def suggest_by_name(self, query, count=10):
+        self.suggest_calls.append((query, count))
+        if self.suggest_exception:
+            raise self.suggest_exception
+        return self.suggest_results
+
+
+class TestSuggest:
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_empty_list(self, service):
+        service.dadata = FakeDaDataWithSuggest()
+        assert await service.suggest("") == []
+        assert await service.suggest("   ") == []
+        # Запрос даже не пошёл в DaData
+        assert service.dadata.suggest_calls == []
+
+    @pytest.mark.asyncio
+    async def test_passes_query_and_count_through(self, service):
+        service.dadata = FakeDaDataWithSuggest(suggest_results=[
+            CompanyData(inn="1", name="ООО Альфа"),
+        ])
+        result = await service.suggest("Альфа", count=3)
+        assert len(result) == 1
+        assert service.dadata.suggest_calls == [("Альфа", 3)]
+
+    @pytest.mark.asyncio
+    async def test_default_count_is_5(self, service):
+        service.dadata = FakeDaDataWithSuggest()
+        await service.suggest("X")
+        assert service.dadata.suggest_calls[0][1] == 5
+
+    @pytest.mark.asyncio
+    async def test_dadata_exception_returns_empty(self, service):
+        service.dadata = FakeDaDataWithSuggest(
+            suggest_exception=RuntimeError("DaData down"),
+        )
+        # Не падает, возвращает пусто
+        assert await service.suggest("Сбер") == []
+
+    @pytest.mark.asyncio
+    async def test_passes_through_dadata_results(self, service):
+        a = CompanyData(inn="1", name="A")
+        b = CompanyData(inn="2", name="B")
+        service.dadata = FakeDaDataWithSuggest(suggest_results=[a, b])
+        result = await service.suggest("X")
+        assert result == [a, b]

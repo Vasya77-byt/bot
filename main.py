@@ -15,6 +15,7 @@ from pyrogram.types import (
 )
 
 from company_service import CompanyService
+from gigachat_client import GigaChatClient
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
@@ -41,6 +42,7 @@ init_sentry()
 metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
+gigachat = GigaChatClient()
 user_store = UserStore()
 payments_store = PaymentsStore()
 
@@ -113,13 +115,36 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         wip_actions = {
             "ca_courts": "⚖️ Суды",
             "ca_fns": "🏦 ФНС",
-            "ca_ai": "🤖 ИИ-анализ",
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
             "ca_links": "🔗 Связи",
             "ca_invoice": "🧾 Запрос счёта",
             "ca_proposal": "📝 Предложение",
         }
+
+        if action_part == "ca_ai" and inn_part:
+            await callback_query.answer()
+            await callback_query.message.reply_text("🤖 Запрашиваю ИИ-анализ у GigaChat...")
+            company = await company_service.fetch(inn_part)
+            result = await gigachat.analyze_company(
+                name=company.name if company else inn_part,
+                inn=inn_part,
+                okved=company.okved_main if company else None,
+                okved_name=company.okved_name if company else None,
+                age_years=company.age_years if company else None,
+                revenue=company.revenue_last_year if company else None,
+                profit=company.profit_last_year if company else None,
+                employees=company.employees_count if company else None,
+                region=company.region if company else None,
+                status=company.status if company else None,
+            )
+            if result:
+                await callback_query.message.reply_text(f"🤖 ИИ-анализ GigaChat\n\n{result}")
+            else:
+                await callback_query.message.reply_text(
+                    "❌ Не удалось получить ИИ-анализ. Проверьте GIGACHAT_CREDENTIALS в .env"
+                )
+            return
 
         if action_part == "ca_refresh" and inn_part:
             _user_state[user_id] = "mode_internal_analysis"

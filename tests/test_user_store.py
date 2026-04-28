@@ -1,0 +1,333 @@
+"""Тесты UserProfile (чистая логика лимитов/подписки) и UserStore (персистентность)."""
+import json
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
+
+from user_store import (
+    TARIFF_FEATURES,
+    TARIFF_LIMITS,
+    TARIFF_PRICES,
+    UserProfile,
+    UserStore,
+)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+class TestProfileResetIfNewDay:
+    def test_same_day_does_not_reset(self):
+        p = UserProfile(user_id=1, checks_today=5, checks_date=date.today().isoformat())
+        p.reset_if_new_day()
+        assert p.checks_today == 5
+
+    def test_new_day_resets_counter(self):
+        p = UserProfile(user_id=1, checks_today=5, checks_date="2000-01-01")
+        p.reset_if_new_day()
+        assert p.checks_today == 0
+        assert p.checks_date == date.today().isoformat()
+
+    def test_empty_date_treated_as_new_day(self):
+        p = UserProfile(user_id=1, checks_today=7, checks_date="")
+        p.reset_if_new_day()
+        assert p.checks_today == 0
+
+
+class TestSubscriptionActive:
+    def test_free_tariff_never_active(self):
+        p = UserProfile(user_id=1, tariff="free")
+        assert p.is_subscription_active() is False
+
+    def test_paid_without_expiry_not_active(self):
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at="")
+        assert p.is_subscription_active() is False
+
+    def test_paid_future_expiry_active(self):
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(future))
+        assert p.is_subscription_active() is True
+
+    def test_paid_past_expiry_not_active(self):
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(past))
+        assert p.is_subscription_active() is False
+
+    def test_invalid_iso_treated_as_inactive(self):
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at="not-an-iso")
+        assert p.is_subscription_active() is False
+
+
+class TestEffectiveTariff:
+    def test_free_returns_free(self):
+        assert UserProfile(user_id=1, tariff="free").effective_tariff() == "free"
+
+    def test_active_paid_returns_paid(self):
+        future = datetime.now(timezone.utc) + timedelta(days=5)
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(future))
+        assert p.effective_tariff() == "pro"
+
+    def test_expired_paid_falls_back_to_free(self):
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(past))
+        assert p.effective_tariff() == "free"
+
+
+class TestCanCheck:
+    def test_free_under_limit(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=2,
+                        checks_date=date.today().isoformat())
+        assert p.can_check() is True
+
+    def test_free_at_limit_blocks(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=TARIFF_LIMITS["free"],
+                        checks_date=date.today().isoformat())
+        assert p.can_check() is False
+
+    def test_business_unlimited(self):
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        p = UserProfile(user_id=1, tariff="business", tariff_expires_at=_iso(future),
+                        checks_today=10000, checks_date=date.today().isoformat())
+        assert p.can_check() is True
+
+    def test_expired_paid_uses_free_limit(self):
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(past),
+                        checks_today=TARIFF_LIMITS["free"],
+                        checks_date=date.today().isoformat())
+        assert p.can_check() is False
+
+    def test_can_check_resets_on_new_day(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=TARIFF_LIMITS["free"],
+                        checks_date="2000-01-01")
+        # сброс в can_check внутри reset_if_new_day → лимит снова доступен
+        assert p.can_check() is True
+
+
+class TestRemainingAndLimit:
+    def test_remaining_for_limited_tariff(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=1,
+                        checks_date=date.today().isoformat())
+        assert p.remaining_checks() == TARIFF_LIMITS["free"] - 1
+
+    def test_remaining_at_or_above_limit_clamps_to_zero(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=999,
+                        checks_date=date.today().isoformat())
+        assert p.remaining_checks() == 0
+
+    def test_remaining_unlimited_returns_none(self):
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        p = UserProfile(user_id=1, tariff="business", tariff_expires_at=_iso(future),
+                        checks_date=date.today().isoformat())
+        assert p.remaining_checks() is None
+
+    def test_daily_limit_matches_table(self):
+        assert UserProfile(user_id=1, tariff="free").daily_limit() == TARIFF_LIMITS["free"]
+
+
+class TestIncrement:
+    def test_increments_today_and_total(self):
+        p = UserProfile(user_id=1, tariff="free", checks_date=date.today().isoformat())
+        p.increment()
+        p.increment()
+        assert p.checks_today == 2
+        assert p.checks_total == 2
+
+    def test_increment_resets_on_new_day_then_counts(self):
+        p = UserProfile(user_id=1, tariff="free", checks_today=99, checks_total=200,
+                        checks_date="2000-01-01")
+        p.increment()
+        assert p.checks_today == 1
+        assert p.checks_total == 201
+        assert p.checks_date == date.today().isoformat()
+
+
+class TestTariffsTable:
+    def test_all_tariffs_have_features(self):
+        for tariff in ("free", "start", "pro", "business"):
+            assert tariff in TARIFF_FEATURES
+
+    def test_paid_tariffs_have_prices(self):
+        for tariff in ("start", "pro", "business"):
+            assert TARIFF_PRICES[tariff] > 0
+
+    def test_business_unlimited_in_table(self):
+        assert TARIFF_LIMITS["business"] is None
+
+
+@pytest.fixture
+def store(tmp_path):
+    return UserStore(filepath=str(tmp_path / "users.json"))
+
+
+class TestUserStoreLoad:
+    def test_get_creates_profile_with_defaults(self, store):
+        profile = store.get(42)
+        assert profile.user_id == 42
+        assert profile.tariff == "free"
+
+    def test_get_persists_to_file(self, tmp_path):
+        path = tmp_path / "u.json"
+        UserStore(filepath=str(path)).get(7)
+        with open(path) as f:
+            data = json.load(f)
+        assert "7" in data
+        assert data["7"]["tariff"] == "free"
+
+    def test_load_from_existing_file(self, tmp_path):
+        path = tmp_path / "u.json"
+        with open(path, "w") as f:
+            json.dump({"100": {"user_id": 100, "tariff": "pro"}}, f)
+        store = UserStore(filepath=str(path))
+        assert store.get(100).tariff == "pro"
+
+    def test_load_corrupt_file_yields_empty_store(self, tmp_path):
+        path = tmp_path / "u.json"
+        path.write_text("{not json")
+        store = UserStore(filepath=str(path))
+        assert store.get(1).user_id == 1  # создан как новый
+
+    def test_unknown_fields_ignored_for_back_compat(self, tmp_path):
+        path = tmp_path / "u.json"
+        with open(path, "w") as f:
+            json.dump({"1": {"user_id": 1, "tariff": "free", "deprecated_field": "x"}}, f)
+        store = UserStore(filepath=str(path))
+        # не падает с TypeError из-за неизвестного аргумента
+        assert store.get(1).user_id == 1
+
+
+class TestUserStoreMutations:
+    def test_increment_checks_persists(self, tmp_path):
+        path = tmp_path / "u.json"
+        store = UserStore(filepath=str(path))
+        store.increment_checks(1)
+        store.increment_checks(1)
+        # перечитываем с диска
+        store2 = UserStore(filepath=str(path))
+        assert store2.get(1).checks_today == 2
+        assert store2.get(1).checks_total == 2
+
+    def test_set_tariff_changes_value(self, store):
+        p = store.set_tariff(1, "pro")
+        assert p.tariff == "pro"
+        assert store.get(1).tariff == "pro"
+
+    def test_set_email(self, store):
+        store.set_email(1, "user@example.com")
+        assert store.get(1).email == "user@example.com"
+
+    def test_disable_and_enable_auto_renew(self, store):
+        store.get(1)  # создаём с auto_renew=True по умолчанию
+        store.disable_auto_renew(1)
+        assert store.get(1).auto_renew is False
+        store.enable_auto_renew(1)
+        assert store.get(1).auto_renew is True
+
+
+class TestActivateSubscription:
+    def test_first_activation_from_free(self, store):
+        before = datetime.now(timezone.utc)
+        p = store.activate_subscription(1, "pro", days=30,
+                                        card_token="tok", payment_id="op-1")
+        expires = datetime.fromisoformat(p.tariff_expires_at)
+        delta = expires - before
+        # ~30 дней с допуском
+        assert timedelta(days=29, hours=23) < delta < timedelta(days=30, minutes=1)
+        assert p.tariff == "pro"
+        assert p.card_token == "tok"
+        assert p.last_payment_id == "op-1"
+        assert p.auto_renew is True
+        assert p.renewal_failures == 0
+
+    def test_renewal_extends_existing_active(self, store):
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        # Готовим активную подписку
+        p = store.get(1)
+        p.tariff = "pro"
+        p.tariff_expires_at = _iso(future)
+        store.save_profile(p)
+
+        renewed = store.activate_subscription(1, "pro", days=30)
+        new_expires = datetime.fromisoformat(renewed.tariff_expires_at)
+        # +30 дней от прежнего expires, не от now
+        assert new_expires > future + timedelta(days=29, hours=23)
+        assert new_expires < future + timedelta(days=30, minutes=1)
+
+    def test_renewal_after_expiry_starts_from_now(self, store):
+        past = datetime.now(timezone.utc) - timedelta(days=5)
+        p = store.get(1)
+        p.tariff = "pro"
+        p.tariff_expires_at = _iso(past)
+        store.save_profile(p)
+
+        before = datetime.now(timezone.utc)
+        renewed = store.activate_subscription(1, "pro", days=30)
+        new_expires = datetime.fromisoformat(renewed.tariff_expires_at)
+        delta = new_expires - before
+        # ~30 дней от now, а не past+30
+        assert timedelta(days=29, hours=23) < delta < timedelta(days=30, minutes=1)
+
+    def test_changing_tariff_starts_from_now(self, store):
+        future = datetime.now(timezone.utc) + timedelta(days=20)
+        p = store.get(1)
+        p.tariff = "start"
+        p.tariff_expires_at = _iso(future)
+        store.save_profile(p)
+
+        before = datetime.now(timezone.utc)
+        upgraded = store.activate_subscription(1, "pro", days=30)
+        # При смене тарифа expires считается от now, а не от прежнего expires
+        new_expires = datetime.fromisoformat(upgraded.tariff_expires_at)
+        delta = new_expires - before
+        assert timedelta(days=29, hours=23) < delta < timedelta(days=30, minutes=1)
+        assert upgraded.tariff == "pro"
+
+    def test_resets_renewal_failures(self, store):
+        p = store.get(1)
+        p.renewal_failures = 5
+        p.auto_renew = False
+        store.save_profile(p)
+        renewed = store.activate_subscription(1, "pro", days=30)
+        assert renewed.renewal_failures == 0
+        assert renewed.auto_renew is True
+
+    def test_does_not_overwrite_card_token_when_empty(self, store):
+        store.activate_subscription(1, "pro", days=30, card_token="first")
+        renewed = store.activate_subscription(1, "pro", days=30, card_token="")
+        assert renewed.card_token == "first"
+
+
+class TestRecordRenewalFailure:
+    def test_first_failure_increments_only(self, store):
+        store.get(1)
+        p = store.record_renewal_failure(1)
+        assert p.renewal_failures == 1
+        assert p.auto_renew is True
+
+    def test_two_failures_keep_auto_renew_on(self, store):
+        store.record_renewal_failure(1)
+        p = store.record_renewal_failure(1)
+        assert p.renewal_failures == 2
+        assert p.auto_renew is True
+
+    def test_third_failure_disables_auto_renew(self, store):
+        store.record_renewal_failure(1)
+        store.record_renewal_failure(1)
+        p = store.record_renewal_failure(1)
+        assert p.renewal_failures == 3
+        assert p.auto_renew is False
+
+
+class TestIterProfiles:
+    def test_iter_returns_all_users(self, store):
+        store.get(1)
+        store.get(2)
+        store.get(3)
+        ids = sorted(p.user_id for p in store.iter_profiles())
+        assert ids == [1, 2, 3]
+
+    def test_iter_yields_user_profile_instances(self, store):
+        store.get(1)
+        for p in store.iter_profiles():
+            assert isinstance(p, UserProfile)

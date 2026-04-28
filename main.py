@@ -782,7 +782,12 @@ def main() -> None:
         nonlocal webhook_runner
         await app.start()
         register_handlers()
-        logger.info("Bot started (client)")
+        # Pyrogram's add_handler schedules a coroutine; yield so it runs before any updates
+        await asyncio.sleep(0)
+        logger.info(
+            "Bot started (client). Registered handler groups: %s",
+            {g: len(h) for g, h in app.dispatcher.groups.items()},
+        )
 
         async def notify(user_id: int, text: str) -> None:
             try:

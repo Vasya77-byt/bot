@@ -308,10 +308,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📝 Предложение", callback_data=f"ca_proposal:{inn}"),
-            InlineKeyboardButton("🧾 Запрос счёта", callback_data=f"ca_invoice:{inn}"),
-        ],
-        [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
             InlineKeyboardButton("🏦 ФНС", callback_data=f"ca_fns:{inn}"),
         ],
@@ -324,7 +320,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
-            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])

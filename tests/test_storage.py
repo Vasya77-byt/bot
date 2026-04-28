@@ -21,9 +21,15 @@ class TestContentType:
     def test_no_extension(self):
         assert _content_type("noext") == "application/octet-stream"
 
-    def test_uppercase_extension_not_recognized(self):
-        # Текущая реализация — case-sensitive endswith, .PDF не матчится
-        assert _content_type("file.PDF") == "application/octet-stream"
+    def test_uppercase_pdf_recognized(self):
+        # _content_type приводит имя к нижнему регистру перед матчем
+        assert _content_type("file.PDF") == "application/pdf"
+
+    def test_uppercase_png_recognized(self):
+        assert _content_type("photo.PNG") == "image/png"
+
+    def test_mixed_case_recognized(self):
+        assert _content_type("Doc.Pdf") == "application/pdf"
 
 
 class TestSaveFileBytesLocal:

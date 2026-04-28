@@ -51,9 +51,10 @@ def _maybe_upload_s3(content: bytes, filename: str) -> None:
 
 
 def _content_type(filename: str) -> str:
-    if filename.endswith(".pdf"):
+    name = filename.lower()
+    if name.endswith(".pdf"):
         return "application/pdf"
-    if filename.endswith(".png"):
+    if name.endswith(".png"):
         return "image/png"
     return "application/octet-stream"
 

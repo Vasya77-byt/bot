@@ -1,4 +1,6 @@
 """Тесты SbisClient: _extract_org/_normalize, in-memory cache, retry, mock-режим."""
+import importlib
+import sys
 import time
 from typing import Any, Dict, Optional
 
@@ -249,3 +251,24 @@ class TestFetchCompanyData:
         )
         result = await isolated_client.fetch_company_data("0")
         assert result is None
+
+
+class TestSbisClientHasNoServerDeps:
+    """Регрессия: sbis_client не должен тянуть FastAPI/uvicorn в прод —
+    они нужны только для standalone-сервера sbis_mock.py."""
+
+    def test_imports_without_fastapi_or_uvicorn(self, monkeypatch):
+        # Блокируем fastapi и uvicorn перед чистым реимпортом sbis_client
+        monkeypatch.setitem(sys.modules, "fastapi", None)
+        monkeypatch.setitem(sys.modules, "uvicorn", None)
+        # Сбрасываем кешированные версии sbis_client и его зависимостей
+        for mod in ("sbis_client", "sbis_fixtures"):
+            sys.modules.pop(mod, None)
+
+        # Импорт должен пройти без ImportError
+        reimported = importlib.import_module("sbis_client")
+        assert reimported.SbisClient is not None
+        # mock_company доступна через sbis_fixtures, не через sbis_mock
+        from sbis_fixtures import mock_company
+        company = mock_company("123")
+        assert company.name == "ООО «Мокап»"

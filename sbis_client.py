@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 from cache import FileTTLCache
 from schemas import CompanyData
-from sbis_mock import mock_company
+from sbis_fixtures import mock_company
 
 
 class SbisClient:

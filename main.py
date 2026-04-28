@@ -757,17 +757,17 @@ def main() -> None:
             reply_markup=_main_menu(),
         )
 
-    def register_handlers() -> None:
-        app.add_handler(MessageHandler(start_handler, filters.command(["start", "help"])))
-        app.add_handler(MessageHandler(menu_handler, filters.command(["menu"])))
-        app.add_handler(MessageHandler(handle_kp_command, filters.command(["kp"])))
-        app.add_handler(MessageHandler(handle_my_subscription, filters.command(["my_subscription"])))
-        app.add_handler(MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])))
-        app.add_handler(MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])))
-        app.add_handler(MessageHandler(handle_offer, filters.command(["offer"])))
-        app.add_handler(MessageHandler(handle_documents, filters.command(["documents"])))
-        app.add_handler(CallbackQueryHandler(handle_callback))
-        app.add_handler(
+    def _build_handlers() -> list:
+        return [
+            MessageHandler(start_handler, filters.command(["start", "help"])),
+            MessageHandler(menu_handler, filters.command(["menu"])),
+            MessageHandler(handle_kp_command, filters.command(["kp"])),
+            MessageHandler(handle_my_subscription, filters.command(["my_subscription"])),
+            MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])),
+            MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])),
+            MessageHandler(handle_offer, filters.command(["offer"])),
+            MessageHandler(handle_documents, filters.command(["documents"])),
+            CallbackQueryHandler(handle_callback),
             MessageHandler(
                 handle_text_message,
                 filters.text & ~filters.command([
@@ -775,15 +775,23 @@ def main() -> None:
                     "my_subscription", "cancel_subscription", "enable_subscription",
                     "offer", "documents",
                 ]),
-            )
-        )
+            ),
+        ]
+
+    def register_handlers_sync() -> None:
+        # Pyrogram's app.add_handler schedules a task that may run on the wrong
+        # event loop or after updates already arrived. Insert handlers directly
+        # into the dispatcher's groups to make registration synchronous and reliable.
+        groups = app.dispatcher.groups
+        if 0 not in groups:
+            groups[0] = []
+        for handler in _build_handlers():
+            groups[0].append(handler)
 
     async def run_all() -> None:
         nonlocal webhook_runner
         await app.start()
-        register_handlers()
-        # Pyrogram's add_handler schedules a coroutine; yield so it runs before any updates
-        await asyncio.sleep(0)
+        register_handlers_sync()
         logger.info(
             "Bot started (client). Registered handler groups: %s",
             {g: len(h) for g, h in app.dispatcher.groups.items()},

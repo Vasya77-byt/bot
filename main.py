@@ -139,7 +139,12 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 status=company.status if company else None,
             )
             if result:
-                await callback_query.message.reply_text(f"🤖 ИИ-анализ GigaChat\n\n{result}")
+                company_name = company.name if company else inn_part
+                await callback_query.message.reply_text(
+                    f"🤖 ИИ-анализ: {company_name}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{result}"
+                )
             else:
                 await callback_query.message.reply_text(
                     "❌ Не удалось получить ИИ-анализ. Проверьте GIGACHAT_CREDENTIALS в .env"

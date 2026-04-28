@@ -702,6 +702,27 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+DISCLAIMER_TEXT = """ДИСКЛЕЙМЕР
+
+⚠️ Внимание: Данный сервис предназначен исключительно для справочной и аналитической информации. Все данные, предоставляемые ботом, получены из открытых источников, в том числе государственных реестров, официальных публикаций, открытых баз и общедоступных онлайн-ресурсов.
+
+📝 Сервис не является государственным органом, не гарантирует полноту и актуальность сведений на момент запроса, и не может использоваться как единственное основание для принятия юридически значимых решений.
+
+🔐 Используя данный сервис, вы подтверждаете, что:
+
+• действуете в соответствии с законодательством РФ (включая 152-ФЗ «О персональных данных»);
+
+• не используете полученную информацию для дискриминации, шантажа, вторжения в частную жизнь или противоправных действий;
+
+• понимаете, что ответственность за использование информации лежит на пользователе.
+
+💬 При наличии вопросов, неточностей или претензий — просьба обратиться через обратную связь в боте."""
+
+
+async def handle_disclaimer(client: Client, message) -> None:
+    await message.reply_text(DISCLAIMER_TEXT)
+
+
 def _documents_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📜 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27")],
@@ -777,6 +798,7 @@ def main() -> None:
             MessageHandler(handle_cancel_subscription, filters.command(["cancel_subscription"])),
             MessageHandler(handle_enable_subscription, filters.command(["enable_subscription"])),
             MessageHandler(handle_offer, filters.command(["offer"])),
+            MessageHandler(handle_disclaimer, filters.command(["disclaimer"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
             MessageHandler(
@@ -784,7 +806,7 @@ def main() -> None:
                 filters.text & ~filters.command([
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
-                    "offer", "documents",
+                    "offer", "disclaimer", "documents",
                 ]),
             ),
         ]

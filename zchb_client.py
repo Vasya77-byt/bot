@@ -62,6 +62,8 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(YearFinance, item) for item in v]
             elif "TaxDebtItem" in type_repr:
                 v = [_restore_dataclass(TaxDebtItem, item) for item in v]
+            elif "FlCompanyLink" in type_repr:
+                v = [_restore_dataclass(FlCompanyLink, item) for item in v]
             # tax_violations_history — list[tuple] — оставляем как list[list]
             # из JSON, обработаем в рендерере как итерацию пар.
         kwargs[k] = v
@@ -135,6 +137,32 @@ class RatingResult:
     """Результат метода rating."""
     rating_category: str = ""   # "высокий", "средний", "низкий"
     risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class FlCompanyLink:
+    """Компания, связанная с физлицом (директор/учредитель/ИП)."""
+    ogrn: str = ""
+    inn: str = ""
+    name_short: str = ""
+    name_full: str = ""
+    address: str = ""
+    reg_date: str = ""           # ISO: "2003-04-22"
+    is_active: bool = True       # «Действующее» = True
+
+
+@dataclass
+class FlCard:
+    """Карточка физлица из ЗЧБ — список где этот человек директор/учредитель/ИП."""
+    inn_fl: str = ""
+    full_name: str = ""
+    region_inn: str = ""         # регион получения ИНН
+    region_business: str = ""    # регион ведения бизнеса
+    is_mass_leader: bool = False
+    is_mass_founder: bool = False
+    leads: List[FlCompanyLink] = field(default_factory=list)
+    founds: List[FlCompanyLink] = field(default_factory=list)
+    sole_props: List[FlCompanyLink] = field(default_factory=list)
 
 
 @dataclass
@@ -521,6 +549,73 @@ class ZchbClient:
             risk_level=str(body.get("risk_level") or ""),
         )
         self._cache_set("rating", inn_or_ogrn, result)
+        return result
+
+    # ────────────────────────────────────────────────────────────────
+    # FL-card — карточка физлица (директор/учредитель)
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_fl_card(self, inn_fl: str) -> Optional[FlCard]:
+        """Получить карточку физлица. inn_fl — 12-значный ИНН ФЛ.
+        Возвращает все компании где этот человек руководит/учредитель/ИП."""
+        if not self.enabled or not inn_fl:
+            return None
+
+        cached = self._cache_get("fl_card", inn_fl, FlCard)
+        if cached is not None:
+            return cached
+
+        raw = await asyncio.to_thread(self._simple_call, "fl-card", inn_fl)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status in {"248", "249"}:
+            # «Введен неверный ИННФЛ» / «По данному ИННФЛ ничего не найдено»
+            empty = FlCard(inn_fl=inn_fl)
+            self._cache_set("fl_card", inn_fl, empty)
+            return empty
+        if status != "200":
+            logger.warning("ZCHB fl-card status=%s message=%s",
+                           status, raw.get("message", ""))
+            return FlCard(inn_fl=inn_fl)
+
+        body = raw.get("body") or {}
+        if not isinstance(body, dict):
+            return FlCard(inn_fl=inn_fl)
+
+        result = FlCard(
+            inn_fl=str(body.get("ИННФЛ") or inn_fl),
+            full_name=str(body.get("ФИО") or ""),
+            region_inn=str(body.get("РегионПолучИНН") or ""),
+            region_business=str(body.get("РегионВедБизнеса") or ""),
+            is_mass_leader=bool(body.get("МассРуководитель")),
+            is_mass_founder=bool(body.get("МассУчредитель")),
+        )
+        for key, target in (
+            ("Руководитель", result.leads),
+            ("Учредитель", result.founds),
+            ("ИП", result.sole_props),
+        ):
+            items = body.get(key) or []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                target.append(FlCompanyLink(
+                    ogrn=str(item.get("ОГРН") or ""),
+                    inn=str(item.get("ИНН") or ""),
+                    name_short=str(item.get("НаимЮЛСокр") or ""),
+                    name_full=str(item.get("НаимЮЛПолн") or ""),
+                    address=str(item.get("Адрес") or ""),
+                    reg_date=str(item.get("ДатаРег") or ""),
+                    is_active=("действ" in str(item.get("Активность") or "").lower()),
+                ))
+
+        self._cache_set("fl_card", inn_fl, result)
         return result
 
     # ────────────────────────────────────────────────────────────────

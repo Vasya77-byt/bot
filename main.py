@@ -324,6 +324,76 @@ def _format_arbitration(summary, inn: str) -> str:
     return "\n".join(lines)
 
 
+async def _format_links(card, inn: str) -> str:
+    """Связи: компании где директор/учредители фигурируют как
+    руководители или учредители. Делает дополнительные запросы fl-card."""
+    if card is None:
+        return (
+            f"🔗 Связи (ИНН {inn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+
+    # Собираем уникальные ИНН ФЛ из руководителей и учредителей карточки.
+    # У card.founders есть inn у физлиц; у руководителей — нужно из card
+    # хранить отдельно. Сейчас в CardSummary есть только director_namesake_count
+    # и флаги; чтобы делать связи по руководителю, нужно достать его ИНН
+    # отдельно. В _parse_card мы храним только первого руководителя без ИНН.
+    # Используем учредителей-физлиц (у них inn заполнен в большинстве случаев).
+    fl_inns: list[tuple[str, str, str]] = []  # (inn, role, name)
+    for f in (card.founders or []):
+        if f.type == "fl" and f.inn:
+            fl_inns.append((f.inn, "учредитель", f.name))
+
+    if not fl_inns:
+        return (
+            f"🔗 Связи (ИНН {inn})\n\n"
+            "Нет данных о связанных физлицах с указанным ИНН.\n"
+            "Возможные причины: учредители — иностранцы / юрлица, "
+            "или у них нет ИНН в открытых данных."
+        )
+
+    lines = [f"🔗 Связи (ИНН {inn})", ""]
+    # Запрашиваем fl-card для каждого уникального ИНН (макс 5, чтобы не сжечь лимит)
+    seen: set[str] = set()
+    queue = [t for t in fl_inns if not (t[0] in seen or seen.add(t[0]))][:5]
+
+    for fl_inn, role, name in queue:
+        fl = await zchb.get_fl_card(fl_inn)
+        title = name or f"ИНН {fl_inn}"
+        lines.append(f"👤 {title} ({role})")
+        if fl is None or (not fl.leads and not fl.founds and not fl.sole_props):
+            lines.append("   Дополнительных компаний не найдено.")
+            lines.append("")
+            continue
+        if fl.is_mass_leader:
+            lines.append("   ⚠️ Признан массовым руководителем")
+        if fl.is_mass_founder:
+            lines.append("   ⚠️ Признан массовым учредителем")
+        if fl.leads:
+            lines.append(f"   Руководит ({len(fl.leads)} комп.):")
+            for c in fl.leads[:5]:
+                marker = "✅" if c.is_active else "⛔"
+                cname = c.name_short or c.name_full or f"ИНН {c.inn}"
+                lines.append(f"   • {marker} {cname} (ИНН {c.inn})")
+            if len(fl.leads) > 5:
+                lines.append(f"   … и ещё {len(fl.leads) - 5}")
+        if fl.founds:
+            lines.append(f"   Учредитель в ({len(fl.founds)} комп.):")
+            for c in fl.founds[:5]:
+                marker = "✅" if c.is_active else "⛔"
+                cname = c.name_short or c.name_full or f"ИНН {c.inn}"
+                lines.append(f"   • {marker} {cname} (ИНН {c.inn})")
+            if len(fl.founds) > 5:
+                lines.append(f"   … и ещё {len(fl.founds) - 5}")
+        if fl.sole_props:
+            lines.append(f"   ИП на этом ИНН: {len(fl.sole_props)}")
+        lines.append("")
+
+    if len(fl_inns) > 5:
+        lines.append(f"… показано 5 из {len(fl_inns)} физлиц.")
+    return "\n".join(lines)
+
+
 def _format_finance(card, inn: str) -> str:
     """Текстовый рендер финансового раздела по компании."""
     if card is None:
@@ -496,7 +566,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         wip_actions = {
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
-            "ca_links": "🔗 Связи",
         }
 
         if action_part == "ca_courts" and inn_part:
@@ -526,6 +595,23 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 _format_finance(card, inn_part),
                 disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_links" and inn_part:
+            await callback_query.answer()
+            if not zchb.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник связей не настроен (ZCHB_API_KEY)."
+                )
+                return
+            await callback_query.message.reply_text(
+                "🔗 Анализирую связи (директор и учредители)..."
+            )
+            card = await zchb.get_card(inn_part)
+            text = await _format_links(card, inn_part)
+            await callback_query.message.reply_text(
+                text, disable_web_page_preview=True,
             )
             return
 

@@ -200,6 +200,32 @@ class TestGetArbitration:
         assert result.total_exact == 1
 
     @pytest.mark.asyncio
+    async def test_inn_response_with_docs_array(self, client):
+        """Реальный формат ЗЧБ при поиске по ИНН:
+        body = {"total": N, "docs": [{"точно": ..., "неточно": ...}]}"""
+        inner = _arbitration_body(exact_total=2, our_inn="7707083893")
+        body = {"total": 1, "docs": [inner]}
+        with patch.object(client, "_call_arbitration",
+                          return_value={"status": "200",
+                                        "message": "ok",
+                                        "body": body}):
+            result = await client.get_arbitration("7707083893")
+        assert result.total_exact == 2
+        assert result.as_plaintiff_count == 1
+        assert result.as_defendant_count == 1
+        assert len(result.cases) == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_docs_array(self, client):
+        with patch.object(client, "_call_arbitration",
+                          return_value={"status": "200",
+                                        "message": "ok",
+                                        "body": {"total": 0, "docs": []}}):
+            result = await client.get_arbitration("7707083893")
+        assert isinstance(result, ArbitrationSummary)
+        assert not result.has_cases
+
+    @pytest.mark.asyncio
     async def test_request_failure_returns_none(self, client):
         with patch.object(client, "_call_arbitration", return_value=None):
             result = await client.get_arbitration("123")

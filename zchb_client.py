@@ -117,17 +117,46 @@ class ZchbClient:
         if not isinstance(body, dict):
             return ArbitrationSummary()
 
-        # При запросе по ИНН в теории body может быть `{"0": {...}, "1": {...}}`
-        # (несколько компаний под одним ИНН). На практике ИНН уникален, но
-        # обработаем оба варианта — берём первую вложенную, если такая структура.
-        if all(k.isdigit() for k in body.keys()):
-            sub = next(iter(body.values()), None)
-            if isinstance(sub, dict):
-                body = sub
-            else:
+        # ЗЧБ возвращает три разных формата:
+        # 1) Поиск по ОГРН: body = {"точно": {...}, "неточно": {...}}
+        # 2) Поиск по ИНН: body = {"total": N, "docs": [{"точно": ..., "неточно": ...}, ...]}
+        # 3) Старый/нестандартный: body = {"0": {...}, "1": {...}}
+        #
+        # Нормализуем все варианты к формату 1.
+        docs = body.get("docs")
+        if isinstance(docs, list):
+            if not docs:
                 return ArbitrationSummary()
+            # Несколько компаний под одним ИНН — практически не бывает, но
+            # на случай пройдём по всем и сложим суммы.
+            return self._parse_multi_docs(docs, our_inn=inn_or_ogrn)
+
+        if body.keys() and all(k.isdigit() for k in body.keys()):
+            return self._parse_multi_docs(
+                list(body.values()), our_inn=inn_or_ogrn,
+            )
 
         return self._parse_arbitration(body, our_inn=inn_or_ogrn)
+
+    @staticmethod
+    def _parse_multi_docs(
+        docs: List[Any], our_inn: str,
+    ) -> ArbitrationSummary:
+        """Объединяет несколько секций (по компаниям) в одну сводку."""
+        merged = ArbitrationSummary()
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            sub = ZchbClient._parse_arbitration(doc, our_inn=our_inn)
+            merged.total_exact += sub.total_exact
+            merged.total_fuzzy += sub.total_fuzzy
+            merged.as_plaintiff_count += sub.as_plaintiff_count
+            merged.as_defendant_count += sub.as_defendant_count
+            merged.total_claim_sum += sub.total_claim_sum
+            merged.plaintiff_claim_sum += sub.plaintiff_claim_sum
+            merged.defendant_claim_sum += sub.defendant_claim_sum
+            merged.cases.extend(sub.cases)
+        return merged
 
     def _call_arbitration(self, inn_or_ogrn: str) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/court-arbitration"

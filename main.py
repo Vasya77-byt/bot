@@ -15,6 +15,7 @@ from pyrogram.types import (
 )
 
 from company_service import CompanyService
+from gigachat_client import GigaChatClient
 from compliance import assess_risk
 from exports import build_kp_pdf, build_kp_png
 from logging_config import setup_logging
@@ -45,6 +46,7 @@ init_sentry()
 metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
+gigachat = GigaChatClient()
 user_store = UserStore()
 payments_store = PaymentsStore()
 monitoring_store = MonitoringStore()
@@ -118,7 +120,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         wip_actions = {
             "ca_courts": "⚖️ Суды",
             "ca_fns": "🏦 ФНС",
-            "ca_ai": "🤖 ИИ-анализ",
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
             "ca_links": "🔗 Связи",
@@ -126,13 +127,41 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             "ca_proposal": "📝 Предложение",
         }
 
+        if action_part == "ca_ai" and inn_part:
+            await callback_query.answer()
+            await callback_query.message.reply_text("🤖 Запрашиваю ИИ-анализ у GigaChat...")
+            company = await company_service.fetch(inn_part)
+            result = await gigachat.analyze_company(
+                name=company.name if company else inn_part,
+                inn=inn_part,
+                okved=company.okved_main if company else None,
+                okved_name=company.okved_name if company else None,
+                age_years=company.age_years if company else None,
+                revenue=company.revenue_last_year if company else None,
+                profit=company.profit_last_year if company else None,
+                employees=company.employees_count if company else None,
+                region=company.region if company else None,
+                status=company.status if company else None,
+            )
+            if result:
+                company_name = company.name if company else inn_part
+                await callback_query.message.reply_text(
+                    f"🤖 ИИ-анализ: {company_name}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{result}"
+                )
+            else:
+                await callback_query.message.reply_text(
+                    "❌ Не удалось получить ИИ-анализ. Проверьте GIGACHAT_CREDENTIALS в .env"
+                )
+            return
+
         if action_part == "ca_refresh" and inn_part:
             _user_state[user_id] = "mode_internal_analysis"
             await callback_query.message.reply_text("🔄 Обновляю данные...")
             company = await company_service.fetch(inn_part)
-            from parsers import ParseResult as PR
-            parsed_refresh = PR(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
-                                is_request=False, is_proposal=False, company_data=company)
+            parsed_refresh = ParseResult(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                                         is_request=False, is_proposal=False, company_data=company)
             sec_result = None
             try:
                 sec_result = await security_service.check(
@@ -142,8 +171,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             except Exception as exc:
                 logger.error("Security check failed: %s", exc)
-            from renderers import render_response as rr
-            reply = rr(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
+            reply = render_response(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
             await callback_query.message.reply_text(
                 reply,
                 disable_web_page_preview=True,
@@ -404,10 +432,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📝 Предложение", callback_data=f"ca_proposal:{inn}"),
-            InlineKeyboardButton("🧾 Запрос счёта", callback_data=f"ca_invoice:{inn}"),
-        ],
-        [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
             InlineKeyboardButton("🏦 ФНС", callback_data=f"ca_fns:{inn}"),
         ],
@@ -420,7 +444,6 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
         [
-            InlineKeyboardButton("📄 PDF", callback_data=f"kp_pdf"),
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
     ])
@@ -999,8 +1022,52 @@ async def handle_offer(client: Client, message) -> None:
     await message.reply_text(OFFER_TEXT)
 
 
+DISCLAIMER_TEXT = """ДИСКЛЕЙМЕР
+
+⚠️ Внимание: Данный сервис предназначен исключительно для справочной и аналитической информации. Все данные, предоставляемые ботом, получены из открытых источников, в том числе государственных реестров, официальных публикаций, открытых баз и общедоступных онлайн-ресурсов.
+
+📝 Сервис не является государственным органом, не гарантирует полноту и актуальность сведений на момент запроса, и не может использоваться как единственное основание для принятия юридически значимых решений.
+
+🔐 Используя данный сервис, вы подтверждаете, что:
+
+• действуете в соответствии с законодательством РФ (включая 152-ФЗ «О персональных данных»);
+
+• не используете полученную информацию для дискриминации, шантажа, вторжения в частную жизнь или противоправных действий;
+
+• понимаете, что ответственность за использование информации лежит на пользователе.
+
+💬 При наличии вопросов, неточностей или претензий — просьба обратиться через обратную связь в боте."""
+
+
+async def handle_disclaimer(client: Client, message) -> None:
+    await message.reply_text(DISCLAIMER_TEXT)
+
+
+async def handle_tarifs(client: Client, message) -> None:
+    await message.reply_text(_tariffs_text(), reply_markup=_tariffs_keyboard())
+
+
+async def handle_cancel(client: Client, message) -> None:
+    user_id = message.from_user.id
+    if _user_state.pop(user_id, None) is not None:
+        await message.reply_text("❌ Действие отменено.\n\nНажмите /menu для выбора нового действия.")
+    else:
+        await message.reply_text("Нет активного действия для отмены.\n\nНажмите /menu для выбора действия.")
+
+
+def _documents_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27")],
+        [InlineKeyboardButton("📋 Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-04-27-19")],
+        [InlineKeyboardButton("🔒 Обработка персональных данных", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-04-27")],
+    ])
+
+
 async def handle_documents(client: Client, message) -> None:
-    await message.reply_text(OFFER_TEXT)
+    await message.reply_text(
+        "📂 Правовые документы\n\nВыберите документ для просмотра:",
+        reply_markup=_documents_keyboard(),
+    )
 
 
 def main() -> None:
@@ -1048,6 +1115,9 @@ def main() -> None:
             MessageHandler(handle_monitoring_list, filters.command(["monitoring"])),
             MessageHandler(handle_referral, filters.command(["referral"])),
             MessageHandler(handle_offer, filters.command(["offer"])),
+            MessageHandler(handle_disclaimer, filters.command(["disclaimer"])),
+            MessageHandler(handle_tarifs, filters.command(["tarifs"])),
+            MessageHandler(handle_cancel, filters.command(["cancel"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
             MessageHandler(
@@ -1056,7 +1126,7 @@ def main() -> None:
                     "start", "help", "menu", "kp",
                     "my_subscription", "cancel_subscription", "enable_subscription",
                     "monitor", "unmonitor", "monitoring", "referral",
-                    "offer", "documents",
+                    "offer", "disclaimer", "tarifs", "cancel", "documents",
                 ]),
             ),
         ]

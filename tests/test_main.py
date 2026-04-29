@@ -362,11 +362,16 @@ class TestSimpleHandlers:
         assert msg.replies[0]["text"] == OFFER_TEXT
 
     @pytest.mark.asyncio
-    async def test_handle_documents_sends_offer_text(self):
+    async def test_handle_documents_shows_keyboard(self):
         msg = FakeMessage()
         await main.handle_documents(client=None, message=msg)
-        from offer import OFFER_TEXT
-        assert msg.replies[0]["text"] == OFFER_TEXT
+        text = msg.replies[0]["text"]
+        assert "Правовые документы" in text
+        # Inline-кнопки ведут на Telegraph-публикации
+        kb = msg.replies[0]["reply_markup"]
+        urls = [b.url for row in kb.inline_keyboard for b in row if b.url]
+        assert len(urls) == 3
+        assert all("telegra.ph" in u for u in urls)
 
     @pytest.mark.asyncio
     async def test_my_subscription_free_user(self):
@@ -409,6 +414,75 @@ class TestSimpleHandlers:
         await main.handle_enable_subscription(client=None, message=msg)
         assert main.user_store.get(42).auto_renew is True
         assert "включено" in msg.replies[0]["text"].lower()
+
+
+class TestNewCommandHandlers:
+    """Команды из DVAsR: /disclaimer, /tarifs, /cancel."""
+
+    @pytest.mark.asyncio
+    async def test_disclaimer_sends_disclaimer_text(self):
+        msg = FakeMessage()
+        await main.handle_disclaimer(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        # Ключевые юридические маркеры
+        assert "ДИСКЛЕЙМЕР" in text
+        assert "152-ФЗ" in text
+        assert "открытых источников" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_tarifs_shows_tariffs_text_and_keyboard(self):
+        msg = FakeMessage()
+        await main.handle_tarifs(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        assert "Тарифные планы" in text
+        # Имеется клавиатура выбора тарифов
+        kb = msg.replies[0]["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "tariff_pro" in callbacks
+        assert "tariff_business" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_cancel_clears_active_state(self):
+        main._user_state[1] = "mode_internal_analysis"
+        msg = FakeMessage(user_id=1)
+        await main.handle_cancel(client=None, message=msg)
+        assert 1 not in main._user_state
+        assert "отменено" in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_cancel_without_active_state_shows_friendly_message(self):
+        # State пуст
+        assert 1 not in main._user_state
+        msg = FakeMessage(user_id=1)
+        await main.handle_cancel(client=None, message=msg)
+        text = msg.replies[0]["text"]
+        # Обоим веткам ясно: нет действия — ничего не отменено
+        assert "Нет активного" in text or "нет активного" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_cancel_clears_pending_dict_state(self):
+        # compare_step2 — dict-стейт; cancel должен и его обнулять
+        main._user_state[1] = {"action": "compare_step2", "inn1": "111"}
+        msg = FakeMessage(user_id=1)
+        await main.handle_cancel(client=None, message=msg)
+        assert 1 not in main._user_state
+
+
+class TestDocumentsKeyboard:
+    def test_three_telegraph_buttons(self):
+        kb = main._documents_keyboard()
+        rows = kb.inline_keyboard
+        assert len(rows) == 3
+        urls = [row[0].url for row in rows]
+        assert all("telegra.ph" in u for u in urls)
+
+    def test_buttons_cover_all_required_documents(self):
+        kb = main._documents_keyboard()
+        labels = [row[0].text for row in kb.inline_keyboard]
+        joined = " | ".join(labels)
+        assert "оферта" in joined.lower()
+        assert "соглашение" in joined.lower()
+        assert "персональн" in joined.lower()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -466,7 +540,6 @@ class TestHandleCallback:
     @pytest.mark.parametrize("data,label_word", [
         ("ca_courts:1234567890", "Суды"),
         ("ca_fns:1234567890", "ФНС"),
-        ("ca_ai:1234567890", "ИИ-анализ"),
         ("ca_egryl:1234567890", "ЕГРЮЛ"),
         ("ca_history:1234567890", "История"),
         ("ca_links:1234567890", "Связи"),
@@ -479,6 +552,72 @@ class TestHandleCallback:
         text = cb.message.replies[0]["text"]
         assert "разработке" in text
         assert label_word in text
+
+
+class TestCaAiGigaChat:
+    """ca_ai больше не WIP — ходит в GigaChat. Нет кредов → friendly fallback."""
+
+    @pytest.mark.asyncio
+    async def test_ca_ai_calls_gigachat_with_company_data(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(
+                inn=inn, name="ПАО Сбербанк", okved_main="64.19",
+                age_years=30, status="Действующая",
+            )
+
+        captured = {}
+
+        async def fake_analyze(**kwargs):
+            captured.update(kwargs)
+            return "🤖 Анализ компании готов."
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.gigachat, "analyze_company", fake_analyze)
+
+        cb = FakeCallbackQuery("ca_ai:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+
+        assert captured["inn"] == "7707083893"
+        assert captured["name"] == "ПАО Сбербанк"
+        assert captured["okved"] == "64.19"
+        # Ответы: «Запрашиваю...» + сам анализ
+        joined = " ".join(r["text"] for r in cb.message.replies)
+        assert "Анализ компании готов" in joined
+
+    @pytest.mark.asyncio
+    async def test_ca_ai_friendly_message_when_credentials_missing(self, monkeypatch):
+        async def fake_fetch(inn):
+            return CompanyData(inn=inn, name="X")
+
+        async def empty_analyze(**kwargs):
+            return None  # GigaChat вернул None из-за отсутствия кредов
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.gigachat, "analyze_company", empty_analyze)
+
+        cb = FakeCallbackQuery("ca_ai:1234567890", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        joined = " ".join(r["text"] for r in cb.message.replies)
+        assert "GIGACHAT_CREDENTIALS" in joined or "не удалось" in joined.lower()
+
+    @pytest.mark.asyncio
+    async def test_ca_ai_no_company_passes_inn_as_name(self, monkeypatch):
+        async def fake_fetch(inn):
+            return None  # компания не найдена
+
+        captured = {}
+
+        async def fake_analyze(**kwargs):
+            captured.update(kwargs)
+            return "result"
+
+        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
+        monkeypatch.setattr(main.gigachat, "analyze_company", fake_analyze)
+
+        cb = FakeCallbackQuery("ca_ai:7777777777", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # name fallback на ИНН
+        assert captured["name"] == "7777777777"
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -40,6 +40,21 @@ def disable_sleeps(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda _s: None)
 
 
+class TestSecurityResultFields:
+    def test_inspections_default_zero(self):
+        r = SecurityResult()
+        assert r.inspections_count == 0
+        assert r.inspections_violations_count == 0
+
+    def test_inspections_fields_assignable(self):
+        r = SecurityResult(
+            inspections_count=5,
+            inspections_violations_count=2,
+        )
+        assert r.inspections_count == 5
+        assert r.inspections_violations_count == 2
+
+
 class TestCalculateRisk:
     def test_no_enforcement_low(self):
         r = SecurityResult()

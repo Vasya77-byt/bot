@@ -2,6 +2,7 @@ from typing import Optional, Set
 
 from compliance import legal_note
 from parsers import ParseResult
+from risk_score import calculate_risk_score, format_risk_block
 from schemas import CompanyData, empty_company
 from security_check import SecurityResult
 from user_store import TARIFF_FEATURES, TARIFF_LABELS, UserProfile
@@ -64,6 +65,13 @@ def render_comparison(
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     lines = []
 
+    # ── Сводный риск-скор (заголовок отчёта) ──
+    score = calculate_risk_score(company, security)
+    lines.append(format_risk_block(score))
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
     # ── Стоп-листы ──
     lines.append("—— Стоп-листы / 115-ФЗ / 550-П ——")
     if security:
@@ -123,11 +131,8 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
             lines.append("⚖️ ФССП: нет ✅")
         lines.append("")
 
-    # ── Причины рисков ──
-    reasons = _risk_reasons(company, security)
-    if reasons:
-        lines.append("—— 📋 Причины ——")
-        lines.extend(reasons)
+    # Блок «Причины» убран: факторы риска уже показаны в верхнем
+    # риск-скоре и дублирование запутывает клиента.
 
     return "\n".join(lines)
 

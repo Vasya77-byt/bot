@@ -27,6 +27,11 @@ class SecurityResult:
     enforcement_total_sum: float = 0.0
     enforcement_details: List[str] = field(default_factory=list)
 
+    # Регуляторные проверки (Реестр проверок и аналоги).
+    # Заполняется при интеграции ЗЧБ; до того остаётся 0.
+    inspections_count: int = 0              # сколько проверок было всего
+    inspections_violations_count: int = 0   # из них с нарушениями
+
     # ЗаЧестныйБизнес (TODO)
     zchb_risk_level: Optional[str] = None
     zchb_details: Optional[str] = None

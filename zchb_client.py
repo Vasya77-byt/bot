@@ -1,10 +1,15 @@
 """Клиент API ЗаЧестныйБизнес (zachestnyibiznesapi.ru).
 
-Покрывает один метод: court-arbitration — арбитражные дела по ИНН/ОГРН.
-Это аналог kad.arbitr.ru. В будущем сюда же прирастёт fssp, rating, card.
+Поддерживаемые методы:
+- court-arbitration — арбитражные дела (аналог kad.arbitr.ru)
+- fssp / fssp-list — исполнительные производства
+- rating — Индекс компании + налоговые риски
+- card — расширенная карточка (статистика судов, госконтракты,
+  проверки, недоимки, реестры массовых директоров и пр.)
 
-Тариф/лимиты не зашиты — клиент просто отдаёт ошибки, если ключ не валиден
-или превышен лимит. Вызывающий код решает, что делать.
+Все методы кешируются на 24 часа по умолчанию (TTL переопределяется
+через ZCHB_CACHE_TTL). Это критично — тарифы у ЗЧБ ограниченные,
+а одна и та же компания часто проверяется повторно.
 """
 
 from __future__ import annotations
@@ -12,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Dict, List, Optional
 
 import requests
+
+from cache import FileTTLCache
 
 logger = logging.getLogger("financial-architect")
 
@@ -28,6 +35,29 @@ ZCHB_STATUS_NO_DATA = {"223", "224"}      # «не найдено информа
 ZCHB_STATUS_RATE_LIMIT = "239"            # «слишком частые запросы»
 ZCHB_STATUS_QUOTA = "212"                 # лимит тарифа исчерпан
 ZCHB_STATUS_KEY_INVALID = {"211", "215"}
+
+
+def _restore_dataclass(cls, data: Dict[str, Any]):
+    """Восстанавливает dataclass из dict (asdict-формата).
+    Поддерживает один уровень вложенности — list[dataclass]."""
+    fields_info = {f.name: f for f in cls.__dataclass_fields__.values()}
+    kwargs: Dict[str, Any] = {}
+    for k, v in data.items():
+        if k not in fields_info:
+            continue
+        # Грубо: если это список и содержит dict — пытаемся определить
+        # тип элемента и тоже восстановить
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            f = fields_info[k]
+            type_repr = repr(f.type)
+            # Поддержка ArbitrationCase в cases. Если других вложенных
+            # списков dataclass'ов не появится — этого хватит.
+            if "ArbitrationCase" in type_repr:
+                v = [_restore_dataclass(ArbitrationCase, item) for item in v]
+            elif "FsspProceeding" in type_repr:
+                v = [_restore_dataclass(FsspProceeding, item) for item in v]
+        kwargs[k] = v
+    return cls(**kwargs)
 
 
 @dataclass
@@ -67,17 +97,127 @@ class ArbitrationSummary:
         return self.total_exact > 0 or self.total_fuzzy > 0
 
 
+@dataclass
+class FsspProceeding:
+    """Одно исполнительное производство."""
+    case_number: str           # "26967/18/77021-ИП"
+    started_at: int = 0        # unix timestamp возбуждения
+    doc_type: str = ""         # тип исполнительного документа
+    subject: str = ""          # предмет производства
+    debt_total: float = 0.0    # сумма долга (руб)
+    debt_remaining: float = 0.0  # остаток непогашенной задолженности (руб)
+    department: str = ""       # отдел судебных приставов
+
+
+@dataclass
+class FsspSummary:
+    """Сводка по ФССП."""
+    total: int = 0
+    total_debt: float = 0.0       # сумма всех долгов
+    total_remaining: float = 0.0  # сумма остатков
+    proceedings: List[FsspProceeding] = field(default_factory=list)
+
+    @property
+    def has_proceedings(self) -> bool:
+        return self.total > 0
+
+
+@dataclass
+class RatingResult:
+    """Результат метода rating."""
+    rating_category: str = ""   # "высокий", "средний", "низкий"
+    risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class CardSummary:
+    """Расширенные данные из метода card.
+
+    Берём только те поля, что добавляют ценность поверх DaData/SBIS.
+    Все суммы — в рублях, числа — целые.
+    """
+    # Идентификация (для матчинга с базовыми данными)
+    inn: str = ""
+    ogrn: str = ""
+    name_full: str = ""
+    name_short: str = ""
+    status: str = ""
+
+    # Реестры ФНС (флаги риска)
+    in_debt_registry: bool = False           # Реестр01: есть взыскиваемая задолженность >1000₽
+    in_no_reporting_registry: bool = False   # Реестр02: не сдаёт отчётность >1 года
+    address_invalid: bool = False            # СвНедАдресЮЛ: адрес признан недостоверным
+
+    # Статистика судов (СудыСтатистика — может быть в card)
+    courts_total: int = 0
+
+    # Госконтракты (ЗакупкиСтат)
+    contracts_supplier_count: int = 0
+    contracts_supplier_sum: float = 0.0
+    contracts_customer_count: int = 0
+    contracts_customer_sum: float = 0.0
+
+    # Налоговые правонарушения и недоимки
+    inspections_count: int = 0          # количество проверок (поле Проверки)
+    tax_violations_sum: float = 0.0     # НалогПравонаруш — сумма штрафов
+    tax_debt_sum: float = 0.0           # сумма недоимки/задолженности (СуммНедоимЗадолж)
+
+    # Лицензии
+    licenses_count: int = 0
+
+    # Массовые директора/учредители (по первому руководителю)
+    director_is_mass_leader: bool = False
+    director_namesake_count: int = 0   # сколько тёзок-директоров с такими же ФИО
+    founder_is_mass: bool = False
+
+    # Сотрудники, фонд, ЗП
+    employees_count: int = 0
+    payroll_fund: float = 0.0
+    avg_salary: float = 0.0
+
+    # Признак недобросовестного поставщика
+    is_unreliable_supplier: bool = False
+
+
 class ZchbClient:
-    """Клиент API ЗЧБ. Пока умеет только court-arbitration."""
+    """Клиент API ЗЧБ с файловым кешем.
+
+    Кеш ставится по паре (метод, ИНН/ОГРН). TTL общий для всех методов
+    — обычно 24 часа. Чтобы инвалидировать раньше, удалите файл
+    .cache/zchb.json или поднимите перезапись.
+    """
 
     def __init__(self) -> None:
         self.api_key = os.getenv("ZCHB_API_KEY", "")
         self.timeout = float(os.getenv("ZCHB_TIMEOUT", "15"))
         self.base_url = os.getenv("ZCHB_BASE_URL", ZCHB_BASE_URL)
+        ttl = float(os.getenv("ZCHB_CACHE_TTL", str(24 * 3600)))
+        self._cache = FileTTLCache("zchb", ttl=ttl)
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
+
+    def _cache_key(self, method: str, identifier: str) -> str:
+        return f"{method}:{identifier}"
+
+    def _cache_get(self, method: str, identifier: str, cls):
+        raw = self._cache.get(self._cache_key(method, identifier))
+        if raw is None or not isinstance(raw, dict):
+            return None
+        try:
+            return _restore_dataclass(cls, raw)
+        except Exception as exc:
+            logger.warning("ZCHB cache restore failed for %s:%s: %s",
+                           method, identifier, exc)
+            return None
+
+    def _cache_set(self, method: str, identifier: str, value) -> None:
+        if value is None:
+            return
+        if not is_dataclass(value):
+            return
+        self._cache.set(self._cache_key(method, identifier), asdict(value))
 
     # ────────────────────────────────────────────────────────────────
     # Арбитражные дела
@@ -93,6 +233,10 @@ class ZchbClient:
         if not self.enabled:
             logger.debug("ZCHB_API_KEY not set, skipping ZCHB")
             return None
+
+        cached = self._cache_get("arbitration", inn_or_ogrn, ArbitrationSummary)
+        if cached is not None:
+            return cached
 
         raw = await asyncio.to_thread(self._call_arbitration, inn_or_ogrn)
         if raw is None:
@@ -126,17 +270,18 @@ class ZchbClient:
         docs = body.get("docs")
         if isinstance(docs, list):
             if not docs:
-                return ArbitrationSummary()
-            # Несколько компаний под одним ИНН — практически не бывает, но
-            # на случай пройдём по всем и сложим суммы.
-            return self._parse_multi_docs(docs, our_inn=inn_or_ogrn)
-
-        if body.keys() and all(k.isdigit() for k in body.keys()):
-            return self._parse_multi_docs(
+                summary = ArbitrationSummary()
+            else:
+                summary = self._parse_multi_docs(docs, our_inn=inn_or_ogrn)
+        elif body.keys() and all(k.isdigit() for k in body.keys()):
+            summary = self._parse_multi_docs(
                 list(body.values()), our_inn=inn_or_ogrn,
             )
+        else:
+            summary = self._parse_arbitration(body, our_inn=inn_or_ogrn)
 
-        return self._parse_arbitration(body, our_inn=inn_or_ogrn)
+        self._cache_set("arbitration", inn_or_ogrn, summary)
+        return summary
 
     @staticmethod
     def _parse_multi_docs(
@@ -274,3 +419,266 @@ class ZchbClient:
             counterparty_inn=counterparty_inn,
             accuracy=accuracy,
         )
+
+    # ────────────────────────────────────────────────────────────────
+    # Rating — Индекс компании + налоговые риски
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_rating(self, inn_or_ogrn: str) -> Optional[RatingResult]:
+        """Возвращает Индекс ЗЧБ + уровень налоговых рисков.
+        В документации сказано: «По факту id должен быть ОГРН» — но на
+        практике часто принимает и ИНН. Дёшево (1 запрос)."""
+        if not self.enabled:
+            return None
+
+        cached = self._cache_get("rating", inn_or_ogrn, RatingResult)
+        if cached is not None:
+            return cached
+
+        raw = await asyncio.to_thread(self._simple_call, "rating", inn_or_ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            logger.error("ZCHB key invalid: %s", raw.get("message", ""))
+            return None
+        if status != "200":
+            logger.warning("ZCHB rating status=%s message=%s",
+                           status, raw.get("message", ""))
+            return RatingResult()
+
+        body = raw.get("body") or {}
+        if not isinstance(body, dict):
+            return RatingResult()
+        result = RatingResult(
+            rating_category=str(body.get("rating_category") or ""),
+            risk_level=str(body.get("risk_level") or ""),
+        )
+        self._cache_set("rating", inn_or_ogrn, result)
+        return result
+
+    # ────────────────────────────────────────────────────────────────
+    # FSSP — исполнительные производства
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_fssp(self, ogrn: str) -> Optional[FsspSummary]:
+        """Список исполнительных производств. Принимает ТОЛЬКО ОГРН.
+        Использует fssp-list — он отдаёт total + docs (для пагинации).
+        """
+        if not self.enabled:
+            return None
+
+        cached = self._cache_get("fssp", ogrn, FsspSummary)
+        if cached is not None:
+            return cached
+
+        raw = await asyncio.to_thread(self._simple_call, "fssp-list", ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status == "235":
+            # «По данному ОГРН не найдено исполнительных производств»
+            empty = FsspSummary()
+            self._cache_set("fssp", ogrn, empty)
+            return empty
+        if status != "200":
+            logger.warning("ZCHB fssp status=%s message=%s",
+                           status, raw.get("message", ""))
+            return FsspSummary()
+
+        body = raw.get("body") or {}
+        if not isinstance(body, dict):
+            return FsspSummary()
+        total = int(body.get("total", 0) or 0)
+        docs = body.get("docs") or []
+        summary = FsspSummary(total=total)
+        if isinstance(docs, list):
+            for item in docs:
+                if not isinstance(item, dict):
+                    continue
+                proc = self._parse_fssp_item(item)
+                summary.proceedings.append(proc)
+                summary.total_debt += proc.debt_total
+                summary.total_remaining += proc.debt_remaining
+        self._cache_set("fssp", ogrn, summary)
+        return summary
+
+    @staticmethod
+    def _parse_fssp_item(raw: Dict[str, Any]) -> FsspProceeding:
+        def _money(v):
+            try:
+                return float(str(v).replace(",", ".").replace(" ", "") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _ts(v):
+            try:
+                return int(v or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return FsspProceeding(
+            case_number=str(raw.get("НомИспПроизв") or ""),
+            started_at=_ts(raw.get("ДатаВозбуждения")),
+            doc_type=str(raw.get("ТипИспДок") or ""),
+            subject=str(raw.get("ПредметИсп") or ""),
+            debt_total=_money(raw.get("СуммаДолга")),
+            debt_remaining=_money(raw.get("ОстатокДолга")),
+            department=str(raw.get("ОтделСудебПрист") or ""),
+        )
+
+    # ────────────────────────────────────────────────────────────────
+    # Card — расширенная карточка компании
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_card(self, inn_or_ogrn: str) -> Optional[CardSummary]:
+        """Расширенная карточка ЗЧБ. 1 запрос, но даёт сразу много полей.
+
+        При поиске по ИНН ответ имеет уровень body[0/1/...] (если несколько
+        компаний под ИНН). Берём первую запись.
+        """
+        if not self.enabled:
+            return None
+
+        cached = self._cache_get("card", inn_or_ogrn, CardSummary)
+        if cached is not None:
+            return cached
+
+        raw = await asyncio.to_thread(self._simple_call, "card", inn_or_ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status != "200":
+            logger.warning("ZCHB card status=%s message=%s",
+                           status, raw.get("message", ""))
+            return CardSummary()
+
+        body = raw.get("body")
+        if not isinstance(body, dict):
+            return CardSummary()
+        # Если поиск был по ИНН и body имеет цифровые ключи — берём первую
+        if body.keys() and all(k.isdigit() for k in body.keys()):
+            first = next(iter(body.values()), None)
+            if isinstance(first, dict):
+                body = first
+            else:
+                return CardSummary()
+
+        result = self._parse_card(body)
+        self._cache_set("card", inn_or_ogrn, result)
+        return result
+
+    @staticmethod
+    def _parse_card(body: Dict[str, Any]) -> CardSummary:
+        def _money(v):
+            if v is None:
+                return 0.0
+            if isinstance(v, (int, float)):
+                return float(v)
+            try:
+                cleaned = str(v).replace(",", ".").replace(" ", "")
+                return float(cleaned or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _int(v, default=0):
+            try:
+                return int(v or 0)
+            except (TypeError, ValueError):
+                return default
+
+        result = CardSummary(
+            inn=str(body.get("ИНН") or ""),
+            ogrn=str(body.get("ОГРН") or ""),
+            name_full=str(body.get("НаимЮЛПолн") or ""),
+            name_short=str(body.get("НаимЮЛСокр") or ""),
+            status=str(body.get("Активность") or ""),
+            in_debt_registry=str(body.get("Реестр01") or "0") == "1",
+            in_no_reporting_registry=str(body.get("Реестр02") or "0") == "1",
+            address_invalid=bool(body.get("СвНедАдресЮЛ")),
+            licenses_count=_int(body.get("СвЛицензия")),
+            inspections_count=_int(body.get("Проверки")),
+            employees_count=_int(body.get("ЧислСотруд")),
+            payroll_fund=_money(body.get("ФондОплТруда")),
+            avg_salary=_money(body.get("СредЗП")),
+            tax_violations_sum=_money(body.get("НалогПравонаруш")),
+            is_unreliable_supplier=bool(body.get("НедобросовПостав")),
+        )
+
+        # СудыСтатистика — может приходить разными ключами
+        suds = body.get("СудыСтатистика")
+        if isinstance(suds, dict):
+            result.courts_total = _int(suds.get("всего") or suds.get("total"))
+
+        # Госконтракты
+        zakup = body.get("ЗакупкиСтат")
+        if isinstance(zakup, dict):
+            result.contracts_supplier_count = _int(zakup.get("КонтрПоставщКолв"))
+            result.contracts_supplier_sum = _money(zakup.get("КонтрПоставщСум"))
+            result.contracts_customer_count = _int(zakup.get("КонтрЗакупщКолв"))
+            result.contracts_customer_sum = _money(zakup.get("КонтрЗакупщСум"))
+
+        # Налоговые недоимки — суммируем по списку
+        debt = body.get("СуммНедоимЗадолж")
+        if isinstance(debt, list):
+            for item in debt:
+                if isinstance(item, dict):
+                    result.tax_debt_sum += _money(item.get("ОбщСумНедоим"))
+
+        # Первый руководитель — флаги массовости и тёзок
+        leaders = body.get("Руководители")
+        if isinstance(leaders, list) and leaders:
+            first = leaders[0]
+            if isinstance(first, dict):
+                result.director_is_mass_leader = (
+                    str(first.get("mass_leaders") or "0") == "1"
+                )
+                aff = first.get("aff") or {}
+                if isinstance(aff, dict):
+                    boss = aff.get("boss") or {}
+                    if isinstance(boss, dict):
+                        result.director_namesake_count = _int(boss.get("namesake"))
+
+        # Первый учредитель — флаг массового
+        founders = body.get("СвУчредит") or {}
+        if isinstance(founders, dict):
+            all_list = founders.get("all") or []
+            if isinstance(all_list, list) and all_list:
+                first = all_list[0]
+                if isinstance(first, dict):
+                    result.founder_is_mass = (
+                        str(first.get("mass_founders") or "0") == "1"
+                    )
+
+        return result
+
+    # ────────────────────────────────────────────────────────────────
+    # Общий низкоуровневый вызов
+    # ────────────────────────────────────────────────────────────────
+
+    def _simple_call(self, method: str, identifier: str) -> Optional[Dict[str, Any]]:
+        """Простой GET-запрос к ZCHB по имени метода и id."""
+        url = f"{self.base_url}/{method}"
+        params = {
+            "id": identifier,
+            "api_key": self.api_key,
+            "_format": "json",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=self.timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("ZCHB %s HTTP %s: %s",
+                           method, resp.status_code, resp.text[:300])
+        except requests.RequestException as exc:
+            logger.warning("ZCHB %s request failed: %s", method, exc)
+        except ValueError as exc:
+            logger.warning("ZCHB %s invalid JSON: %s", method, exc)
+        return None

@@ -797,7 +797,17 @@ async def handle_my_subscription(client: Client, message) -> None:
 
 async def handle_cancel_subscription(client: Client, message) -> None:
     user_id = message.from_user.id
-    profile = user_store.disable_auto_renew(user_id)
+    # Если подключены платежи — отменяем подписку и на стороне Точки.
+    # Без этого Точка может попытаться списать с карты в свой график.
+    if subscription_service is not None:
+        try:
+            await subscription_service.cancel_user_subscription(user_id)
+        except Exception as exc:
+            logger.warning("cancel_user_subscription failed: %s", exc)
+            user_store.disable_auto_renew(user_id)
+    else:
+        user_store.disable_auto_renew(user_id)
+    profile = user_store.get(user_id)
     expires = profile.tariff_expires_at[:10] if profile.tariff_expires_at else "—"
     await message.reply_text(
         "🔕 Автопродление отключено.\n\n"
@@ -1083,9 +1093,9 @@ def main() -> None:
         tochka = TochkaClient(
             jwt_token=settings.tochka_jwt,
             customer_code=settings.tochka_customer_code,
+            client_id=settings.tochka_client_id,
             merchant_id=settings.tochka_merchant_id,
             base_url=settings.tochka_base_url,
-            webhook_secret=settings.tochka_webhook_secret,
         )
         subscription_service = SubscriptionService(
             tochka=tochka,
@@ -1093,6 +1103,7 @@ def main() -> None:
             payments=payments_store,
             redirect_url=settings.payment_redirect_url,
             fail_redirect_url=settings.payment_fail_redirect_url,
+            tax_system_code=settings.tochka_tax_system_code,
         )
     else:
         logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")

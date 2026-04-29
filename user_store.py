@@ -126,7 +126,11 @@ class UserProfile:
     checks_total: int = 0
     # Подписка
     tariff_expires_at: str = ""      # ISO datetime в UTC, пусто для free
-    card_token: str = ""             # токен сохранённой карты от Точки
+    subscription_operation_id: str = ""  # operationId подписки в Точке
+                                         # для charge_subscription / cancel
+    card_token: str = ""             # legacy: остаётся для совместимости
+                                     # с существующими users.json; новые
+                                     # подписки используют subscription_operation_id
     auto_renew: bool = True          # автопродление
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
@@ -277,10 +281,19 @@ class UserStore:
         tariff: str,
         days: int = 30,
         card_token: str = "",
+        subscription_operation_id: str = "",
         payment_id: str = "",
     ) -> UserProfile:
         """Активирует (или продлевает) подписку на тариф на N дней.
         Если подписка ещё активна — срок прибавляется к текущему, иначе от now().
+
+        - card_token: legacy-поле, заполняется только если приходит явно
+          (старый код или внешний клиент). Новый Tochka-flow его не
+          использует — для списаний нужен subscription_operation_id.
+        - subscription_operation_id: id подписки в Точке для последующих
+          charge_subscription. Не перезаписывается пустой строкой —
+          можно безопасно вызывать activate_subscription без аргумента
+          при продлении.
         """
         profile = self.get(user_id)
         now = datetime.now(timezone.utc)
@@ -296,6 +309,8 @@ class UserStore:
         profile.tariff_expires_at = new_expires.isoformat()
         if card_token:
             profile.card_token = card_token
+        if subscription_operation_id:
+            profile.subscription_operation_id = subscription_operation_id
         if payment_id:
             profile.last_payment_id = payment_id
         profile.renewal_failures = 0

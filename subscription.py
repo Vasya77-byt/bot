@@ -1,4 +1,5 @@
-"""Логика подписок: создание платежа, обработка успеха, автопродление."""
+"""Логика подписок: создание подписки в Точке, обработка успеха,
+автопродление через Charge Subscription."""
 
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from payments_store import PaymentsStore
-from tochka_client import TochkaClient, parse_order_id
+from tochka_client import TochkaClient, parse_payment_link_id
 from user_store import TARIFF_PRICES, UserProfile, UserStore
 
 logger = logging.getLogger("financial-architect")
@@ -25,24 +26,30 @@ class SubscriptionService:
         *,
         redirect_url: str,
         fail_redirect_url: str,
+        tax_system_code: str = "",
     ) -> None:
         self.tochka = tochka
         self.users = users
         self.payments = payments
         self.redirect_url = redirect_url
         self.fail_redirect_url = fail_redirect_url
+        self.tax_system_code = tax_system_code
 
     async def create_initial_payment(
         self, user_id: int, tariff: str
     ) -> tuple[str, str]:
-        """Создаёт ссылку на оплату для первой покупки тарифа.
-        Возвращает (payment_link, operation_id)."""
+        """Создаёт подписку (recurring=true) в Точке. Возвращает
+        (payment_link, subscription_operation_id).
+
+        Точка возвращает operationId подписки — он используется для
+        последующих списаний через charge_subscription и для отмены.
+        """
         if tariff not in TARIFF_PRICES:
             raise ValueError(f"Unknown tariff: {tariff}")
         amount = float(TARIFF_PRICES[tariff])
         profile = self.users.get(user_id)
 
-        result = await self.tochka.create_payment(
+        result = await self.tochka.create_subscription(
             amount=amount,
             purpose=f"Подписка на тариф {tariff} (месяц)",
             user_id=user_id,
@@ -50,12 +57,14 @@ class SubscriptionService:
             redirect_url=self.redirect_url,
             fail_redirect_url=self.fail_redirect_url,
             email=profile.email,
-            save_card=True,
+            tax_system_code=self.tax_system_code,
         )
 
-        # orderId у нас в purpose/meta не виден — восстановим формат sub_{uid}_{tariff}_{rand}
-        # TochkaClient.create_payment генерит его внутри, но не возвращает.
-        # Для истории пишем operation_id как order_id (Tochka возвращает свой id).
+        # Запись платежа: operation_id = subscription operationId,
+        # order_id = paymentLinkId, который Точка пришлёт в webhook'е.
+        # Точный paymentLinkId генерируется внутри create_subscription;
+        # мы его не возвращаем наружу, но он восстановится из webhook'а
+        # через find_by_operation либо через parse_payment_link_id.
         self.payments.record_created(
             operation_id=result.operation_id,
             order_id=result.operation_id,
@@ -67,23 +76,31 @@ class SubscriptionService:
         return result.payment_link, result.operation_id
 
     def handle_webhook_paid(
-        self, *, operation_id: str, order_id: str, card_token: str, amount: float
+        self, *,
+        operation_id: str,
+        order_id: str,
+        card_token: str = "",  # игнорируется — у Точки cardToken не отдаётся
+        amount: float,
     ) -> Optional[UserProfile]:
-        """Обрабатывает уведомление об успешной оплате от Точки.
+        """Обрабатывает acquiringInternetPayment с APPROVED/AUTHORIZED.
 
-        Находит запись платежа, определяет user_id+tariff, активирует подписку.
-        Возвращает обновлённый профиль или None, если платёж не найден.
+        Находит запись платежа, активирует подписку, привязывает
+        operationId подписки к профилю пользователя.
         """
-        # Сначала ищем по operation_id
+        # Сначала ищем по operation_id (для первичного платежа это id
+        # подписки; для продления — id зарегистрированный из ответа charge)
         rec = self.payments.find_by_operation(operation_id)
         if not rec:
-            # Пробуем по order_id (если в первый раз видим operation_id)
             rec = self.payments.find_by_order(order_id)
         if not rec:
-            # Пытаемся восстановить из orderId формата sub_{uid}_{tariff}_...
-            parsed = parse_order_id(order_id)
+            # Webhook пришёл первым: восстанавливаем запись из
+            # paymentLinkId формата sub_{uid}_{tariff}_{rand}
+            parsed = parse_payment_link_id(order_id)
             if not parsed:
-                logger.error("Unknown payment: op=%s order=%s", operation_id, order_id)
+                logger.error(
+                    "Unknown payment: op=%s order=%s",
+                    operation_id, order_id,
+                )
                 return None
             user_id, tariff = parsed
             rec = self.payments.record_created(
@@ -100,11 +117,18 @@ class SubscriptionService:
             return self.users.get(rec.user_id)
 
         self.payments.mark_paid(operation_id)
+        # Привязываем operationId подписки к профилю — для последующих
+        # charge_subscription. Это происходит ТОЛЬКО для initial-платежа;
+        # рекуррентные списания не пересохраняют id (он тот же).
+        subscription_op_id = ""
+        if rec.kind == "initial":
+            subscription_op_id = operation_id
+
         profile = self.users.activate_subscription(
             user_id=rec.user_id,
             tariff=rec.tariff,
             days=30,
-            card_token=card_token,
+            subscription_operation_id=subscription_op_id,
             payment_id=operation_id,
         )
         logger.info(
@@ -126,32 +150,37 @@ class SubscriptionService:
         return profile
 
     def handle_webhook_failed(
-        self, *, operation_id: str, error: str = ""
+        self, *, operation_id: str, error: str = "",
     ) -> None:
+        """В реальной интеграции с Точкой webhook про failed не приходит
+        вовсе — failed-логика идёт через payment_poller, который сам
+        вызывает этот метод после get_subscription_status. Сохраняем
+        для совместимости и тестов."""
         self.payments.mark_failed(operation_id, error=error)
         logger.info("Payment %s marked failed: %s", operation_id, error)
 
     async def try_renew(self, profile: UserProfile) -> tuple[bool, str]:
-        """Пытается рекуррентно списать подписку.
-        Возвращает (успех, сообщение).
-        """
+        """Списывает с привязанной к подписке карты через Точку."""
         if profile.tariff == "free" or not profile.auto_renew:
             return False, "auto_renew disabled"
-        if not profile.card_token:
-            return False, "no saved card"
+        if not profile.subscription_operation_id:
+            return False, "no subscription"
         if profile.tariff not in TARIFF_PRICES:
             return False, f"unknown tariff {profile.tariff}"
 
         amount = float(TARIFF_PRICES[profile.tariff])
-        result = await self.tochka.charge_recurring(
+        result = await self.tochka.charge_subscription(
+            operation_id=profile.subscription_operation_id,
             amount=amount,
-            purpose=f"Автопродление тарифа {profile.tariff}",
-            card_token=profile.card_token,
-            user_id=profile.user_id,
-            tariff=profile.tariff,
-            email=profile.email,
         )
 
+        # Регистрируем рекуррентное списание в журнале. operation_id
+        # списания — тот же что у подписки; используем суффикс времени
+        # как составной ключ записи, чтобы записи не конфликтовали.
+        # Точка не возвращает отдельного id для charge — статус один на
+        # всю подписку. Поэтому в payments_store пишем тот же operationId
+        # с типом recurring; webhook acquiringInternetPayment придёт
+        # на этот же operationId и пометит как paid (идемпотентно).
         self.payments.record_created(
             operation_id=result.operation_id,
             order_id=result.operation_id,
@@ -176,12 +205,42 @@ class SubscriptionService:
             return True, "pending"
 
         # declined
-        self.payments.mark_failed(result.operation_id, error=result.error_message)
+        self.payments.mark_failed(
+            result.operation_id, error=result.error_message,
+        )
         self.users.record_renewal_failure(profile.user_id)
         return False, result.error_message or "declined"
 
-    def expiring_soon(self, days: int = RENEWAL_LEAD_DAYS) -> list[UserProfile]:
-        """Возвращает профили с истекающими подписками (для автопродления)."""
+    async def cancel_user_subscription(
+        self, user_id: int,
+    ) -> tuple[bool, str]:
+        """Отменяет подписку на стороне Точки и выключает auto_renew у нас.
+
+        После отмены вернуть подписку нельзя — клиент должен оформить
+        новую. Текущий период доходит до конца expires_at.
+        """
+        profile = self.users.get(user_id)
+        # Локально выключаем auto_renew всегда — даже если в Точке нет
+        # активной подписки (например, истекла).
+        self.users.disable_auto_renew(user_id)
+        if not profile.subscription_operation_id:
+            return True, "auto_renew disabled (no subscription on Tochka side)"
+
+        try:
+            ok = await self.tochka.cancel_subscription(
+                profile.subscription_operation_id,
+            )
+        except Exception as exc:
+            logger.warning("Tochka cancel_subscription error: %s", exc)
+            return True, "auto_renew disabled (Tochka API error)"
+        if ok:
+            return True, "cancelled"
+        return True, "auto_renew disabled (Tochka decline)"
+
+    def expiring_soon(
+        self, days: int = RENEWAL_LEAD_DAYS,
+    ) -> list[UserProfile]:
+        """Возвращает профили с истекающими подписками (для авто-продления)."""
         now = datetime.now(timezone.utc)
         cutoff = now + timedelta(days=days)
         result = []
@@ -204,17 +263,9 @@ class SubscriptionService:
         older_than_seconds: int = 300,
         max_age_seconds: int = 24 * 60 * 60,
     ) -> list[tuple[str, str]]:
-        """Опрашивает Точку по всем платежам в статусе 'created'.
-
-        Это safety-net на случай, когда webhook не дошёл до нашего сервера
-        (сетевой обрыв, прокси, кратковременное падение). Без этого
-        пользователь оплачивает, но подписка не активируется до ручного
-        вмешательства.
-
-        - older_than_seconds: не опрашиваем платежи моложе N секунд —
-          Точка не успела создать операцию.
-        - max_age_seconds: платежи старше суток считаем брошенными,
-          не опрашиваем (клиент уже не ждёт).
+        """Опрашивает Точку по всем платежам в статусе 'created' через
+        get_subscription_status. Это safety-net на случай пропущенного
+        webhook'а.
 
         Возвращает список (operation_id, action), где action ∈
         {"activated", "failed", "still_pending", "error"}.
@@ -226,36 +277,40 @@ class SubscriptionService:
         results: list[tuple[str, str]] = []
         for rec in pending:
             try:
-                data = await self.tochka.get_operation_status(rec.operation_id)
+                data = await self.tochka.get_subscription_status(
+                    rec.operation_id,
+                )
             except Exception as exc:
-                logger.warning("Poll status failed for %s: %s",
-                               rec.operation_id, exc)
+                logger.warning(
+                    "Poll status failed for %s: %s",
+                    rec.operation_id, exc,
+                )
                 results.append((rec.operation_id, "error"))
                 continue
 
-            status = (data.get("status") or "").lower()
-            card_token = data.get("cardToken") or data.get("savedCardToken") or ""
+            status = (data.get("status") or "").upper()
             amount = float(data.get("amount") or rec.amount)
 
-            if status in ("paid", "approved", "confirmed", "completed"):
-                # Активируем как при webhook'е — handle_webhook_paid
-                # идемпотентен (не активирует уже paid повторно).
+            if status in ("APPROVED", "AUTHORIZED"):
+                # Идемпотентно через handle_webhook_paid (не активирует
+                # повторно paid-запись)
                 self.handle_webhook_paid(
                     operation_id=rec.operation_id,
                     order_id=rec.order_id,
-                    card_token=card_token,
                     amount=amount,
                 )
                 results.append((rec.operation_id, "activated"))
-                logger.info("Poller: activated subscription for op=%s",
-                            rec.operation_id)
-            elif status in ("failed", "declined", "cancelled", "rejected"):
+                logger.info(
+                    "Poller: activated subscription for op=%s",
+                    rec.operation_id,
+                )
+            elif status in ("DECLINED", "CANCELLED", "REJECTED", "FAILED"):
                 self.handle_webhook_failed(
                     operation_id=rec.operation_id,
                     error=str(data.get("errorMessage", "")),
                 )
                 results.append((rec.operation_id, "failed"))
             else:
-                # Точка ещё думает — оставляем в created
+                # Точка ещё думает (CREATED / pending / etc) — оставляем
                 results.append((rec.operation_id, "still_pending"))
         return results

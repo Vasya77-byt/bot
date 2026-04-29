@@ -1,24 +1,31 @@
 """HTTP-сервер для приёма webhook-уведомлений от Точка Банка.
 
-Запускается параллельно с ботом через asyncio. После успешной оплаты
-Точка стучится на /tochka/webhook с данными платежа.
+Точка шлёт уведомления как POST с Content-Type: text/plain, тело —
+JWT-токен подписанный приватным ключом банка (алгоритм RS256).
+Проверка подписи делается публичным ключом, который зашит в
+TochkaClient.
+
+Подходящее событие для нас — acquiringInternetPayment. Все остальные
+события (incomingPayment / outgoingPayment / СБП) бот игнорирует.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Awaitable, Callable, Optional
 
 from aiohttp import web
 
 from subscription import SubscriptionService
-from tochka_client import TochkaClient
+from tochka_client import (
+    ACQUIRING_EVENT,
+    SUCCESS_STATUSES,
+    TochkaClient,
+    parse_payment_link_id,
+)
 
 logger = logging.getLogger("financial-architect")
 
-# Колбэк для отправки уведомления пользователю в Telegram
-# Сигнатура: async def notify(user_id: int, text: str) -> None
 NotifyFn = Callable[[int, str], Awaitable[None]]
 
 
@@ -34,65 +41,57 @@ def build_app(
 
     async def webhook(request: web.Request) -> web.Response:
         raw = await request.read()
-        signature = (
-            request.headers.get("X-Signature", "")
-            or request.headers.get("Signature", "")
-        )
 
-        if not tochka.verify_webhook(raw, signature):
+        # 1) Проверяем JWT-подпись публичным ключом Точки
+        claims = tochka.verify_webhook(raw)
+        if claims is None:
             logger.warning("Webhook: bad signature from %s", request.remote)
+            # Точка ждёт 200 для успеха или другой код для retry.
+            # На bad signature отдаём 403 — Точка ретраит и узнает.
             return web.json_response({"error": "bad signature"}, status=403)
 
-        try:
-            body = json.loads(raw.decode("utf-8"))
-        except ValueError:
-            return web.json_response({"error": "bad json"}, status=400)
+        # 2) Игнорируем все события кроме нашего
+        event_type = claims.get("webhookType", "")
+        if event_type != ACQUIRING_EVENT:
+            logger.info("Webhook: ignoring event %s", event_type)
+            return web.json_response({"status": "ignored"})
 
-        parsed = TochkaClient.parse_webhook(body)
-        logger.info("Webhook received: %s", parsed)
+        # 3) Парсим acquiring-уведомление
+        parsed = TochkaClient.parse_acquiring_webhook(claims)
+        logger.info("Webhook: %s status=%s op=%s",
+                    parsed["event"], parsed["status"],
+                    parsed["operation_id"])
 
-        status = parsed["status"]
-        op = parsed["operation_id"]
-        order = parsed["order_id"]
-
-        if status in ("paid", "approved", "confirmed", "completed"):
+        # Точка шлёт webhook ТОЛЬКО для успешных платежей
+        # (AUTHORIZED — заморожено в двухэтапной, APPROVED — списано).
+        # Failed/declined webhook'ом не приходят — узнаются через poller
+        # (get_subscription_status).
+        if parsed["status"] in SUCCESS_STATUSES:
             profile = subscription.handle_webhook_paid(
-                operation_id=op,
-                order_id=order,
-                card_token=parsed["card_token"],
+                operation_id=parsed["operation_id"],
+                order_id=parsed["payment_link_id"],
+                card_token="",  # у Точки cardToken не отдаётся, привязка
+                                # к карте — на стороне подписки
                 amount=parsed["amount"],
             )
             if profile and notify:
+                expires_short = (
+                    profile.tariff_expires_at[:10]
+                    if profile.tariff_expires_at else "—"
+                )
                 text = (
-                    f"✅ Оплата прошла!\n\n"
+                    "✅ Оплата прошла!\n\n"
                     f"Тариф: {profile.tariff.upper()}\n"
-                    f"Подписка действует до: {profile.tariff_expires_at[:10]}\n\n"
-                    f"Автопродление включено. Отключить: /cancel_subscription"
+                    f"Подписка действует до: {expires_short}\n\n"
+                    "Автопродление включено. "
+                    "Отключить: /cancel_subscription"
                 )
                 try:
                     await notify(profile.user_id, text)
                 except Exception as exc:
                     logger.error("Notify failed: %s", exc)
 
-        elif status in ("failed", "declined", "cancelled", "rejected"):
-            subscription.handle_webhook_failed(
-                operation_id=op,
-                error=str(parsed.get("raw", {}).get("errorMessage", "")),
-            )
-            # Уведомляем пользователя только если можем определить его
-            from tochka_client import parse_order_id
-            parsed_order = parse_order_id(order)
-            if parsed_order and notify:
-                user_id, tariff = parsed_order
-                try:
-                    await notify(
-                        user_id,
-                        f"❌ Оплата тарифа {tariff} не прошла. Попробуйте ещё раз из меню «Тарифы».",
-                    )
-                except Exception as exc:
-                    logger.error("Notify failed: %s", exc)
-
-        # Точка ожидает 200 OK, иначе будет ретраить
+        # Точка ожидает 200 OK, иначе будет ретраить (30 раз × 10 сек)
         return web.json_response({"status": "ok"})
 
     app.router.add_get("/health", health)
@@ -102,7 +101,7 @@ def build_app(
 
 
 async def start_webhook_server(
-    app: web.Application, host: str = "0.0.0.0", port: int = 8080
+    app: web.Application, host: str = "0.0.0.0", port: int = 8080,
 ) -> web.AppRunner:
     runner = web.AppRunner(app)
     await runner.setup()

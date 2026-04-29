@@ -8,18 +8,21 @@ class Settings:
     api_id: int
     api_hash: str
     bot_token: str
-    # Tochka Bank acquiring
+    # Tochka Bank acquiring (через JWT-API банка)
     tochka_jwt: str = ""
     tochka_customer_code: str = ""
-    tochka_merchant_id: str = ""
+    tochka_client_id: str = ""           # для регистрации webhook'ов
+    tochka_merchant_id: str = ""         # обязателен если ≥2 торговых точек
     tochka_base_url: str = "https://enter.tochka.com/uapi"
-    tochka_webhook_secret: str = ""
+    tochka_tax_system_code: str = ""     # система налогообложения для чека
     # URLs
-    payment_redirect_url: str = "https://t.me/"           # куда перекинуть после успеха
-    payment_fail_redirect_url: str = "https://t.me/"      # после неудачи
+    payment_redirect_url: str = "https://t.me/"           # успех
+    payment_fail_redirect_url: str = "https://t.me/"      # неудача
     # Webhook server
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8080
+    webhook_public_url: str = ""        # https://домен/tochka/webhook —
+                                        # для авто-регистрации в Точке
 
     @property
     def payments_enabled(self) -> bool:
@@ -38,11 +41,19 @@ class Settings:
             bot_token=bot_token,
             tochka_jwt=os.getenv("TOCHKA_JWT", ""),
             tochka_customer_code=os.getenv("TOCHKA_CUSTOMER_CODE", ""),
+            tochka_client_id=os.getenv("TOCHKA_CLIENT_ID", ""),
             tochka_merchant_id=os.getenv("TOCHKA_MERCHANT_ID", ""),
-            tochka_base_url=os.getenv("TOCHKA_BASE_URL", "https://enter.tochka.com/uapi"),
-            tochka_webhook_secret=os.getenv("TOCHKA_WEBHOOK_SECRET", ""),
-            payment_redirect_url=os.getenv("PAYMENT_REDIRECT_URL", "https://t.me/"),
-            payment_fail_redirect_url=os.getenv("PAYMENT_FAIL_REDIRECT_URL", "https://t.me/"),
+            tochka_base_url=os.getenv(
+                "TOCHKA_BASE_URL", "https://enter.tochka.com/uapi"
+            ),
+            tochka_tax_system_code=os.getenv("TOCHKA_TAX_SYSTEM_CODE", ""),
+            payment_redirect_url=os.getenv(
+                "PAYMENT_REDIRECT_URL", "https://t.me/"
+            ),
+            payment_fail_redirect_url=os.getenv(
+                "PAYMENT_FAIL_REDIRECT_URL", "https://t.me/"
+            ),
             webhook_host=os.getenv("WEBHOOK_HOST", "0.0.0.0"),
             webhook_port=int(os.getenv("WEBHOOK_PORT", "8080")),
+            webhook_public_url=os.getenv("WEBHOOK_PUBLIC_URL", ""),
         )

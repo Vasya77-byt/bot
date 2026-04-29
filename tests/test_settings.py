@@ -29,7 +29,8 @@ class TestFromEnvRequired:
     def _clear(self, monkeypatch):
         for var in ("TG_API_ID", "TG_API_HASH", "TG_BOT_TOKEN",
                     "TOCHKA_JWT", "TOCHKA_CUSTOMER_CODE", "TOCHKA_MERCHANT_ID",
-                    "TOCHKA_BASE_URL", "TOCHKA_WEBHOOK_SECRET",
+                    "TOCHKA_BASE_URL", "TOCHKA_CLIENT_ID",
+                    "TOCHKA_TAX_SYSTEM_CODE", "WEBHOOK_PUBLIC_URL",
                     "PAYMENT_REDIRECT_URL", "PAYMENT_FAIL_REDIRECT_URL",
                     "WEBHOOK_HOST", "WEBHOOK_PORT"):
             monkeypatch.delenv(var, raising=False)
@@ -88,7 +89,8 @@ class TestFromEnvDefaults:
     def test_all_telegram_set_no_optionals(self, monkeypatch):
         self._telegram(monkeypatch)
         for var in ("TOCHKA_JWT", "TOCHKA_CUSTOMER_CODE", "TOCHKA_MERCHANT_ID",
-                    "TOCHKA_BASE_URL", "TOCHKA_WEBHOOK_SECRET",
+                    "TOCHKA_BASE_URL", "TOCHKA_CLIENT_ID",
+                    "TOCHKA_TAX_SYSTEM_CODE", "WEBHOOK_PUBLIC_URL",
                     "PAYMENT_REDIRECT_URL", "PAYMENT_FAIL_REDIRECT_URL",
                     "WEBHOOK_HOST", "WEBHOOK_PORT"):
             monkeypatch.delenv(var, raising=False)
@@ -101,7 +103,9 @@ class TestFromEnvDefaults:
         assert s.tochka_customer_code == ""
         assert s.tochka_merchant_id == ""
         assert s.tochka_base_url == "https://enter.tochka.com/uapi"
-        assert s.tochka_webhook_secret == ""
+        assert s.tochka_client_id == ""
+        assert s.tochka_tax_system_code == ""
+        assert s.webhook_public_url == ""
         assert s.payment_redirect_url == "https://t.me/"
         assert s.payment_fail_redirect_url == "https://t.me/"
         assert s.webhook_host == "0.0.0.0"
@@ -114,7 +118,9 @@ class TestFromEnvDefaults:
         monkeypatch.setenv("TOCHKA_CUSTOMER_CODE", "cc-1")
         monkeypatch.setenv("TOCHKA_MERCHANT_ID", "mid-1")
         monkeypatch.setenv("TOCHKA_BASE_URL", "https://sandbox.tochka.com/uapi")
-        monkeypatch.setenv("TOCHKA_WEBHOOK_SECRET", "secret-1")
+        monkeypatch.setenv("TOCHKA_CLIENT_ID", "cli-1")
+        monkeypatch.setenv("TOCHKA_TAX_SYSTEM_CODE", "6")
+        monkeypatch.setenv("WEBHOOK_PUBLIC_URL", "https://example.com/tochka/webhook")
         monkeypatch.setenv("PAYMENT_REDIRECT_URL", "https://t.me/bot?ok=1")
         monkeypatch.setenv("PAYMENT_FAIL_REDIRECT_URL", "https://t.me/bot?fail=1")
         monkeypatch.setenv("WEBHOOK_HOST", "127.0.0.1")
@@ -125,7 +131,9 @@ class TestFromEnvDefaults:
         assert s.tochka_customer_code == "cc-1"
         assert s.tochka_merchant_id == "mid-1"
         assert s.tochka_base_url == "https://sandbox.tochka.com/uapi"
-        assert s.tochka_webhook_secret == "secret-1"
+        assert s.tochka_client_id == "cli-1"
+        assert s.tochka_tax_system_code == "6"
+        assert s.webhook_public_url == "https://example.com/tochka/webhook"
         assert s.payment_redirect_url == "https://t.me/bot?ok=1"
         assert s.payment_fail_redirect_url == "https://t.me/bot?fail=1"
         assert s.webhook_host == "127.0.0.1"

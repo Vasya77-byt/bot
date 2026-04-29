@@ -1,30 +1,47 @@
-"""Тесты webhook_server: aiohttp-эндпоинты /health и /tochka/webhook."""
-import hashlib
-import hmac
+"""Тесты webhook_server: aiohttp-эндпоинты /health и /tochka/webhook
+под новый JWT/RS256-формат уведомлений Точки.
+"""
 import json
 from typing import Optional
 
+import jwt
 import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 
+from tochka_client import TochkaClient
 from user_store import UserProfile
 from webhook_server import build_app
 
 
-class FakeTochka:
-    """Лёгкий мок TochkaClient, нужный webhook'у:
-    - verify_webhook (instance method)
-    - parse_webhook (static — вызывается через TochkaClient)
-    """
+# ──────────────────────────────────────────────────────────────────────
+# Тестовая RSA-пара ключей для подписи webhook'ов
+# ──────────────────────────────────────────────────────────────────────
 
-    def __init__(self, signature_valid: bool = True):
-        self.signature_valid = signature_valid
-        self.verify_calls: list[tuple[bytes, str]] = []
 
-    def verify_webhook(self, raw: bytes, signature: str) -> bool:
-        self.verify_calls.append((raw, signature))
-        return self.signature_valid
+@pytest.fixture(scope="module")
+def rsa_keypair():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    pem_private = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_jwk = json.loads(RSAAlgorithm.to_jwk(public_key))
+    return pem_private, public_jwk
+
+
+@pytest.fixture
+def tochka(rsa_keypair):
+    _, public_jwk = rsa_keypair
+    return TochkaClient(
+        jwt_token="x", customer_code="cc",
+        public_key_jwk=public_jwk,
+    )
 
 
 class FakeSubscription:
@@ -33,7 +50,9 @@ class FakeSubscription:
         self.paid_calls: list[dict] = []
         self.failed_calls: list[dict] = []
 
-    def handle_webhook_paid(self, *, operation_id, order_id, card_token, amount):
+    def handle_webhook_paid(
+        self, *, operation_id, order_id, card_token="", amount,
+    ):
         self.paid_calls.append({
             "operation_id": operation_id, "order_id": order_id,
             "card_token": card_token, "amount": amount,
@@ -41,11 +60,12 @@ class FakeSubscription:
         return self.paid_profile
 
     def handle_webhook_failed(self, *, operation_id, error=""):
-        self.failed_calls.append({"operation_id": operation_id, "error": error})
+        self.failed_calls.append({
+            "operation_id": operation_id, "error": error,
+        })
 
 
 def make_notify():
-    """Возвращает (notify_fn, calls_list)."""
     calls: list[tuple[int, str]] = []
 
     async def notify(user_id: int, text: str) -> None:
@@ -55,114 +75,215 @@ def make_notify():
 
 
 @pytest.fixture
-def tochka():
-    return FakeTochka(signature_valid=True)
-
-
-@pytest.fixture
 def subscription():
     return FakeSubscription()
 
 
 @pytest_asyncio.fixture
-async def client(tochka, subscription):
-    """aiohttp TestClient с приложением и no-op notify."""
+async def client_with_app(tochka, subscription):
     notify_fn, _ = make_notify()
     app = build_app(tochka, subscription, notify=notify_fn)
     async with TestClient(TestServer(app)) as c:
         yield c
 
 
-def _post_payload(parsed_status: str = "approved", **fields) -> dict:
-    return {"Data": {
-        "operationId": fields.get("operation_id", "op-1"),
-        "orderId": fields.get("order_id", "sub_42_pro_xyz"),
-        "status": parsed_status,
-        "amount": fields.get("amount", 1290.0),
-        "cardToken": fields.get("card_token", "tok-1"),
-        **fields.get("extra", {}),
-    }}
+def _sign_jwt(claims: dict, private_pem: bytes) -> bytes:
+    """Подписывает claims приватным ключом — имитирует Точку."""
+    token = jwt.encode(claims, private_pem, algorithm="RS256")
+    return token.encode("utf-8") if isinstance(token, str) else token
+
+
+def _acquiring_payload(
+    *, status: str = "APPROVED",
+    operation_id: str = "sub-op-1",
+    payment_link_id: str = "sub_42_pro_xyz",
+    amount: str = "1290.00",
+    payment_type: str = "card",
+    extra: Optional[dict] = None,
+) -> dict:
+    payload = {
+        "webhookType": "acquiringInternetPayment",
+        "customerCode": "cc-1",
+        "merchantId": "mid-1",
+        "operationId": operation_id,
+        "amount": amount,
+        "paymentType": payment_type,
+        "consumerId": "buyer-1",
+        "purpose": "Подписка PRO",
+        "status": status,
+        "paymentLinkId": payment_link_id,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /health
+# ──────────────────────────────────────────────────────────────────────
 
 
 class TestHealth:
     @pytest.mark.asyncio
-    async def test_returns_ok(self, client):
-        resp = await client.get("/health")
+    async def test_returns_ok(self, client_with_app):
+        resp = await client_with_app.get("/health")
         assert resp.status == 200
         body = await resp.json()
         assert body == {"status": "ok"}
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Подпись JWT
+# ──────────────────────────────────────────────────────────────────────
+
+
 class TestWebhookSignature:
     @pytest.mark.asyncio
-    async def test_bad_signature_returns_403(self, tochka, subscription):
-        tochka.signature_valid = False
+    async def test_valid_signature_accepted(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        subscription.paid_profile = UserProfile(
+            user_id=42, tariff="pro",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+        )
+        notify, calls = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+
+        body = _sign_jwt(_acquiring_payload(), private_pem)
+
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 200
+        assert len(subscription.paid_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_tampered_signature_returns_403(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+
+        body = _sign_jwt(_acquiring_payload(), private_pem)
+        tampered = body[:-3] + b"XYZ"
+
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=tampered)
+        assert resp.status == 403
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_random_body_returns_403(
+        self, tochka, subscription,
+    ):
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=b"not-a-jwt")
+        assert resp.status == 403
+
+    @pytest.mark.asyncio
+    async def test_signed_with_wrong_key_returns_403(
+        self, tochka, subscription,
+    ):
+        # Подписываем чужим ключом — Точка-публичный должен отклонить
+        other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        other_pem = other.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        body = _sign_jwt(_acquiring_payload(), other_pem)
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 403
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Игнорирование чужих событий
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestEventFiltering:
+    @pytest.mark.asyncio
+    async def test_incoming_payment_ignored(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        body = _sign_jwt(
+            {"webhookType": "incomingPayment", "amount": "100"},
+            private_pem,
+        )
         notify, calls = make_notify()
         app = build_app(tochka, subscription, notify=notify)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload(),
-                                headers={"X-Signature": "bad"})
-        assert resp.status == 403
-        # subscription methods не должны вызываться
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 200
+        # subscription methods не дёргаются на чужих событиях
         assert subscription.paid_calls == []
-        assert subscription.failed_calls == []
         assert calls == []
 
     @pytest.mark.asyncio
-    async def test_signature_header_passed_to_verify(self, client, tochka):
-        await client.post("/tochka/webhook", json=_post_payload(),
-                          headers={"X-Signature": "sig-from-header"})
-        assert len(tochka.verify_calls) == 1
-        _, sig = tochka.verify_calls[0]
-        assert sig == "sig-from-header"
-
-    @pytest.mark.asyncio
-    async def test_signature_fallback_to_signature_header(self, client, tochka):
-        await client.post("/tochka/webhook", json=_post_payload(),
-                          headers={"Signature": "fallback-sig"})
-        _, sig = tochka.verify_calls[0]
-        assert sig == "fallback-sig"
-
-    @pytest.mark.asyncio
-    async def test_no_signature_header_passes_empty_string(self, client, tochka):
-        await client.post("/tochka/webhook", json=_post_payload())
-        _, sig = tochka.verify_calls[0]
-        assert sig == ""
-
-
-class TestWebhookBadJson:
-    @pytest.mark.asyncio
-    async def test_bad_json_returns_400(self, client, subscription):
-        resp = await client.post(
-            "/tochka/webhook",
-            data=b"not a json {{{",
-            headers={"Content-Type": "application/json"},
+    async def test_outgoing_payment_ignored(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        body = _sign_jwt(
+            {"webhookType": "outgoingPayment"}, private_pem,
         )
-        assert resp.status == 400
-        # ничего не записано в стор
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 200
         assert subscription.paid_calls == []
-        assert subscription.failed_calls == []
 
-
-class TestWebhookPaidFlow:
     @pytest.mark.asyncio
-    async def test_paid_status_calls_handle_webhook_paid(self, tochka, subscription):
-        future_iso = "2099-01-01T00:00:00+00:00"
+    async def test_incoming_sbp_ignored(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        body = _sign_jwt(
+            {"webhookType": "incomingSbpPayment"}, private_pem,
+        )
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 200
+        assert subscription.paid_calls == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# acquiringInternetPayment — успешные статусы
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAcquiringApproved:
+    @pytest.mark.asyncio
+    async def test_approved_calls_handle_webhook_paid(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
         subscription.paid_profile = UserProfile(
             user_id=42, tariff="pro",
-            tariff_expires_at=future_iso,
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
         )
         notify, notify_calls = make_notify()
         app = build_app(tochka, subscription, notify=notify)
+
+        body = _sign_jwt(_acquiring_payload(status="APPROVED"), private_pem)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload("approved"))
+            resp = await c.post("/tochka/webhook", data=body)
 
         assert resp.status == 200
         assert len(subscription.paid_calls) == 1
         call = subscription.paid_calls[0]
-        assert call["operation_id"] == "op-1"
+        assert call["operation_id"] == "sub-op-1"
         assert call["order_id"] == "sub_42_pro_xyz"
-        assert call["card_token"] == "tok-1"
         assert call["amount"] == 1290.0
 
         # Уведомление пользователю
@@ -171,45 +292,72 @@ class TestWebhookPaidFlow:
         assert uid == 42
         assert "Оплата прошла" in text
         assert "PRO" in text
-        assert "2099-01-01" in text
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", ["paid", "approved", "confirmed", "completed"])
-    async def test_all_success_statuses_trigger_paid(self, tochka, subscription, status):
+    async def test_authorized_also_treated_as_success(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
         subscription.paid_profile = UserProfile(
             user_id=1, tariff="pro",
             tariff_expires_at="2099-01-01T00:00:00+00:00",
         )
         notify, _ = make_notify()
         app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(_acquiring_payload(status="AUTHORIZED"), private_pem)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload(status))
+            resp = await c.post("/tochka/webhook", data=body)
         assert resp.status == 200
         assert len(subscription.paid_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_paid_without_profile_does_not_notify(self, tochka, subscription):
-        subscription.paid_profile = None  # запись не нашлась и не парсится
+    async def test_unknown_status_no_action(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(_acquiring_payload(status="PENDING"), private_pem)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/tochka/webhook", data=body)
+        assert resp.status == 200
+        # PENDING/CREATED — не успех, обрабатывает поллер позже
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_no_profile_does_not_notify(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        subscription.paid_profile = None
+        private_pem, _ = rsa_keypair
         notify, calls = make_notify()
         app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(_acquiring_payload(), private_pem)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload("approved"))
+            resp = await c.post("/tochka/webhook", data=body)
         assert resp.status == 200
         assert calls == []
 
     @pytest.mark.asyncio
-    async def test_paid_without_notify_does_not_crash(self, tochka, subscription):
+    async def test_no_notify_callback_does_not_crash(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
         subscription.paid_profile = UserProfile(
             user_id=1, tariff="pro",
             tariff_expires_at="2099-01-01T00:00:00+00:00",
         )
         app = build_app(tochka, subscription, notify=None)
+        body = _sign_jwt(_acquiring_payload(), private_pem)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload("approved"))
+            resp = await c.post("/tochka/webhook", data=body)
         assert resp.status == 200
 
     @pytest.mark.asyncio
-    async def test_paid_notify_exception_swallowed(self, tochka, subscription):
+    async def test_notify_exception_swallowed(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        private_pem, _ = rsa_keypair
         subscription.paid_profile = UserProfile(
             user_id=1, tariff="pro",
             tariff_expires_at="2099-01-01T00:00:00+00:00",
@@ -219,138 +367,28 @@ class TestWebhookPaidFlow:
             raise RuntimeError("telegram is down")
 
         app = build_app(tochka, subscription, notify=angry_notify)
+        body = _sign_jwt(_acquiring_payload(), private_pem)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload("approved"))
+            resp = await c.post("/tochka/webhook", data=body)
         # Webhook всё равно отвечает 200 — Точка не ретраит
         assert resp.status == 200
 
-
-class TestWebhookFailedFlow:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", ["failed", "declined", "cancelled", "rejected"])
-    async def test_all_failure_statuses_trigger_failed(
-        self, tochka, subscription, status
+    async def test_sbp_payment_type_works(
+        self, tochka, subscription, rsa_keypair,
     ):
+        # СБП-оплата — тот же event acquiringInternetPayment, paymentType=sbp
+        private_pem, _ = rsa_keypair
+        subscription.paid_profile = UserProfile(
+            user_id=1, tariff="pro",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+        )
         notify, _ = make_notify()
         app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(
+            _acquiring_payload(payment_type="sbp"), private_pem,
+        )
         async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload(status))
-        assert resp.status == 200
-        assert len(subscription.failed_calls) == 1
-        assert subscription.paid_calls == []
-
-    @pytest.mark.asyncio
-    async def test_failed_extracts_error_message_from_raw(self, tochka, subscription):
-        notify, _ = make_notify()
-        app = build_app(tochka, subscription, notify=notify)
-        payload = _post_payload("declined", extra={"errorMessage": "card blocked"})
-        async with TestClient(TestServer(app)) as c:
-            await c.post("/tochka/webhook", json=payload)
-        assert subscription.failed_calls[0]["error"] == "card blocked"
-
-    @pytest.mark.asyncio
-    async def test_failed_with_parseable_order_notifies_user(self, tochka, subscription):
-        notify, calls = make_notify()
-        app = build_app(tochka, subscription, notify=notify)
-        async with TestClient(TestServer(app)) as c:
-            await c.post("/tochka/webhook", json=_post_payload(
-                "declined", order_id="sub_77_pro_abc",
-            ))
-        assert len(calls) == 1
-        uid, text = calls[0]
-        assert uid == 77
-        assert "не прошла" in text
-        assert "pro" in text
-
-    @pytest.mark.asyncio
-    async def test_failed_with_unparseable_order_no_notify(self, tochka, subscription):
-        notify, calls = make_notify()
-        app = build_app(tochka, subscription, notify=notify)
-        async with TestClient(TestServer(app)) as c:
-            await c.post("/tochka/webhook", json=_post_payload(
-                "declined", order_id="garbage-order",
-            ))
-        assert calls == []
-        # subscription.handle_webhook_failed всё равно вызван
-        assert len(subscription.failed_calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_failed_without_notify_does_not_crash(self, tochka, subscription):
-        app = build_app(tochka, subscription, notify=None)
-        async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload(
-                "declined", order_id="sub_1_pro_x",
-            ))
-        assert resp.status == 200
-
-    @pytest.mark.asyncio
-    async def test_failed_notify_exception_swallowed(self, tochka, subscription):
-        async def angry(uid, text):
-            raise RuntimeError("nope")
-        app = build_app(tochka, subscription, notify=angry)
-        async with TestClient(TestServer(app)) as c:
-            resp = await c.post("/tochka/webhook", json=_post_payload(
-                "declined", order_id="sub_1_pro_x",
-            ))
-        assert resp.status == 200
-
-
-class TestWebhookUnknownStatus:
-    @pytest.mark.asyncio
-    async def test_unknown_status_returns_200_without_state_change(
-        self, client, subscription
-    ):
-        # status="pending" не входит ни в paid-, ни в failed-список
-        resp = await client.post("/tochka/webhook", json=_post_payload("pending"))
-        assert resp.status == 200
-        assert subscription.paid_calls == []
-        assert subscription.failed_calls == []
-
-    @pytest.mark.asyncio
-    async def test_empty_payload_returns_200_no_action(self, client, subscription):
-        resp = await client.post("/tochka/webhook", json={})
-        assert resp.status == 200
-        assert subscription.paid_calls == []
-        assert subscription.failed_calls == []
-
-
-class TestSignatureIntegrationWithRealVerify:
-    """Интеграционная проверка с настоящим TochkaClient.verify_webhook."""
-
-    @pytest.mark.asyncio
-    async def test_valid_hmac_passes(self, subscription):
-        from tochka_client import TochkaClient
-        tochka = TochkaClient(jwt_token="x", customer_code="x",
-                              webhook_secret="topsecret")
-        notify, _ = make_notify()
-        app = build_app(tochka, subscription, notify=notify)
-
-        body = json.dumps(_post_payload("approved")).encode("utf-8")
-        signature = hmac.new(b"topsecret", body, hashlib.sha256).hexdigest()
-
-        async with TestClient(TestServer(app)) as c:
-            resp = await c.post(
-                "/tochka/webhook", data=body,
-                headers={"X-Signature": signature,
-                         "Content-Type": "application/json"},
-            )
-        # subscription.handle_webhook_paid вызывается → 200
-        # При valid signature и approved статусе доходим до handle_webhook_paid
+            resp = await c.post("/tochka/webhook", data=body)
         assert resp.status == 200
         assert len(subscription.paid_calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_invalid_hmac_rejected(self, subscription):
-        from tochka_client import TochkaClient
-        tochka = TochkaClient(jwt_token="x", customer_code="x",
-                              webhook_secret="topsecret")
-        notify, _ = make_notify()
-        app = build_app(tochka, subscription, notify=notify)
-
-        async with TestClient(TestServer(app)) as c:
-            resp = await c.post(
-                "/tochka/webhook", json=_post_payload("approved"),
-                headers={"X-Signature": "deadbeef"},
-            )
-        assert resp.status == 403
-        assert subscription.paid_calls == []

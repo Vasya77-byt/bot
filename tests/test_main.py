@@ -343,7 +343,7 @@ class TestKeyboards:
         for row in kb.inline_keyboard:
             for btn in row:
                 if btn.callback_data and btn.callback_data.startswith("ca_"):
-                    assert "7707083893" in btn.callback_data or btn.callback_data == "ca_proposal:7707083893"
+                    assert "7707083893" in btn.callback_data
 
     def test_tariffs_keyboard_callback_format(self):
         kb = main._tariffs_keyboard()
@@ -551,8 +551,6 @@ class TestHandleCallback:
         ("ca_egryl:1234567890", "ЕГРЮЛ"),
         ("ca_history:1234567890", "История"),
         ("ca_links:1234567890", "Связи"),
-        ("ca_invoice:1234567890", "Запрос счёта"),
-        ("ca_proposal:1234567890", "Предложение"),
     ])
     async def test_wip_action_buttons_show_in_progress(self, data, label_word):
         cb = FakeCallbackQuery(data, user_id=1)

@@ -416,8 +416,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
             "ca_links": "🔗 Связи",
-            "ca_invoice": "🧾 Запрос счёта",
-            "ca_proposal": "📝 Предложение",
         }
 
         if action_part == "ca_courts" and inn_part:

@@ -36,6 +36,7 @@ def disable_sleeps(monkeypatch):
                         type("A", (), {
                             "sleep": fast_async_sleep,
                             "to_thread": __import__("asyncio").to_thread,
+                            "create_task": __import__("asyncio").create_task,
                         }))
     monkeypatch.setattr(time, "sleep", lambda _s: None)
 

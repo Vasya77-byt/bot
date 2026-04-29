@@ -184,6 +184,15 @@ class SecurityService:
 
     def __init__(self) -> None:
         self.fssp = FsspChecker()
+        # ZchbClient импортируется лениво, чтобы тестам не надо было мокать
+        # его на уровне импорта security_check.
+        self._zchb = None
+
+    def _get_zchb(self):
+        if self._zchb is None:
+            from zchb_client import ZchbClient
+            self._zchb = ZchbClient()
+        return self._zchb
 
     async def check(
         self,
@@ -192,22 +201,47 @@ class SecurityService:
         okved: Optional[str] = None,
         region: Optional[str] = None,
     ) -> SecurityResult:
-        """Полная проверка безопасности компании."""
+        """Полная проверка безопасности компании.
+
+        Запросы ФССП и ЗЧБ-rating пускаются параллельно, чтобы не
+        задерживать ответ.
+        """
         result = SecurityResult()
 
-        # ФССП
-        try:
-            fssp_result = await self.fssp.check(inn, name, region)
-            if isinstance(fssp_result, dict):
-                result.has_enforcement = fssp_result.get("has_enforcement", False)
-                result.enforcement_count = fssp_result.get("count", 0)
-                result.enforcement_total_sum = fssp_result.get("total_sum", 0.0)
-                result.enforcement_details = fssp_result.get("details", [])
-        except Exception as exc:
-            logger.warning("FSSP check error: %s", exc)
+        zchb = self._get_zchb()
+        fssp_task = asyncio.create_task(self._safe_fssp(inn, name, region))
+        rating_task = (
+            asyncio.create_task(zchb.get_rating(inn))
+            if zchb.enabled else None
+        )
 
-        # TODO: ЗаЧестныйБизнес
-        # TODO: Контур.Фокус
+        fssp_result = await fssp_task
+        if isinstance(fssp_result, dict):
+            result.has_enforcement = fssp_result.get("has_enforcement", False)
+            result.enforcement_count = fssp_result.get("count", 0)
+            result.enforcement_total_sum = fssp_result.get("total_sum", 0.0)
+            result.enforcement_details = fssp_result.get("details", [])
+
+        if rating_task is not None:
+            try:
+                rating = await rating_task
+            except Exception as exc:
+                logger.warning("ZCHB rating error: %s", exc)
+                rating = None
+            if rating is not None:
+                if rating.rating_category:
+                    result.zchb_risk_level = rating.rating_category
+                if rating.risk_level:
+                    result.zchb_details = (
+                        f"Налоговые риски: {rating.risk_level}"
+                    )
 
         result.calculate_risk()
         return result
+
+    async def _safe_fssp(self, inn, name, region):
+        try:
+            return await self.fssp.check(inn, name, region)
+        except Exception as exc:
+            logger.warning("FSSP check error: %s", exc)
+            return None

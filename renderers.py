@@ -323,11 +323,14 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     else:
         lines.append("   ✅ Исполнительных производств не найдено")
 
-    # ЗЧБ (когда подключим)
-    if result.zchb_details:
+    # ЗЧБ — Индекс компании + налоговые риски
+    if result.zchb_risk_level or result.zchb_details:
         lines.append("")
         lines.append("📋 ЗаЧестныйБизнес:")
-        lines.append(f"   {result.zchb_details}")
+        if result.zchb_risk_level:
+            lines.append(f"   Индекс компании: {result.zchb_risk_level}")
+        if result.zchb_details:
+            lines.append(f"   {result.zchb_details}")
 
     # Контур.Фокус (когда подключим)
     if result.focus_details:

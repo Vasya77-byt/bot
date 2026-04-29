@@ -419,3 +419,126 @@ class TestEndToEndScenarios:
         # 90 + 20 + 20 = 130 → cap 100
         assert result.score == 100
         assert result.level == "critical"
+
+
+# ────────────────────────────────────────────────────────────────────
+# Факторы из ZCHB CardSummary
+# ────────────────────────────────────────────────────────────────────
+
+from zchb_client import CardSummary  # noqa: E402
+
+
+def _security_with_card(**card_overrides) -> SecurityResult:
+    return SecurityResult(zchb_card=CardSummary(**card_overrides))
+
+
+class TestCardFactors:
+    def test_no_card_means_no_card_factors(self):
+        # Без карточки — никакие card-факторы не сработают
+        result = calculate_risk_score(_company(), _security())
+        labels = [f.label for f in result.factors]
+        assert not any("реестр" in l.lower() for l in labels)
+        assert not any("массов" in l.lower() for l in labels)
+
+    def test_debt_registry_flag_adds_25(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(in_debt_registry=True),
+        )
+        assert result.score == 25
+        labels = [f.label for f in result.factors]
+        assert any("задолженность" in l for l in labels)
+
+    def test_no_reporting_registry_strong_signal(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(in_no_reporting_registry=True),
+        )
+        assert result.score == 35
+        labels = [f.label for f in result.factors]
+        assert any("отчётность" in l for l in labels)
+
+    def test_address_invalid_adds_25(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(address_invalid=True),
+        )
+        assert result.score == 25
+
+    def test_unreliable_supplier_adds_30(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(is_unreliable_supplier=True),
+        )
+        assert result.score == 30
+
+    def test_mass_director_adds_20(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(director_is_mass_leader=True),
+        )
+        assert result.score == 20
+
+    def test_director_50_namesakes_adds_10(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(director_namesake_count=50),
+        )
+        assert result.score == 10
+
+    def test_director_few_namesakes_no_factor(self):
+        # 49 — ниже порога
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(director_namesake_count=49),
+        )
+        assert result.score == 0
+
+    def test_mass_founder_adds_15(self):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(founder_is_mass=True),
+        )
+        assert result.score == 15
+
+    @pytest.mark.parametrize("debt,expected", [
+        (50_000, 0),
+        (100_000, 0),       # пороговое — не считаем
+        (200_000, 5),
+        (1_500_000, 15),
+        (15_000_000, 25),
+    ])
+    def test_tax_debt_thresholds(self, debt, expected):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(tax_debt_sum=debt),
+        )
+        assert result.score == expected
+
+    @pytest.mark.parametrize("courts,expected", [
+        (50, 0),
+        (101, 5),
+        (1_001, 15),
+    ])
+    def test_courts_thresholds(self, courts, expected):
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(courts_total=courts),
+        )
+        assert result.score == expected
+
+    def test_multiple_card_flags_sum(self):
+        # Худший сценарий: фирма-однодневка
+        result = calculate_risk_score(
+            _company(),
+            _security_with_card(
+                in_debt_registry=True,            # +25
+                in_no_reporting_registry=True,    # +35
+                address_invalid=True,             # +25
+                director_is_mass_leader=True,     # +20
+                founder_is_mass=True,             # +15
+            ),
+        )
+        # 25+35+25+20+15 = 120 → cap 100
+        assert result.score == 100
+        assert result.level == "critical"

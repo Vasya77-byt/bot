@@ -148,6 +148,114 @@ def _inspections_factor(security: Optional[SecurityResult]) -> Optional[ScoreFac
     return None
 
 
+# ────────────────────────────────────────────────────────────────────
+# Факторы из ZCHB CardSummary (https://zachestnyibiznesapi.ru/docs)
+# ────────────────────────────────────────────────────────────────────
+
+
+def _card(security: Optional[SecurityResult]):
+    """Извлекает CardSummary из SecurityResult, если он там есть."""
+    if security is None:
+        return None
+    return getattr(security, "zchb_card", None)
+
+
+def _card_debt_registry_factor(security) -> Optional[ScoreFactor]:
+    """Реестр01 ФНС — есть взыскиваемая судебными приставами задолженность."""
+    card = _card(security)
+    if card and getattr(card, "in_debt_registry", False):
+        return ScoreFactor("В реестре ФНС: взыскиваемая задолженность", 25)
+    return None
+
+
+def _card_no_reporting_factor(security) -> Optional[ScoreFactor]:
+    """Реестр02 ФНС — компания не сдаёт отчётность более года.
+    Сильный признак фиктивно-живой компании."""
+    card = _card(security)
+    if card and getattr(card, "in_no_reporting_registry", False):
+        return ScoreFactor("Не сдаёт налоговую отчётность >1 года", 35)
+    return None
+
+
+def _card_address_invalid_factor(security) -> Optional[ScoreFactor]:
+    """Признак недостоверности адреса (запись в ЕГРЮЛ от ФНС)."""
+    card = _card(security)
+    if card and getattr(card, "address_invalid", False):
+        return ScoreFactor("Адрес признан недостоверным (ФНС)", 25)
+    return None
+
+
+def _card_unreliable_supplier_factor(security) -> Optional[ScoreFactor]:
+    """РНП ФАС — реестр недобросовестных поставщиков."""
+    card = _card(security)
+    if card and getattr(card, "is_unreliable_supplier", False):
+        return ScoreFactor("В реестре недобросовестных поставщиков (ФАС)", 30)
+    return None
+
+
+def _card_mass_director_factor(security) -> Optional[ScoreFactor]:
+    """Директор фигурирует в реестре массовых руководителей."""
+    card = _card(security)
+    if card and getattr(card, "director_is_mass_leader", False):
+        return ScoreFactor("Директор — массовый руководитель", 20)
+    return None
+
+
+def _card_director_namesakes_factor(security) -> Optional[ScoreFactor]:
+    """Большое число тёзок-директоров с такими же ФИО — слабый сигнал
+    «директор-номинал». Берём только при значительном количестве."""
+    card = _card(security)
+    if not card:
+        return None
+    n = getattr(card, "director_namesake_count", 0) or 0
+    if n >= 50:
+        return ScoreFactor(f"Директор: {n} однофамильцев-руководителей", 10)
+    return None
+
+
+def _card_mass_founder_factor(security) -> Optional[ScoreFactor]:
+    """Учредитель в реестре массовых учредителей."""
+    card = _card(security)
+    if card and getattr(card, "founder_is_mass", False):
+        return ScoreFactor("Учредитель — массовый", 15)
+    return None
+
+
+def _card_tax_debt_factor(security) -> Optional[ScoreFactor]:
+    """Сумма недоимки и задолженности по налогам (по данным ФНС)."""
+    card = _card(security)
+    if not card:
+        return None
+    debt = getattr(card, "tax_debt_sum", 0) or 0
+    if debt > 10_000_000:
+        return ScoreFactor("Налоговая задолженность > 10 млн ₽", 25)
+    if debt > 1_000_000:
+        return ScoreFactor("Налоговая задолженность > 1 млн ₽", 15)
+    if debt > 100_000:
+        return ScoreFactor("Налоговая задолженность > 100 тыс ₽", 5)
+    return None
+
+
+def _card_courts_factor(security) -> Optional[ScoreFactor]:
+    """Большое количество судебных дел — сигнал нестабильности.
+    Учитываем мягко — крупные компании всегда судятся, но крайние
+    значения должны иметь вес."""
+    card = _card(security)
+    if not card:
+        return None
+    n = getattr(card, "courts_total", 0) or 0
+    if n > 1000:
+        return ScoreFactor(f"Очень много судебных дел: {n}", 15)
+    if n > 100:
+        return ScoreFactor(f"Много судебных дел: {n}", 5)
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────
+# Положительные факторы (снимают баллы) пока не вводим — модель
+# «факторы только повышают риск» проще и предсказуемее. Сильный игрок
+# (миллиарды госконтрактов, лицензии) всё равно получит low по итогу.
+
 _FACTOR_FUNCTIONS = (
     _status_factor,
     _age_factor,
@@ -156,6 +264,28 @@ _FACTOR_FUNCTIONS = (
     _fssp_count_factor,
     _fssp_sum_factor,
     _inspections_factor,
+    _card_debt_registry_factor,
+    _card_no_reporting_factor,
+    _card_address_invalid_factor,
+    _card_unreliable_supplier_factor,
+    _card_mass_director_factor,
+    _card_director_namesakes_factor,
+    _card_mass_founder_factor,
+    _card_tax_debt_factor,
+    _card_courts_factor,
+)
+
+
+_CARD_FACTOR_FUNCTIONS = (
+    _card_debt_registry_factor,
+    _card_no_reporting_factor,
+    _card_address_invalid_factor,
+    _card_unreliable_supplier_factor,
+    _card_mass_director_factor,
+    _card_director_namesakes_factor,
+    _card_mass_founder_factor,
+    _card_tax_debt_factor,
+    _card_courts_factor,
 )
 
 
@@ -174,6 +304,10 @@ def calculate_risk_score(
 
     if security is not None:
         for fn in (_fssp_count_factor, _fssp_sum_factor, _inspections_factor):
+            f = fn(security)
+            if f is not None:
+                factors.append(f)
+        for fn in _CARD_FACTOR_FUNCTIONS:
             f = fn(security)
             if f is not None:
                 factors.append(f)

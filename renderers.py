@@ -323,14 +323,55 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     else:
         lines.append("   ✅ Исполнительных производств не найдено")
 
-    # ЗЧБ — Индекс компании + налоговые риски
-    if result.zchb_risk_level or result.zchb_details:
+    # ЗЧБ — Индекс компании + налоговые риски + расширенные данные из card
+    card = getattr(result, "zchb_card", None)
+    if result.zchb_risk_level or result.zchb_details or card is not None:
         lines.append("")
         lines.append("📋 ЗаЧестныйБизнес:")
         if result.zchb_risk_level:
             lines.append(f"   Индекс компании: {result.zchb_risk_level}")
         if result.zchb_details:
             lines.append(f"   {result.zchb_details}")
+
+        if card is not None:
+            # Красные флаги — выводим явно с эмодзи
+            if card.in_no_reporting_registry:
+                lines.append("   ⚠️ Не сдаёт налоговую отчётность >1 года")
+            if card.in_debt_registry:
+                lines.append("   ⚠️ В реестре ФНС: взыскиваемая задолженность")
+            if card.address_invalid:
+                lines.append("   ⚠️ Адрес признан недостоверным (ФНС)")
+            if card.is_unreliable_supplier:
+                lines.append("   ⚠️ В реестре недобросовестных поставщиков (ФАС)")
+            if card.director_is_mass_leader:
+                lines.append("   ⚠️ Директор — массовый руководитель")
+            if card.founder_is_mass:
+                lines.append("   ⚠️ Учредитель — массовый")
+            if card.director_namesake_count >= 50:
+                lines.append(
+                    f"   ⚠️ У директора {card.director_namesake_count} "
+                    "тёзок-руководителей"
+                )
+
+            # Цифры — без эмодзи, общая статистика
+            if card.courts_total:
+                lines.append(f"   ⚖️ Судов всего: {card.courts_total}")
+            if card.tax_debt_sum > 0:
+                lines.append(
+                    f"   💰 Налоговая задолженность: "
+                    f"{_fmt_money(card.tax_debt_sum)}"
+                )
+            if (card.contracts_supplier_count
+                    or card.contracts_customer_count):
+                lines.append(
+                    f"   📦 Госконтракты: поставщик "
+                    f"{card.contracts_supplier_count} шт. "
+                    f"({_fmt_money(card.contracts_supplier_sum)}), "
+                    f"заказчик {card.contracts_customer_count} шт. "
+                    f"({_fmt_money(card.contracts_customer_sum)})"
+                )
+            if card.licenses_count:
+                lines.append(f"   📜 Лицензий: {card.licenses_count}")
 
     # Контур.Фокус (когда подключим)
     if result.focus_details:

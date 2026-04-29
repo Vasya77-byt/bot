@@ -11,9 +11,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import requests
+
+if TYPE_CHECKING:
+    from zchb_client import CardSummary
 
 logger = logging.getLogger("financial-architect")
 
@@ -32,9 +35,10 @@ class SecurityResult:
     inspections_count: int = 0              # сколько проверок было всего
     inspections_violations_count: int = 0   # из них с нарушениями
 
-    # ЗаЧестныйБизнес (TODO)
+    # ЗаЧестныйБизнес
     zchb_risk_level: Optional[str] = None
     zchb_details: Optional[str] = None
+    zchb_card: Optional["CardSummary"] = None
 
     # Контур.Фокус (TODO)
     focus_risk_level: Optional[str] = None
@@ -214,6 +218,10 @@ class SecurityService:
             asyncio.create_task(zchb.get_rating(inn))
             if zchb.enabled else None
         )
+        card_task = (
+            asyncio.create_task(zchb.get_card(inn))
+            if zchb.enabled else None
+        )
 
         fssp_result = await fssp_task
         if isinstance(fssp_result, dict):
@@ -235,6 +243,15 @@ class SecurityService:
                     result.zchb_details = (
                         f"Налоговые риски: {rating.risk_level}"
                     )
+
+        if card_task is not None:
+            try:
+                card = await card_task
+            except Exception as exc:
+                logger.warning("ZCHB card error: %s", exc)
+                card = None
+            if card is not None:
+                result.zchb_card = card
 
         result.calculate_risk()
         return result

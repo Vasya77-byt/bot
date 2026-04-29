@@ -175,6 +175,13 @@ class CardSummary:
     payroll_fund: float = 0.0
     avg_salary: float = 0.0
 
+    # Финансы (для дополнения DaData/FNS если те отдают подозрительные значения)
+    capital: float = 0.0           # СумКап — уставный капитал
+    revenue_last_year: float = 0.0   # ОсновПоказОтчетн.СумДоход (для УСН)
+                                     # или последний год из ФО{YYYY}.ВЫРУЧКА
+    profit_last_year: float = 0.0    # доход - расход (для УСН)
+                                     # или ФО{YYYY}.ПРИБЫЛЬ
+
     # Признак недобросовестного поставщика
     is_unreliable_supplier: bool = False
 
@@ -625,7 +632,32 @@ class ZchbClient:
             avg_salary=_money(body.get("СредЗП")),
             tax_violations_sum=_money(body.get("НалогПравонаруш")),
             is_unreliable_supplier=bool(body.get("НедобросовПостав")),
+            capital=_money(body.get("СумКап")),
         )
+
+        # Финансы: пробуем сначала ОсновПоказОтчетн (УСН-формат), потом
+        # перебираем ФО{год} и берём самый свежий с ненулевыми значениями.
+        op = body.get("ОсновПоказОтчетн")
+        if isinstance(op, list) and op:
+            first_op = op[0] if isinstance(op[0], dict) else None
+            if first_op:
+                income = _money(first_op.get("СумДоход"))
+                expense = _money(first_op.get("СумРасход"))
+                if income > 0:
+                    result.revenue_last_year = income
+                    result.profit_last_year = income - expense
+
+        if result.revenue_last_year == 0:
+            # Пройдёмся по ФО{год} с YYYY от 2024 до 2010 включительно
+            for year in range(2024, 2009, -1):
+                fo = body.get(f"ФО{year}")
+                if not isinstance(fo, dict):
+                    continue
+                rev = _money(fo.get("ВЫРУЧКА"))
+                if rev > 0:
+                    result.revenue_last_year = rev
+                    result.profit_last_year = _money(fo.get("ПРИБЫЛЬ"))
+                    break
 
         # СудыСтатистика — может приходить разными ключами
         suds = body.get("СудыСтатистика")

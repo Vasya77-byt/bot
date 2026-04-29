@@ -272,3 +272,74 @@ class TestSuggest:
         service.dadata = FakeDaDataWithSuggest(suggest_results=[a, b])
         result = await service.suggest("X")
         assert result == [a, b]
+
+
+class TestPickZeroAsMissing:
+    """Для денежных полей 0 трактуется как «нет данных» — иначе глючный
+    источник перетирает корректное значение из следующего источника."""
+
+    def test_capital_zero_skipped_for_next_source(self):
+        # DaData выдала capital=0, а ЗЧБ — реальное значение. Должны взять ЗЧБ.
+        a = CompanyData(inn="1", name="X", capital=0)
+        b = CompanyData(inn="1", name="X", capital=67_000_000_000.0)
+        merged = CompanyService._merge([a, b], inn="1")
+        assert merged.capital == 67_000_000_000.0
+
+    def test_capital_real_value_preserved(self):
+        # Если первый источник дал реальное значение — берём его.
+        a = CompanyData(inn="1", capital=10_000.0)
+        b = CompanyData(inn="1", capital=67_000_000_000.0)
+        merged = CompanyService._merge([a, b], inn="1")
+        assert merged.capital == 10_000.0
+
+    def test_employees_zero_skipped(self):
+        a = CompanyData(inn="1", employees_count=0)
+        b = CompanyData(inn="1", employees_count=210_000)
+        merged = CompanyService._merge([a, b], inn="1")
+        assert merged.employees_count == 210_000
+
+    def test_revenue_zero_skipped(self):
+        a = CompanyData(inn="1", revenue_last_year=0)
+        b = CompanyData(inn="1", revenue_last_year=3_200_000_000_000)
+        merged = CompanyService._merge([a, b], inn="1")
+        assert merged.revenue_last_year == 3_200_000_000_000
+
+    def test_profit_zero_kept_as_valid(self):
+        # 0 для прибыли — валидное значение (компания вышла в ноль).
+        # Для profit_last_year не считаем 0 за «нет данных».
+        a = CompanyData(inn="1", profit_last_year=0)
+        b = CompanyData(inn="1", profit_last_year=500_000)
+        merged = CompanyService._merge([a, b], inn="1")
+        assert merged.profit_last_year == 0
+
+
+class TestCardToCompany:
+    def test_card_with_data_converts(self):
+        from zchb_client import CardSummary
+        card = CardSummary(
+            inn="7707083893",
+            ogrn="1027700132195",
+            name_short="СБЕР",
+            status="Действующее",
+            capital=67_000_000_000.0,
+            employees_count=210_000,
+            revenue_last_year=3_200_000_000_000.0,
+            profit_last_year=900_000_000_000.0,
+        )
+        cd = CompanyService._card_to_company(card, inn="7707083893")
+        assert cd.inn == "7707083893"
+        assert cd.name == "СБЕР"
+        assert cd.capital == 67_000_000_000.0
+        assert cd.employees_count == 210_000
+        assert cd.revenue_last_year == 3_200_000_000_000.0
+        assert cd.source == "zchb"
+
+    def test_empty_card_zeros_become_none(self):
+        from zchb_client import CardSummary
+        empty = CardSummary()
+        cd = CompanyService._card_to_company(empty, inn="123")
+        # 0/'' → None при конвертации, чтобы pick их пропустил
+        assert cd.inn == "123"
+        assert cd.capital is None
+        assert cd.employees_count is None
+        assert cd.revenue_last_year is None

@@ -1,6 +1,6 @@
 """Тесты monitoring_scheduler — фоновое перечитывание подписок."""
 import asyncio
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 

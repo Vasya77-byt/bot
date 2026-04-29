@@ -3,7 +3,6 @@ import sys
 import types
 from typing import Any, Dict, List
 
-import pytest
 
 from storage import _content_type, save_file_bytes
 

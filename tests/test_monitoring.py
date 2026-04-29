@@ -1,5 +1,4 @@
 """Тесты monitoring — snapshot/diff/format для уведомлений."""
-import pytest
 
 from monitoring import (
     FieldChange,

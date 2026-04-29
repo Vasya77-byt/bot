@@ -1,6 +1,5 @@
 """Тесты renewal_scheduler — фоновое автопродление подписок."""
 import asyncio
-from typing import Any
 
 import pytest
 

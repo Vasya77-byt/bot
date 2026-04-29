@@ -22,7 +22,6 @@ import os
 import sys
 import tempfile
 import types
-from io import BytesIO
 from typing import Any, List, Optional
 
 

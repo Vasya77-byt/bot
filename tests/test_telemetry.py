@@ -4,9 +4,7 @@
 email, имя, телефон) не уходят в Sentry в открытом виде. Это обязательное
 требование 152-ФЗ.
 """
-from typing import Any, Dict
 
-import pytest
 
 import telemetry
 from telemetry import (

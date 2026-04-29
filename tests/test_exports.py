@@ -6,7 +6,6 @@
 """
 from io import BytesIO
 
-import pytest
 from PIL import Image
 
 import exports

@@ -6,9 +6,7 @@
 """
 from datetime import date, datetime, timedelta, timezone
 
-import pytest
 
-import renderers
 from parsers import ParseResult
 from renderers import (
     _fmt_money,

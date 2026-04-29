@@ -34,7 +34,10 @@ def build_app(
 
     async def webhook(request: web.Request) -> web.Response:
         raw = await request.read()
-        signature = request.headers.get("X-Signature") or request.headers.get("Signature", "")
+        signature = (
+            request.headers.get("X-Signature", "")
+            or request.headers.get("Signature", "")
+        )
 
         if not tochka.verify_webhook(raw, signature):
             logger.warning("Webhook: bad signature from %s", request.remote)

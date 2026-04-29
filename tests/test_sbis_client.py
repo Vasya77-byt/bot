@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 import pytest
 import requests
 
-import sbis_client
 from sbis_client import SbisClient
 from schemas import CompanyData
 

@@ -2,7 +2,7 @@
 import hashlib
 import hmac
 import json
-from typing import Any, List, Optional, Tuple
+from typing import Optional
 
 import pytest
 import pytest_asyncio

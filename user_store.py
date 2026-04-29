@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
@@ -408,18 +408,22 @@ class UserStore:
             # Активный платник — продлеваем текущий тариф
             self.activate_subscription(referrer.user_id, referrer.tariff, days=days)
 
-        # Финальные обновления статистики
-        referrer = self._raw_profile(referrer.user_id)
-        referrer.referrals_paid_count += 1
-        referrer.referral_bonus_days_total += days
-        self.save_profile(referrer)
+        # Финальные обновления статистики. После activate_subscription
+        # запись референта точно есть, но проверяем явно для устойчивости
+        # к гипотетическому race с удалением профиля.
+        refreshed = self._raw_profile(referrer.user_id)
+        if refreshed is None:
+            return None
+        refreshed.referrals_paid_count += 1
+        refreshed.referral_bonus_days_total += days
+        self.save_profile(refreshed)
 
         # Помечаем приглашённого, чтобы не выдать повторно
         invited = self.get(invited_user_id)
         invited.referral_bonus_granted = True
         self.save_profile(invited)
 
-        return referrer
+        return refreshed
 
     def _raw_profile(self, user_id: int) -> Optional[UserProfile]:
         """Возвращает профиль, не создавая его если нет."""

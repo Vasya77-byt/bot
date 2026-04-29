@@ -31,4 +31,3 @@ class MetadataStore:
         except Exception:
             # logging here would be noisy; best-effort
             pass
- 

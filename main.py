@@ -89,6 +89,12 @@ def _reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _profile_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤝 Реферальная программа", callback_data="referral_show")],
+    ])
+
+
 def _inn_prompt_text(action: str) -> str:
     labels = {
         "mode_internal_analysis": "внутреннего анализа",
@@ -220,6 +226,14 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         )
         return
 
+    # Реферальная программа — показывается из карточки профиля
+    if data == "referral_show":
+        await callback_query.answer()
+        profile = user_store.get(user_id)
+        text = _format_referral_message(profile, _bot_username(client))
+        await callback_query.message.reply_text(text, disable_web_page_preview=True)
+        return
+
     # Кнопки выбора тарифа — создаём платёж
     if data.startswith("tariff_"):
         await callback_query.answer()
@@ -267,7 +281,10 @@ async def handle_text_message(client: Client, message) -> None:
         # Профиль — показываем сразу, ИНН не нужен
         if reply_action == "show_profile":
             profile = user_store.get(user_id)
-            await message.reply_text(render_profile(profile))
+            await message.reply_text(
+                render_profile(profile),
+                reply_markup=_profile_keyboard(),
+            )
             return
         # Остальные действия — запрашиваем ИНН
         _user_state.pop(user_id, None)
@@ -1001,18 +1018,9 @@ def _referral_link(bot_username: str, code: str) -> str:
     return f"https://t.me/{bot_username}?start={code}"
 
 
-async def handle_referral(client: Client, message) -> None:
-    """Команда /referral — показывает реф-код, ссылку и статистику."""
-    user_id = message.from_user.id
-    profile = user_store.get(user_id)
-
-    bot_username = ""
-    me = getattr(client, "me", None)
-    if me is not None:
-        bot_username = getattr(me, "username", "") or ""
-
+def _format_referral_message(profile, bot_username: str) -> str:
     link = _referral_link(bot_username, profile.referral_code)
-    text = (
+    return (
         "🤝 Партнёрская программа\n\n"
         f"Ваша ссылка:\n{link}\n\n"
         f"Код: {profile.referral_code}\n\n"
@@ -1026,6 +1034,20 @@ async def handle_referral(client: Client, message) -> None:
         f"Из них оплатили: {profile.referrals_paid_count}\n"
         f"Получено бонусных дней: {profile.referral_bonus_days_total}"
     )
+
+
+def _bot_username(client: Client) -> str:
+    me = getattr(client, "me", None)
+    if me is None:
+        return ""
+    return getattr(me, "username", "") or ""
+
+
+async def handle_referral(client: Client, message) -> None:
+    """Команда /referral — показывает реф-код, ссылку и статистику."""
+    user_id = message.from_user.id
+    profile = user_store.get(user_id)
+    text = _format_referral_message(profile, _bot_username(client))
     await message.reply_text(text, disable_web_page_preview=True)
 
 

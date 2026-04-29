@@ -547,7 +547,6 @@ class TestHandleCallback:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("data,label_word", [
-        ("ca_fns:1234567890", "ФНС"),
         ("ca_egryl:1234567890", "ЕГРЮЛ"),
         ("ca_history:1234567890", "История"),
         ("ca_links:1234567890", "Связи"),

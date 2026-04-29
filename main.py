@@ -324,6 +324,88 @@ def _format_arbitration(summary, inn: str) -> str:
     return "\n".join(lines)
 
 
+def _format_finance(card, inn: str) -> str:
+    """Текстовый рендер финансового раздела по компании."""
+    if card is None:
+        return (
+            f"📊 Финансы (ИНН {inn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+    has_anything = (
+        card.tax_regime or card.finance_history or card.tax_violations_sum
+        or card.tax_debt_items or card.payroll_fund or card.avg_salary
+    )
+    if not has_anything:
+        return (
+            f"📊 Финансы (ИНН {inn})\n\n"
+            "Нет финансовых данных в открытых источниках.\n"
+            "Возможные причины:\n"
+            "• Компания на ОСНО (для банков/страховщиков отчётность ЦБ — не ФНС)\n"
+            "• Свежая регистрация без сданных отчётов"
+        )
+
+    lines = [f"📊 Финансы (ИНН {inn})", ""]
+
+    if card.tax_regime:
+        lines.append(f"💼 Налоговый режим: {card.tax_regime}")
+        lines.append("")
+
+    # Тренд по годам
+    if card.finance_history:
+        lines.append("📈 Динамика по годам:")
+        for f in card.finance_history[:5]:  # последние 5 лет
+            if f.revenue or f.profit:
+                rev = _fmt_money_short(int(f.revenue))
+                prof = _fmt_money_short(int(f.profit))
+                lines.append(f"   {f.year}: выручка {rev}, прибыль {prof}")
+            elif f.income or f.expense:
+                inc = _fmt_money_short(int(f.income))
+                exp = _fmt_money_short(int(f.expense))
+                lines.append(f"   {f.year} (УСН): доход {inc}, расход {exp}")
+        lines.append("")
+
+    # Сотрудники и зарплата
+    if card.payroll_fund or card.avg_salary or card.employees_count:
+        lines.append("👥 Персонал и оплата труда:")
+        if card.employees_count:
+            lines.append(f"   Сотрудников: {card.employees_count}")
+        if card.payroll_fund:
+            lines.append(
+                f"   Фонд оплаты труда: {_fmt_money_short(int(card.payroll_fund))}"
+            )
+        if card.avg_salary:
+            lines.append(
+                f"   Средняя ЗП: {_fmt_money_short(int(card.avg_salary))}"
+            )
+        lines.append("")
+
+    # Налоговые штрафы
+    if card.tax_violations_sum > 0 or card.tax_violations_history:
+        lines.append("💸 Налоговые штрафы:")
+        if card.tax_violations_sum > 0:
+            lines.append(
+                f"   Сумма за период: "
+                f"{_fmt_money_short(int(card.tax_violations_sum))}"
+            )
+        for year, summ in card.tax_violations_history[:5]:
+            lines.append(
+                f"   {year}: {_fmt_money_short(int(summ))}"
+            )
+        lines.append("")
+
+    # Подробности недоимок
+    if card.tax_debt_items:
+        lines.append("⚠️ Налоговые недоимки и задолженности:")
+        for item in card.tax_debt_items[:10]:
+            name = (item.tax_name[:60] + "…") if len(item.tax_name) > 63 else item.tax_name
+            lines.append(
+                f"   • {name}: {_fmt_money_short(int(item.total))}"
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _inn_prompt_text(action: str) -> str:
     labels = {
         "mode_internal_analysis": "внутреннего анализа",
@@ -412,7 +494,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         inn_part = data.split(":")[1] if ":" in data else ""
 
         wip_actions = {
-            "ca_fns": "🏦 ФНС",
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
             "ca_links": "🔗 Связи",
@@ -429,6 +510,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             summary = await zchb.get_arbitration(inn_part)
             await callback_query.message.reply_text(
                 _format_arbitration(summary, inn_part),
+                disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_finance" and inn_part:
+            await callback_query.answer()
+            if not zchb.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник финансовых данных не настроен (ZCHB_API_KEY)."
+                )
+                return
+            await callback_query.message.reply_text("📊 Запрашиваю финансовые данные...")
+            card = await zchb.get_card(inn_part)
+            await callback_query.message.reply_text(
+                _format_finance(card, inn_part),
                 disable_web_page_preview=True,
             )
             return
@@ -916,7 +1012,7 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
-            InlineKeyboardButton("🏦 ФНС", callback_data=f"ca_fns:{inn}"),
+            InlineKeyboardButton("📊 Финансы", callback_data=f"ca_finance:{inn}"),
         ],
         [
             InlineKeyboardButton("🤖 ИИ-анализ", callback_data=f"ca_ai:{inn}"),

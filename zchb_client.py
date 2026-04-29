@@ -58,6 +58,12 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(FsspProceeding, item) for item in v]
             elif "FounderInfo" in type_repr:
                 v = [_restore_dataclass(FounderInfo, item) for item in v]
+            elif "YearFinance" in type_repr:
+                v = [_restore_dataclass(YearFinance, item) for item in v]
+            elif "TaxDebtItem" in type_repr:
+                v = [_restore_dataclass(TaxDebtItem, item) for item in v]
+            # tax_violations_history — list[tuple] — оставляем как list[list]
+            # из JSON, обработаем в рендерере как итерацию пар.
         kwargs[k] = v
     return cls(**kwargs)
 
@@ -129,6 +135,26 @@ class RatingResult:
     """Результат метода rating."""
     rating_category: str = ""   # "высокий", "средний", "низкий"
     risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class YearFinance:
+    """Финансы компании за один год."""
+    year: int
+    revenue: float = 0.0
+    profit: float = 0.0
+    income: float = 0.0       # для УСН (СумДоход)
+    expense: float = 0.0      # для УСН (СумРасход)
+
+
+@dataclass
+class TaxDebtItem:
+    """Запись о налоговой недоимке/задолженности."""
+    tax_name: str = ""
+    debt: float = 0.0          # СумНедНалог
+    fines: float = 0.0         # СумПени
+    penalties: float = 0.0     # СумШтраф
+    total: float = 0.0         # ОбщСумНедоим
 
 
 @dataclass
@@ -206,6 +232,16 @@ class CardSummary:
 
     # Категория МСП (Микро / Малое / Среднее предприятие; пусто для крупных)
     msp_category: str = ""
+
+    # Налоговый режим (ОСНО, УСН, Патент, ЕНВД...)
+    tax_regime: str = ""
+
+    # Финансы по годам — для тренда. Одно значение в revenue/profit на год.
+    finance_history: List[YearFinance] = field(default_factory=list)
+    # История штрафов по годам (год → сумма)
+    tax_violations_history: List[tuple] = field(default_factory=list)
+    # Подробности налоговых недоимок (по налогам)
+    tax_debt_items: List[TaxDebtItem] = field(default_factory=list)
 
 
 class ZchbClient:
@@ -751,6 +787,71 @@ class ZchbClient:
                 if isinstance(v, str) and v.strip():
                     result.msp_category = v.strip()
                     break
+
+        # Налоговый режим
+        result.tax_regime = str(body.get("НалогРежим") or "").strip()
+
+        # История финансов: ОсновПоказОтчетнИст (УСН) + ФО{год}
+        op_hist = body.get("ОсновПоказОтчетнИст")
+        if isinstance(op_hist, list):
+            for item in op_hist:
+                if not isinstance(item, dict):
+                    continue
+                year = _int(item.get("Год"))
+                if not year:
+                    continue
+                income = _money(item.get("СумДоход"))
+                expense = _money(item.get("СумРасход"))
+                result.finance_history.append(YearFinance(
+                    year=year,
+                    income=income,
+                    expense=expense,
+                    revenue=income,           # для УСН выручка ≈ доход
+                    profit=income - expense,
+                ))
+
+        # ФО{год} — для ОСНО (выручка/прибыль за год)
+        for year in range(2024, 2009, -1):
+            fo = body.get(f"ФО{year}")
+            if not isinstance(fo, dict):
+                continue
+            rev = _money(fo.get("ВЫРУЧКА"))
+            prof = _money(fo.get("ПРИБЫЛЬ"))
+            if rev > 0 or prof != 0:
+                # Не дублируем, если уже есть из ОсновПоказОтчетнИст
+                if not any(f.year == year for f in result.finance_history):
+                    result.finance_history.append(YearFinance(
+                        year=year, revenue=rev, profit=prof,
+                    ))
+
+        # Сортировка по году убыванию (последние сверху)
+        result.finance_history.sort(key=lambda f: f.year, reverse=True)
+
+        # История штрафов: НалогПравонарушИст
+        nph_hist = body.get("НалогПравонарушИст")
+        if isinstance(nph_hist, list):
+            for item in nph_hist:
+                if not isinstance(item, dict):
+                    continue
+                year = _int(item.get("Год"))
+                summ = _money(item.get("Сумма"))
+                if year:
+                    result.tax_violations_history.append((year, summ))
+            result.tax_violations_history.sort(key=lambda t: t[0], reverse=True)
+
+        # Подробности недоимок: СуммНедоимЗадолж (список)
+        debt_list = body.get("СуммНедоимЗадолж")
+        if isinstance(debt_list, list):
+            for item in debt_list:
+                if not isinstance(item, dict):
+                    continue
+                result.tax_debt_items.append(TaxDebtItem(
+                    tax_name=str(item.get("НаимНалог") or ""),
+                    debt=_money(item.get("СумНедНалог")),
+                    fines=_money(item.get("СумПени")),
+                    penalties=_money(item.get("СумШтраф")),
+                    total=_money(item.get("ОбщСумНедоим")),
+                ))
 
         return result
 

@@ -74,13 +74,39 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
 
     # ── Стоп-листы ──
     lines.append("—— Стоп-листы / 115-ФЗ / 550-П ——")
+    card = getattr(security, "zchb_card", None) if security else None
     if security:
         fssp_ok = not security.has_enforcement
         lines.append(f"{'✅' if fssp_ok else '⚠️'} ФССП: {'чисто' if fssp_ok else f'{security.enforcement_count} производств'}")
-    lines.append("✅ Росфинмониторинг: подключается...")
-    lines.append("✅ Реестр недобросов. поставщиков: подключается...")
+
+    # Реестры ФНС — из ZCHB card (если есть)
+    if card is not None:
+        lines.append(
+            f"{'⚠️' if card.in_debt_registry else '✅'} "
+            "Реестр ФНС (взыскиваемая задолженность): "
+            f"{'есть запись' if card.in_debt_registry else 'чисто'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.in_no_reporting_registry else '✅'} "
+            "Сдача отчётности ФНС: "
+            f"{'не сдаёт >1 года' if card.in_no_reporting_registry else 'в порядке'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.address_invalid else '✅'} "
+            "Адрес ЕГРЮЛ: "
+            f"{'недостоверен' if card.address_invalid else 'достоверен'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.is_unreliable_supplier else '✅'} "
+            "Реестр недобросов. поставщиков (ФАС): "
+            f"{'есть запись' if card.is_unreliable_supplier else 'чисто'}"
+        )
+    else:
+        lines.append("✅ Росфинмониторинг: подключается...")
+        lines.append("✅ Реестр недобросов. поставщиков: подключается...")
+
     lines.append("✅ Санкционные списки: подключается...")
-    lines.append("✅ Реестр предупреждений ЦБ: подключается...")
+    lines.append("✅ Реестр участников ЦБ: подключается...")
     lines.append("")
 
     # ── Карточка компании ──
@@ -129,6 +155,45 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
                 lines.append(f"   💰 Сумма: {_fmt_money(security.enforcement_total_sum)}")
         else:
             lines.append("⚖️ ФССП: нет ✅")
+        lines.append("")
+
+    # ── ЗаЧестныйБизнес: Индекс + расширенные данные ──
+    if security and (security.zchb_risk_level or security.zchb_details
+                     or card is not None):
+        lines.append("—— ЗаЧестныйБизнес ——")
+        if security.zchb_risk_level:
+            lines.append(f"📊 Индекс компании: {security.zchb_risk_level}")
+        if security.zchb_details:
+            lines.append(f"💼 {security.zchb_details}")
+        if card is not None:
+            # Массовость и тёзки — отдельные сигналы
+            if card.director_is_mass_leader:
+                lines.append("⚠️ Директор — массовый руководитель")
+            if card.founder_is_mass:
+                lines.append("⚠️ Учредитель — массовый")
+            if card.director_namesake_count >= 50:
+                lines.append(
+                    f"⚠️ У директора {card.director_namesake_count} "
+                    "тёзок-руководителей"
+                )
+            # Цифры
+            if card.courts_total:
+                lines.append(f"⚖️ Судов всего: {card.courts_total}")
+            if card.tax_debt_sum > 0:
+                lines.append(
+                    f"💰 Налоговая задолженность: "
+                    f"{_fmt_money(card.tax_debt_sum)}"
+                )
+            if card.contracts_supplier_count or card.contracts_customer_count:
+                lines.append(
+                    f"📦 Госконтракты: поставщик "
+                    f"{card.contracts_supplier_count} "
+                    f"({_fmt_money(card.contracts_supplier_sum)}), "
+                    f"заказчик {card.contracts_customer_count} "
+                    f"({_fmt_money(card.contracts_customer_sum)})"
+                )
+            if card.licenses_count:
+                lines.append(f"📜 Лицензий: {card.licenses_count}")
         lines.append("")
 
     # Блок «Причины» убран: факторы риска уже показаны в верхнем

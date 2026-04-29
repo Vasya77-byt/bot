@@ -64,6 +64,8 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(TaxDebtItem, item) for item in v]
             elif "FlCompanyLink" in type_repr:
                 v = [_restore_dataclass(FlCompanyLink, item) for item in v]
+            elif "InspectionRecord" in type_repr:
+                v = [_restore_dataclass(InspectionRecord, item) for item in v]
             # tax_violations_history — list[tuple] — оставляем как list[list]
             # из JSON, обработаем в рендерере как итерацию пар.
         kwargs[k] = v
@@ -137,6 +139,22 @@ class RatingResult:
     """Результат метода rating."""
     rating_category: str = ""   # "высокий", "средний", "низкий"
     risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class InspectionRecord:
+    """Одна проверка из Единого Реестра Проверок."""
+    erp_id: str = ""              # учётный номер
+    inspection_type: str = ""     # «Плановая проверка», «Внеплановая»
+    fz: str = ""                  # «294 ФЗ», «248 ФЗ»
+    prosecutor: str = ""          # наименование прокуратуры
+    start_date: str = ""          # дата начала ISO
+    end_date: str = ""            # дата окончания (если есть)
+    status: str = ""              # «Завершена», «В работе»
+    authority: str = ""           # орган контроля (ФРГУ)
+    carryout_form: str = ""       # «Выездная», «Документарная»
+    risk_category: str = ""       # «Умеренный риск (5 класс)»
+    has_violations: bool = False  # выявлены ли нарушения
 
 
 @dataclass
@@ -550,6 +568,122 @@ class ZchbClient:
         )
         self._cache_set("rating", inn_or_ogrn, result)
         return result
+
+    # ────────────────────────────────────────────────────────────────
+    # Proverki — Единый Реестр Проверок
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_inspections(self, inn_or_ogrn: str) -> Optional[List[InspectionRecord]]:
+        """История проверок из ЕРП.
+        Принимает ИНН/ОГРН/ИННФЛ/ОГРНИП."""
+        if not self.enabled:
+            return None
+
+        cached_dict = self._cache.get(self._cache_key("inspections", inn_or_ogrn))
+        if isinstance(cached_dict, list):
+            try:
+                return [_restore_dataclass(InspectionRecord, item) for item in cached_dict]
+            except Exception:
+                pass  # упадём на свежий запрос
+
+        raw = await asyncio.to_thread(self._simple_call, "proverki", inn_or_ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status != "200":
+            logger.warning("ZCHB proverki status=%s message=%s",
+                           status, raw.get("message", ""))
+            return []
+
+        body = raw.get("body")
+        # ЗЧБ для proverki возвращает массив проверок прямо в body
+        records: List[InspectionRecord] = []
+        if isinstance(body, list):
+            for inspection in body:
+                rec = self._parse_inspection(inspection)
+                if rec is not None:
+                    records.append(rec)
+        elif isinstance(body, dict):
+            # Иногда обёрнуто в {"item": [...]} или один объект
+            items = body.get("item") or body.get("docs") or [body]
+            if isinstance(items, list):
+                for inspection in items:
+                    rec = self._parse_inspection(inspection)
+                    if rec is not None:
+                        records.append(rec)
+
+        # Кешируем как list[asdict]
+        self._cache.set(
+            self._cache_key("inspections", inn_or_ogrn),
+            [asdict(r) for r in records],
+        )
+        return records
+
+    @staticmethod
+    def _parse_inspection(raw: Dict[str, Any]) -> Optional[InspectionRecord]:
+        if not isinstance(raw, dict):
+            return None
+
+        # Базовые поля могут быть прямо в raw или в "item"-обёртке
+        head = raw
+        if "item" in raw and isinstance(raw["item"], dict):
+            head = raw["item"]
+
+        rec = InspectionRecord(
+            erp_id=str(head.get("ERPID") or ""),
+            inspection_type=str(head.get("ITYPE_NAME") or ""),
+            fz=str(head.get("FZ_NAME") or ""),
+            prosecutor=str(head.get("PROSEC_NAME") or ""),
+            start_date=str(head.get("START_DATE") or ""),
+            status=str(head.get("STATUS") or ""),
+        )
+
+        # I_AUTHORITY — орган контроля (берём первый)
+        auth = raw.get("I_AUTHORITY")
+        if isinstance(auth, list) and auth:
+            first = auth[0]
+            if isinstance(first, dict):
+                a = first.get("item") if "item" in first else first
+                if isinstance(a, dict):
+                    rec.authority = str(a.get("FRGU_ORG_NAME") or "")
+        elif isinstance(auth, dict):
+            inner = auth.get("item") or auth
+            if isinstance(inner, dict):
+                rec.authority = str(inner.get("FRGU_ORG_NAME") or "")
+
+        # I_CLASSIFICATION
+        cls_block = raw.get("I_CLASSIFICATION")
+        if isinstance(cls_block, list) and cls_block:
+            first = cls_block[0]
+            if isinstance(first, dict):
+                inner = first.get("item") if "item" in first else first
+                if isinstance(inner, dict):
+                    rec.carryout_form = str(inner.get("ICARRYOUT_TYPE_NAME") or "")
+                    rec.risk_category = str(inner.get("IRISK_NAME") or "")
+
+        # I_OBJECT[].I_RESULT — даты окончания и наличие нарушений
+        objects = raw.get("I_OBJECT")
+        if isinstance(objects, list):
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+                ir = obj.get("I_RESULT")
+                if isinstance(ir, list):
+                    for result_item in ir:
+                        if not isinstance(result_item, dict):
+                            continue
+                        end_date = str(result_item.get("ACT_DATE_CREATE") or "")
+                        if end_date and not rec.end_date:
+                            rec.end_date = end_date
+                        # Нарушения: I_VIOLATION
+                        violations = obj.get("I_VIOLATION") or result_item.get("I_VIOLATION")
+                        if violations:
+                            rec.has_violations = True
+
+        return rec
 
     # ────────────────────────────────────────────────────────────────
     # FL-card — карточка физлица (директор/учредитель)

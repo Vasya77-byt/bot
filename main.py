@@ -324,6 +324,51 @@ def _format_arbitration(summary, inn: str) -> str:
     return "\n".join(lines)
 
 
+def _format_inspections(inspections, inn: str) -> str:
+    """Рендер истории проверок из ЕРП."""
+    if inspections is None:
+        return (
+            f"📜 Проверки (ИНН {inn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+    if not inspections:
+        return (
+            f"📜 Проверки (ИНН {inn})\n\n"
+            "✅ В Едином Реестре Проверок записей не найдено."
+        )
+
+    lines = [f"📜 Проверки из ЕРП (ИНН {inn})", ""]
+    lines.append(f"Всего записей: {len(inspections)}")
+    lines.append("")
+
+    # Сортируем по дате начала, последние сверху
+    sorted_inspect = sorted(
+        inspections,
+        key=lambda r: r.start_date or "",
+        reverse=True,
+    )
+    for i, r in enumerate(sorted_inspect[:10], 1):
+        period = r.start_date[:10] if r.start_date else "—"
+        if r.end_date and r.end_date[:10] != period:
+            period = f"{period} → {r.end_date[:10]}"
+        type_part = " ".join(filter(None, [r.inspection_type, r.carryout_form]))
+        lines.append(f"{i}. {period} — {type_part or 'Проверка'}")
+        if r.authority:
+            short = r.authority[:80] + ("…" if len(r.authority) > 80 else "")
+            lines.append(f"   Орган: {short}")
+        if r.status:
+            status_emoji = "✅" if "заверш" in r.status.lower() else "⏳"
+            lines.append(f"   Статус: {status_emoji} {r.status}")
+        if r.has_violations:
+            lines.append("   ⚠️ Выявлены нарушения")
+        if r.risk_category:
+            lines.append(f"   Категория риска: {r.risk_category}")
+        lines.append("")
+    if len(sorted_inspect) > 10:
+        lines.append(f"… показано 10 из {len(sorted_inspect)} проверок.")
+    return "\n".join(lines)
+
+
 async def _format_links(card, inn: str) -> str:
     """Связи: компании где директор/учредители фигурируют как
     руководители или учредители. Делает дополнительные запросы fl-card."""
@@ -565,7 +610,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
 
         wip_actions = {
             "ca_egryl": "🏛 ЕГРЮЛ",
-            "ca_history": "📜 История",
         }
 
         if action_part == "ca_courts" and inn_part:
@@ -612,6 +656,23 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             text = await _format_links(card, inn_part)
             await callback_query.message.reply_text(
                 text, disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_history" and inn_part:
+            await callback_query.answer()
+            if not zchb.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник проверок не настроен (ZCHB_API_KEY)."
+                )
+                return
+            await callback_query.message.reply_text(
+                "📜 Запрашиваю Единый Реестр Проверок..."
+            )
+            inspections = await zchb.get_inspections(inn_part)
+            await callback_query.message.reply_text(
+                _format_inspections(inspections, inn_part),
+                disable_web_page_preview=True,
             )
             return
 

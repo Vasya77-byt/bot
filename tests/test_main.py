@@ -548,7 +548,6 @@ class TestHandleCallback:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("data,label_word", [
         ("ca_egryl:1234567890", "ЕГРЮЛ"),
-        ("ca_history:1234567890", "История"),
     ])
     async def test_wip_action_buttons_show_in_progress(self, data, label_word):
         cb = FakeCallbackQuery(data, user_id=1)

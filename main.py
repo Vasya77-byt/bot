@@ -324,6 +324,88 @@ def _format_arbitration(summary, inn: str) -> str:
     return "\n".join(lines)
 
 
+def _egrul_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
+    """Кнопки внутри ЕГРЮЛ-блока."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📜 Полная история записей (+10 запросов)",
+            callback_data=f"ca_egryl_history:{inn}",
+        )],
+        [InlineKeyboardButton(
+            "📥 Выписка PDF с ЭЦП ФНС",
+            callback_data=f"ca_egryl_pdf:{inn}",
+        )],
+    ])
+
+
+def _format_egrul_summary(card, inn: str) -> str:
+    """Сводка ЕГРЮЛ: основные сведения + краткая история (если есть в card)."""
+    if card is None:
+        return (
+            f"🏛 ЕГРЮЛ (ИНН {inn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+
+    lines = [f"🏛 ЕГРЮЛ — {card.name_short or card.name_full or ('ИНН ' + inn)}"]
+    if card.inn:
+        lines.append(f"ИНН: {card.inn}")
+    if card.ogrn:
+        lines.append(f"ОГРН: {card.ogrn}")
+    if card.status:
+        lines.append(f"Статус: {card.status}")
+    lines.append("")
+
+    if card.egrul_records:
+        lines.append("📜 История записей (свежие сверху):")
+        sorted_records = sorted(
+            card.egrul_records, key=lambda r: r.date or "", reverse=True,
+        )
+        for r in sorted_records[:10]:
+            date = r.date[:10] if r.date else "—"
+            lines.append(f"   {date} — {r.type_name or r.type_code or 'запись'}")
+            if r.authority_name:
+                short = r.authority_name[:80] + ("…" if len(r.authority_name) > 80 else "")
+                lines.append(f"      ({short})")
+        if len(sorted_records) > 10:
+            lines.append(f"   … и ещё {len(sorted_records) - 10}")
+    else:
+        lines.append(
+            "📜 История записей в краткой карточке отсутствует.\n"
+            "Нажмите кнопку ниже, чтобы запросить полную историю "
+            "из ФНС-карточки (стоимость +10 запросов ЗЧБ)."
+        )
+    return "\n".join(lines)
+
+
+def _format_egrul_history(records, ogrn: str) -> str:
+    """Полная история записей ЕГРЮЛ."""
+    if records is None:
+        return (
+            f"📜 История ЕГРЮЛ (ОГРН {ogrn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+    if not records:
+        return (
+            f"📜 История ЕГРЮЛ (ОГРН {ogrn})\n\n"
+            "Записей в ЕГРЮЛ не найдено."
+        )
+
+    lines = [f"📜 История ЕГРЮЛ (ОГРН {ogrn})", "", f"Всего записей: {len(records)}", ""]
+    sorted_records = sorted(records, key=lambda r: r.date or "", reverse=True)
+    for i, r in enumerate(sorted_records[:30], 1):
+        date = r.date[:10] if r.date else "—"
+        lines.append(f"{i}. {date} — {r.type_name or r.type_code}")
+        if r.grn:
+            lines.append(f"   ГРН: {r.grn}")
+        if r.authority_name:
+            short = r.authority_name[:80] + ("…" if len(r.authority_name) > 80 else "")
+            lines.append(f"   {short}")
+        lines.append("")
+    if len(sorted_records) > 30:
+        lines.append(f"… показано 30 из {len(sorted_records)}.")
+    return "\n".join(lines)
+
+
 def _format_inspections(inspections, inn: str) -> str:
     """Рендер истории проверок из ЕРП."""
     if inspections is None:
@@ -608,9 +690,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         action_part = data.split(":")[0]  # ca_courts, ca_ai, etc.
         inn_part = data.split(":")[1] if ":" in data else ""
 
-        wip_actions = {
-            "ca_egryl": "🏛 ЕГРЮЛ",
-        }
+        wip_actions = {}
 
         if action_part == "ca_courts" and inn_part:
             await callback_query.answer()
@@ -673,6 +753,58 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 _format_inspections(inspections, inn_part),
                 disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_egryl" and inn_part:
+            await callback_query.answer()
+            if not zchb.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник ЕГРЮЛ не настроен (ZCHB_API_KEY)."
+                )
+                return
+            card = await zchb.get_card(inn_part)
+            await callback_query.message.reply_text(
+                _format_egrul_summary(card, inn_part),
+                reply_markup=_egrul_actions_keyboard(inn_part),
+                disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_egryl_history" and inn_part:
+            await callback_query.answer(
+                "Запрос полной истории — это +10 запросов ЗЧБ",
+                show_alert=False,
+            )
+            await callback_query.message.reply_text(
+                "📜 Загружаю полную историю записей ЕГРЮЛ "
+                "(метод fns-card, ~10 секунд)..."
+            )
+            # fns-card требует ОГРН — берём из кешированной card
+            card = await zchb.get_card(inn_part)
+            ogrn = (card.ogrn if card else "") or ""
+            if not ogrn:
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось определить ОГРН для запроса."
+                )
+                return
+            records = await zchb.get_fns_card_egrul(ogrn)
+            await callback_query.message.reply_text(
+                _format_egrul_history(records, ogrn),
+                disable_web_page_preview=True,
+            )
+            return
+
+        if action_part == "ca_egryl_pdf" and inn_part:
+            await callback_query.answer(
+                "Выписка ЕГРЮЛ с ЭЦП ФНС доступна бесплатно "
+                "на egrul.nalog.ru",
+                show_alert=True,
+            )
+            await callback_query.message.reply_text(
+                "📥 Полная выписка ЕГРЮЛ с электронной подписью ФНС\n\n"
+                f"https://egrul.nalog.ru/index.html\n\n"
+                f"Введите ИНН {inn_part} — получите PDF за 1 минуту, бесплатно."
             )
             return
 

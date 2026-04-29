@@ -66,6 +66,8 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(FlCompanyLink, item) for item in v]
             elif "InspectionRecord" in type_repr:
                 v = [_restore_dataclass(InspectionRecord, item) for item in v]
+            elif "EgrulRecord" in type_repr:
+                v = [_restore_dataclass(EgrulRecord, item) for item in v]
             # tax_violations_history — list[tuple] — оставляем как list[list]
             # из JSON, обработаем в рендерере как итерацию пар.
         kwargs[k] = v
@@ -139,6 +141,18 @@ class RatingResult:
     """Результат метода rating."""
     rating_category: str = ""   # "высокий", "средний", "низкий"
     risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class EgrulRecord:
+    """Одна запись из ЕГРЮЛ (СвЗапЕГРЮЛ)."""
+    grn: str = ""             # Государственный регистрационный номер
+    record_id: str = ""       # ИдЗап
+    date: str = ""            # ДатаЗап
+    type_code: str = ""       # КодСПВЗ
+    type_name: str = ""       # НаимВидЗап (например, "Создание ЮЛ")
+    authority_code: str = ""  # КодНО
+    authority_name: str = ""  # НаимНО
 
 
 @dataclass
@@ -288,6 +302,9 @@ class CardSummary:
     tax_violations_history: List[tuple] = field(default_factory=list)
     # Подробности налоговых недоимок (по налогам)
     tax_debt_items: List[TaxDebtItem] = field(default_factory=list)
+
+    # История записей в ЕГРЮЛ (СвЗапЕГРЮЛ)
+    egrul_records: List[EgrulRecord] = field(default_factory=list)
 
 
 class ZchbClient:
@@ -568,6 +585,68 @@ class ZchbClient:
         )
         self._cache_set("rating", inn_or_ogrn, result)
         return result
+
+    # ────────────────────────────────────────────────────────────────
+    # FNS-card — полная карточка ФНС (10 запросов!) с СвЗапЕГРЮЛ
+    # ────────────────────────────────────────────────────────────────
+
+    async def get_fns_card_egrul(self, ogrn: str) -> Optional[List[EgrulRecord]]:
+        """Полная карточка ФНС — для извлечения СвЗапЕГРЮЛ (история записей).
+        ВНИМАНИЕ: тарифицируется как 10 запросов. Идентификатор — ОГРН/ОГРНИП."""
+        if not self.enabled or not ogrn:
+            return None
+
+        cached_dict = self._cache.get(self._cache_key("fns_card_egrul", ogrn))
+        if isinstance(cached_dict, list):
+            try:
+                return [_restore_dataclass(EgrulRecord, item) for item in cached_dict]
+            except Exception:
+                pass
+
+        raw = await asyncio.to_thread(self._simple_call, "fns-card", ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status != "200":
+            logger.warning("ZCHB fns-card status=%s message=%s",
+                           status, raw.get("message", ""))
+            return []
+
+        body = raw.get("body") or {}
+        if isinstance(body, list):
+            body = body[0] if body else {}
+        if not isinstance(body, dict):
+            return []
+
+        records: List[EgrulRecord] = []
+        egrul = body.get("СвЗапЕГРЮЛ")
+        if isinstance(egrul, list):
+            for item in egrul:
+                if not isinstance(item, dict):
+                    continue
+                attrs = item.get("@attributes") or {}
+                vid = item.get("ВидЗап") or {}
+                vid_attrs = (vid.get("@attributes") if isinstance(vid, dict) else {}) or {}
+                regorg = item.get("СвРегОрг") or {}
+                ro_attrs = (regorg.get("@attributes") if isinstance(regorg, dict) else {}) or {}
+                records.append(EgrulRecord(
+                    grn=str(attrs.get("ГРН") or ""),
+                    record_id=str(attrs.get("ИдЗап") or ""),
+                    date=str(attrs.get("ДатаЗап") or ""),
+                    type_code=str(vid_attrs.get("КодСПВЗ") or ""),
+                    type_name=str(vid_attrs.get("НаимВидЗап") or ""),
+                    authority_code=str(ro_attrs.get("КодНО") or ""),
+                    authority_name=str(ro_attrs.get("НаимНО") or ""),
+                ))
+
+        self._cache.set(
+            self._cache_key("fns_card_egrul", ogrn),
+            [asdict(r) for r in records],
+        )
+        return records
 
     # ────────────────────────────────────────────────────────────────
     # Proverki — Единый Реестр Проверок
@@ -1080,6 +1159,28 @@ class ZchbClient:
                     fines=_money(item.get("СумПени")),
                     penalties=_money(item.get("СумШтраф")),
                     total=_money(item.get("ОбщСумНедоим")),
+                ))
+
+        # СвЗапЕГРЮЛ — может быть в card (обычно нет, но fns-card точно).
+        egrul = body.get("СвЗапЕГРЮЛ")
+        if isinstance(egrul, list):
+            for item in egrul:
+                if not isinstance(item, dict):
+                    continue
+                # У записей ЕГРЮЛ свой формат — могут быть @attributes/ВидЗап/СвРегОрг
+                attrs = item.get("@attributes") or {}
+                vid = item.get("ВидЗап") or {}
+                vid_attrs = (vid.get("@attributes") if isinstance(vid, dict) else {}) or {}
+                regorg = item.get("СвРегОрг") or {}
+                ro_attrs = (regorg.get("@attributes") if isinstance(regorg, dict) else {}) or {}
+                result.egrul_records.append(EgrulRecord(
+                    grn=str(attrs.get("ГРН") or ""),
+                    record_id=str(attrs.get("ИдЗап") or ""),
+                    date=str(attrs.get("ДатаЗап") or ""),
+                    type_code=str(vid_attrs.get("КодСПВЗ") or ""),
+                    type_name=str(vid_attrs.get("НаимВидЗап") or ""),
+                    authority_code=str(ro_attrs.get("КодНО") or ""),
+                    authority_name=str(ro_attrs.get("НаимНО") or ""),
                 ))
 
         return result

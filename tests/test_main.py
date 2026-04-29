@@ -545,16 +545,9 @@ class TestHandleCallback:
         assert main._user_state[7] == "mode_mass_check"
         assert "ИНН" in cb.message.replies[0]["text"]
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("data,label_word", [
-        ("ca_egryl:1234567890", "ЕГРЮЛ"),
-    ])
-    async def test_wip_action_buttons_show_in_progress(self, data, label_word):
-        cb = FakeCallbackQuery(data, user_id=1)
-        await main.handle_callback(client=None, callback_query=cb)
-        text = cb.message.replies[0]["text"]
-        assert "разработке" in text
-        assert label_word in text
+    # Все WIP-заглушки реализованы:
+    # ca_courts, ca_finance, ca_links, ca_history, ca_egryl, ca_ai —
+    # каждая имеет свой обработчик. WIP-параметризованный тест удалён.
 
     @pytest.mark.asyncio
     async def test_ca_courts_without_zchb_key_shows_friendly_message(

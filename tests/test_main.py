@@ -198,6 +198,13 @@ def isolated_main(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_user_state", {})
     # subscription_service по умолчанию None
     monkeypatch.setattr(main, "subscription_service", None)
+    # По умолчанию считаем, что онбординг пройден — иначе любой тест,
+    # проверяющий обработку текста / callback'а, упрётся в гейт.
+    # Тесты на сам онбординг пусть явно восстанавливают оригинальную логику.
+    async def _no_onboarding(*args, **kwargs):
+        return None
+    monkeypatch.setattr(main, "_onboarding_step", lambda profile: None)
+    monkeypatch.setattr(main, "_onboarding_step_async", _no_onboarding)
     yield
 
 
@@ -513,6 +520,9 @@ class TestHandleCallback:
     @pytest.mark.asyncio
     async def test_tariff_callback_without_subscription_service(self):
         # subscription_service=None из autouse fixture
+        p = main.user_store.get(1)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
         cb = FakeCallbackQuery("tariff_pro", user_id=1)
         await main.handle_callback(client=None, callback_query=cb)
         assert "не настроен" in cb.message.replies[0]["text"]
@@ -981,6 +991,9 @@ class TestHandleBuyTariff:
     async def test_buy_pro_creates_payment_link(self, monkeypatch):
         sub = FakeSubscriptionService()
         monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(42)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
         cb = FakeCallbackQuery("tariff_pro", user_id=42)
         await main.handle_callback(client=None, callback_query=cb)
 
@@ -1000,6 +1013,9 @@ class TestHandleBuyTariff:
     async def test_buy_payment_failure_friendly_message(self, monkeypatch):
         sub = FakeSubscriptionService(exception=RuntimeError("Tochka 500"))
         monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(1)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
         cb = FakeCallbackQuery("tariff_pro", user_id=1)
         await main.handle_callback(client=None, callback_query=cb)
         # Не падает, шлёт friendly-сообщение

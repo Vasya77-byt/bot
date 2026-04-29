@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Optional
 
@@ -55,6 +56,10 @@ monitoring_store = MonitoringStore()
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
 
+# Обязательная подписка на канал. Заполняется в main() из Settings.
+# Пусто = проверка канала отключена.
+required_channel: str = ""
+
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
 _user_state: dict[int, Any] = {}
@@ -87,6 +92,128 @@ def _reply_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+# Telegram возвращает один из этих статусов когда юзер НЕ подписан.
+# Pyrogram отдаёт enum ChatMemberStatus — сравниваем по имени для гибкости.
+_NOT_SUBSCRIBED_STATUSES = {"LEFT", "BANNED", "KICKED", "RESTRICTED"}
+
+
+async def _is_subscribed_to_channel(client, user_id: int) -> bool:
+    """True если пользователь подписан на required_channel.
+    True если проверка отключена (required_channel пустой)."""
+    if not required_channel:
+        return True
+    try:
+        member = await client.get_chat_member(required_channel, user_id)
+    except Exception as exc:
+        # UserNotParticipant или ChatAdminRequired — считаем не подписан.
+        # Логируем чтобы оператор видел проблему (например, бот не админ).
+        logger.warning(
+            "Channel check failed for user=%s channel=%s: %s",
+            user_id, required_channel, exc,
+        )
+        return False
+    status = getattr(member, "status", None)
+    name = getattr(status, "name", None) or str(status)
+    return name.upper() not in _NOT_SUBSCRIBED_STATUSES
+
+
+async def _onboarding_step_async(client, profile) -> Optional[str]:
+    """Возвращает название следующего шага онбординга или None.
+    Порядок: оферта → канал → телефон."""
+    if not profile.accepted_offer_at:
+        return "offer"
+    if required_channel and not await _is_subscribed_to_channel(client, profile.user_id):
+        return "channel"
+    if not profile.phone:
+        return "phone"
+    return None
+
+
+def _onboarding_step(profile) -> Optional[str]:
+    """Синхронная упрощённая проверка (без канала). Используется только
+    для предварительной проверки и в тестах. Полная проверка — _async."""
+    if not profile.accepted_offer_at:
+        return "offer"
+    if not profile.phone:
+        return "phone"
+    return None
+
+
+def _offer_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Публичная оферта", url="https://telegra.ph/Publichnaya-oferta---Finansovyj-arhitektor-04-27")],
+        [InlineKeyboardButton("📋 Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-04-27-19")],
+        [InlineKeyboardButton("🔒 Политика обработки ПДн", url="https://telegra.ph/Politika-obrabotki-personalnyh-dannyh-04-27")],
+        [InlineKeyboardButton("✅ Принимаю и продолжаю", callback_data="accept_offer")],
+    ])
+
+
+def _channel_keyboard() -> InlineKeyboardMarkup:
+    channel = required_channel or ""
+    url_part = channel.lstrip("@")
+    rows = []
+    if url_part and not url_part.startswith("-"):
+        rows.append([InlineKeyboardButton(
+            "📢 Перейти в канал", url=f"https://t.me/{url_part}"
+        )])
+    rows.append([InlineKeyboardButton(
+        "✅ Я подписался — проверить", callback_data="check_channel"
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def _phone_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+async def _send_onboarding_step(message, step: str) -> None:
+    """Показывает соответствующий шаг онбординга пользователю."""
+    if step == "offer":
+        await message.reply_text(
+            "👋 Добро пожаловать!\n\n"
+            "Перед началом работы ознакомьтесь с правовыми документами "
+            "и подтвердите согласие. Это обязательно для использования "
+            "сервиса согласно 152-ФЗ «О персональных данных».",
+            reply_markup=_offer_keyboard(),
+        )
+    elif step == "channel":
+        channel = required_channel or ""
+        await message.reply_text(
+            f"📢 Подпишитесь на наш канал {channel}\n\n"
+            "Это обязательное условие для использования бота. "
+            "В канале — полезные материалы по проверке контрагентов.\n\n"
+            "После подписки нажмите «✅ Я подписался — проверить».",
+            reply_markup=_channel_keyboard(),
+        )
+    elif step == "phone":
+        await message.reply_text(
+            "📱 Поделитесь номером телефона\n\n"
+            "Номер нужен для:\n"
+            "• Привязки подписки к вашему аккаунту\n"
+            "• Связи с поддержкой при необходимости\n\n"
+            "Нажмите кнопку ниже — Telegram передаст номер автоматически.",
+            reply_markup=_phone_keyboard(),
+        )
+
+
+async def _ensure_onboarded(client, message) -> bool:
+    """Гейт: возвращает True если онбординг пройден.
+    Иначе показывает следующий шаг и возвращает False."""
+    user_id = message.from_user.id
+    profile = user_store.get(user_id)
+    step = await _onboarding_step_async(client, profile)
+    if step is None:
+        return True
+    await _send_onboarding_step(message, step)
+    return False
 
 
 def _profile_keyboard() -> InlineKeyboardMarkup:
@@ -161,6 +288,64 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     data = callback_query.data
     user_id = callback_query.from_user.id
     logger.info("Callback from user %s: %s", user_id, data)
+
+    # Принятие оферты — доступно без онбординга
+    if data == "accept_offer":
+        await callback_query.answer()
+        profile = user_store.get(user_id)
+        if not profile.accepted_offer_at:
+            profile.accepted_offer_at = datetime.now(timezone.utc).isoformat()
+            user_store.save_profile(profile)
+        # Показываем следующий шаг (канал или телефон) — он зависит от настроек
+        next_step = await _onboarding_step_async(client, profile)
+        if next_step is None:
+            await callback_query.message.reply_text(
+                "✅ Регистрация завершена. Можно начинать работу.",
+                reply_markup=_reply_keyboard(),
+            )
+            await callback_query.message.reply_text(
+                "Выберите действие:", reply_markup=_main_menu(),
+            )
+        else:
+            await callback_query.message.reply_text("✅ Оферта принята.")
+            await _send_onboarding_step(callback_query.message, next_step)
+        return
+
+    # Повторная проверка подписки на канал — доступна без полного онбординга
+    if data == "check_channel":
+        profile = user_store.get(user_id)
+        if not profile.accepted_offer_at:
+            await callback_query.answer("Сначала примите оферту", show_alert=True)
+            await _send_onboarding_step(callback_query.message, "offer")
+            return
+        subscribed = await _is_subscribed_to_channel(client, user_id)
+        if not subscribed:
+            await callback_query.answer(
+                "Похоже, вы ещё не подписаны. Подпишитесь и нажмите снова.",
+                show_alert=True,
+            )
+            return
+        await callback_query.answer("Подписка подтверждена!", show_alert=False)
+        next_step = await _onboarding_step_async(client, profile)
+        if next_step is None:
+            await callback_query.message.reply_text(
+                "✅ Регистрация завершена. Можно начинать работу.",
+                reply_markup=_reply_keyboard(),
+            )
+            await callback_query.message.reply_text(
+                "Выберите действие:", reply_markup=_main_menu(),
+            )
+        else:
+            await _send_onboarding_step(callback_query.message, next_step)
+        return
+
+    # Гейт онбординга для всех остальных callback'ов
+    profile = user_store.get(user_id)
+    step = await _onboarding_step_async(client, profile)
+    if step is not None:
+        await callback_query.answer("Сначала пройдите регистрацию", show_alert=True)
+        await _send_onboarding_step(callback_query.message, step)
+        return
 
     # Кнопки действий под карточкой компании
     if data.startswith("ca_"):
@@ -354,6 +539,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         if tariff not in TARIFF_PRICES:
             await callback_query.message.reply_text("Тариф не найден.")
             return
+        # Для фискального чека нужен email. Запрашиваем его один раз.
+        if not profile.email:
+            _user_state[user_id] = {"action": "await_email", "tariff": tariff}
+            await callback_query.message.reply_text(
+                "📧 Перед оплатой введите email — на него придёт фискальный "
+                "чек (требование 54-ФЗ).\n\n"
+                "Введите адрес одной строкой:"
+            )
+            return
         await _handle_buy_tariff(callback_query.message, user_id, tariff)
         return
 
@@ -377,10 +571,79 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
     await callback_query.message.reply_text(_inn_prompt_text(data))
 
 
+async def handle_contact(client: Client, message) -> None:
+    """Обрабатывает поделённый контакт — шаг 'phone' онбординга."""
+    user_id = message.from_user.id
+    contact = message.contact
+    if contact is None:
+        return
+    # Принимаем только свой собственный контакт. Если клиент попытается
+    # отправить чужой — игнорируем и просим свой.
+    if contact.user_id and contact.user_id != user_id:
+        await message.reply_text(
+            "Поделитесь, пожалуйста, своим номером, а не чужим контактом.",
+            reply_markup=_phone_keyboard(),
+        )
+        return
+
+    phone = (contact.phone_number or "").strip()
+    if not phone:
+        await message.reply_text(
+            "Не удалось получить номер. Попробуйте ещё раз.",
+            reply_markup=_phone_keyboard(),
+        )
+        return
+    if not phone.startswith("+"):
+        phone = "+" + phone
+
+    profile = user_store.get(user_id)
+    profile.phone = phone
+    user_store.save_profile(profile)
+
+    next_step = await _onboarding_step_async(client, profile)
+    if next_step is None:
+        await message.reply_text(
+            f"✅ Номер сохранён: {phone}\n\n"
+            "Регистрация завершена. Можно начинать работу.",
+            reply_markup=_reply_keyboard(),
+        )
+        await message.reply_text("Выберите действие:", reply_markup=_main_menu())
+    else:
+        await message.reply_text(f"✅ Номер сохранён: {phone}")
+        await _send_onboarding_step(message, next_step)
+
+
 async def handle_text_message(client: Client, message) -> None:
     """Обработка текстовых сообщений."""
     text: str = message.text or ""
     user_id = message.from_user.id
+
+    # Гейт онбординга. Email-гейт срабатывает уже после полного онбординга
+    # и обрабатывается ниже отдельной веткой.
+    profile = user_store.get(user_id)
+    step = await _onboarding_step_async(client, profile)
+    if step is not None:
+        await _send_onboarding_step(message, step)
+        return
+
+    # Шаг ввода email перед первой оплатой
+    pending_email_tariff = _user_state.get(user_id)
+    if isinstance(pending_email_tariff, dict) and pending_email_tariff.get("action") == "await_email":
+        clean = text.strip()
+        if not EMAIL_RE.match(clean):
+            await message.reply_text(
+                "⚠️ Это не похоже на email. Введите корректный адрес "
+                "(например, name@example.com):"
+            )
+            return
+        profile.email = clean
+        user_store.save_profile(profile)
+        tariff = pending_email_tariff["tariff"]
+        _user_state.pop(user_id, None)
+        await message.reply_text(f"✅ Email сохранён: {clean}")
+        await _handle_buy_tariff(message, user_id, tariff)
+        return
+
     parsed: ParseResult = parse_message(text)
     logger.info("Parsed message from user %s: %s", user_id, parsed)
 
@@ -1114,6 +1377,16 @@ async def handle_start(client: Client, message) -> None:
                 f"+{REFERRAL_BONUS_DAYS} дней тарифа.\n\n"
             )
 
+    profile = user_store.get(user_id)
+    step = await _onboarding_step_async(client, profile)
+
+    if step is not None:
+        # Новый или незавершивший онбординг — короткое приветствие + шаг
+        if referral_message:
+            await message.reply_text(referral_message)
+        await _send_onboarding_step(message, step)
+        return
+
     welcome = (
         f"{referral_message}"
         "Я помогу с анализом компаний и подготовкой КП.\n\n"
@@ -1229,9 +1502,12 @@ async def handle_documents(client: Client, message) -> None:
 
 
 def main() -> None:
-    global subscription_service
+    global subscription_service, required_channel
 
     settings = Settings.from_env()
+    required_channel = settings.required_channel
+    if required_channel:
+        logger.info("Required channel subscription: %s", required_channel)
     app = build_app(settings)
 
     # Инициализация платёжного сервиса
@@ -1279,6 +1555,7 @@ def main() -> None:
             MessageHandler(handle_cancel, filters.command(["cancel"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
             CallbackQueryHandler(handle_callback),
+            MessageHandler(handle_contact, filters.contact),
             MessageHandler(
                 handle_text_message,
                 filters.text & ~filters.command([

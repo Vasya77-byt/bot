@@ -135,6 +135,9 @@ class UserProfile:
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
     email: str = ""                  # email для чека
+    phone: str = ""                  # телефон в формате +79991234567
+    full_name: str = ""              # ФИО клиента (опц., из профиля)
+    accepted_offer_at: str = ""      # ISO datetime принятия оферты
     # Партнёрская программа
     referral_code: str = ""              # личный код вида "ref_<8 hex>"
     referrer_id: Optional[int] = None    # кто пригласил этого пользователя
@@ -176,6 +179,10 @@ class UserProfile:
         if limit is None:
             return True  # безлимит
         return self.checks_today < limit
+
+    def has_completed_onboarding(self) -> bool:
+        """Прошёл ли клиент обязательные шаги: оферта принята + телефон."""
+        return bool(self.accepted_offer_at) and bool(self.phone)
 
     def remaining_checks(self) -> Optional[int]:
         self.reset_if_new_day()

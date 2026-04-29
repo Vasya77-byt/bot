@@ -57,6 +57,8 @@ class SubscriptionService:
             redirect_url=self.redirect_url,
             fail_redirect_url=self.fail_redirect_url,
             email=profile.email,
+            client_name=profile.full_name,
+            client_phone=profile.phone,
             tax_system_code=self.tax_system_code,
         )
 

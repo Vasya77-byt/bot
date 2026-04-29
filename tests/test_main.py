@@ -547,7 +547,6 @@ class TestHandleCallback:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("data,label_word", [
-        ("ca_courts:1234567890", "Суды"),
         ("ca_fns:1234567890", "ФНС"),
         ("ca_egryl:1234567890", "ЕГРЮЛ"),
         ("ca_history:1234567890", "История"),
@@ -561,6 +560,33 @@ class TestHandleCallback:
         text = cb.message.replies[0]["text"]
         assert "разработке" in text
         assert label_word in text
+
+    @pytest.mark.asyncio
+    async def test_ca_courts_without_zchb_key_shows_friendly_message(
+        self, monkeypatch,
+    ):
+        # Ключ не задан → бот сообщает что источник не настроен
+        monkeypatch.setattr(main.zchb, "api_key", "")
+        cb = FakeCallbackQuery("ca_courts:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        text = cb.message.replies[0]["text"]
+        assert "не настроен" in text or "ZCHB_API_KEY" in text
+
+    @pytest.mark.asyncio
+    async def test_ca_courts_with_key_calls_zchb(self, monkeypatch):
+        from zchb_client import ArbitrationSummary
+
+        async def fake_get(inn):
+            return ArbitrationSummary(total_exact=0)
+
+        monkeypatch.setattr(main.zchb, "api_key", "test")
+        monkeypatch.setattr(main.zchb, "get_arbitration", fake_get)
+        cb = FakeCallbackQuery("ca_courts:7707083893", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # Сообщения: "Запрашиваю ..." + результат
+        joined = " ".join(r["text"] for r in cb.message.replies)
+        assert "Запрашиваю" in joined
+        assert "не найдено" in joined
 
 
 class TestCaAiGigaChat:

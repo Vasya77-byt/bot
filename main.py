@@ -31,6 +31,7 @@ from subscription import SubscriptionService
 from tochka_client import TochkaClient
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
+from zchb_client import ZchbClient
 from storage import save_file_bytes
 from metadata_store import MetadataStore
 from monitoring import make_snapshot
@@ -49,6 +50,7 @@ metadata_store = MetadataStore()
 company_service = CompanyService()
 security_service = SecurityService()
 gigachat = GigaChatClient()
+zchb = ZchbClient()
 user_store = UserStore()
 payments_store = PaymentsStore()
 monitoring_store = MonitoringStore()
@@ -266,6 +268,62 @@ def _my_companies_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _fmt_money_short(value: int) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f} млрд ₽"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f} млн ₽"
+    if value >= 1_000:
+        return f"{value / 1_000:.0f} тыс ₽"
+    return f"{value} ₽"
+
+
+def _format_arbitration(summary, inn: str) -> str:
+    """Текстовый рендер сводки арбитражных дел из ЗЧБ."""
+    if summary is None:
+        return (
+            f"⚖️ Арбитражные дела (ИНН {inn})\n\n"
+            "Не удалось получить данные. Попробуйте позже."
+        )
+    if not summary.has_cases:
+        return (
+            f"⚖️ Арбитражные дела (ИНН {inn})\n\n"
+            "✅ Судебных дел не найдено."
+        )
+
+    lines = [f"⚖️ Арбитражные дела (ИНН {inn})", ""]
+    lines.append(f"Точных дел по ИНН: {summary.total_exact}")
+    if summary.total_fuzzy:
+        lines.append(f"Похожих по названию: {summary.total_fuzzy} (могут быть чужие)")
+    lines.append("")
+
+    if summary.total_exact:
+        lines.append(f"• Как истец: {summary.as_plaintiff_count} "
+                     f"({_fmt_money_short(summary.plaintiff_claim_sum)})")
+        lines.append(f"• Как ответчик: {summary.as_defendant_count} "
+                     f"({_fmt_money_short(summary.defendant_claim_sum)})")
+        lines.append(f"• Общая сумма исков: {_fmt_money_short(summary.total_claim_sum)}")
+        lines.append("")
+
+    # Топ-5 по сумме иска (только точные)
+    exact = [c for c in summary.cases if c.accuracy == "exact"]
+    top = sorted(exact, key=lambda c: c.sum_rub, reverse=True)[:5]
+    if top:
+        lines.append("Топ дел по сумме:")
+        for c in top:
+            role = c.role or "—"
+            party = c.counterparty_name or "—"
+            lines.append(
+                f"• {c.case_number} ({c.started_at}) — {role}, "
+                f"{_fmt_money_short(c.sum_rub)}"
+            )
+            if party != "—":
+                lines.append(f"   ↳ {party}")
+        lines.append("")
+        lines.append("Подробнее по делу — на kad.arbitr.ru")
+    return "\n".join(lines)
+
+
 def _inn_prompt_text(action: str) -> str:
     labels = {
         "mode_internal_analysis": "внутреннего анализа",
@@ -354,7 +412,6 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         inn_part = data.split(":")[1] if ":" in data else ""
 
         wip_actions = {
-            "ca_courts": "⚖️ Суды",
             "ca_fns": "🏦 ФНС",
             "ca_egryl": "🏛 ЕГРЮЛ",
             "ca_history": "📜 История",
@@ -362,6 +419,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             "ca_invoice": "🧾 Запрос счёта",
             "ca_proposal": "📝 Предложение",
         }
+
+        if action_part == "ca_courts" and inn_part:
+            await callback_query.answer()
+            if not zchb.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник арбитражных дел не настроен (ZCHB_API_KEY)."
+                )
+                return
+            await callback_query.message.reply_text("⚖️ Запрашиваю арбитражные дела...")
+            summary = await zchb.get_arbitration(inn_part)
+            await callback_query.message.reply_text(
+                _format_arbitration(summary, inn_part),
+                disable_web_page_preview=True,
+            )
+            return
 
         if action_part == "ca_ai" and inn_part:
             await callback_query.answer()

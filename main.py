@@ -91,8 +91,49 @@ def _reply_keyboard() -> ReplyKeyboardMarkup:
 
 def _profile_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Мои компании", callback_data="my_companies")],
         [InlineKeyboardButton("🤝 Реферальная программа", callback_data="referral_show")],
     ])
+
+
+def _my_companies_text(user_id: int) -> str:
+    profile = user_store.get(user_id)
+    subs = monitoring_store.list_for_user(user_id)
+    limit = _monitoring_limit(profile)
+    limit_str = "∞" if limit is None else str(limit)
+    header = f"📋 Мои отслеживаемые компании ({len(subs)}/{limit_str})"
+    if not subs:
+        return (
+            f"{header}\n\n"
+            "Список пуст.\n\n"
+            "Чтобы добавить компанию — отправьте её ИНН в чат, "
+            "получите отчёт и нажмите «👁 Отслеживать» под ним.\n\n"
+            "Я буду каждый день проверять компанию и пришлю уведомление, "
+            "если изменится статус (например, банкротство), руководитель, "
+            "адрес, ОКВЭД, ФССП или уровень риска."
+        )
+    lines = [header, ""]
+    for i, sub in enumerate(subs, 1):
+        title = sub.name.strip() or f"ИНН {sub.inn}"
+        last = sub.last_checked[:10] if sub.last_checked else "—"
+        lines.append(f"{i}. {title} (ИНН {sub.inn}) — проверено {last}")
+    lines.append("")
+    lines.append("Нажмите ❌ под компанией, чтобы снять с отслеживания.")
+    return "\n".join(lines)
+
+
+def _my_companies_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    subs = monitoring_store.list_for_user(user_id)
+    rows = []
+    for sub in subs:
+        title = (sub.name.strip() or sub.inn)[:30]
+        rows.append([
+            InlineKeyboardButton(
+                f"❌ {title}", callback_data=f"mc_remove:{sub.inn}"
+            )
+        ])
+    rows.append([InlineKeyboardButton("🔄 Обновить список", callback_data="my_companies")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _inn_prompt_text(action: str) -> str:
@@ -182,8 +223,21 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 reply,
                 disable_web_page_preview=True,
-                reply_markup=_company_actions_keyboard(inn_part),
+                reply_markup=_company_actions_keyboard(inn_part, user_id),
             )
+        elif action_part == "ca_monitor" and inn_part:
+            await callback_query.message.reply_text("⏳ Добавляю в отслеживаемые...")
+            await _do_monitor_add(callback_query.message, user_id, inn_part)
+        elif action_part == "ca_unmonitor" and inn_part:
+            removed = monitoring_store.remove(user_id, inn_part)
+            if removed:
+                await callback_query.message.reply_text(
+                    f"🛑 Компания снята с отслеживания (ИНН {inn_part})."
+                )
+            else:
+                await callback_query.message.reply_text(
+                    f"⚠️ Компания не была в списке отслеживания (ИНН {inn_part})."
+                )
         elif action_part in wip_actions:
             label = wip_actions[action_part]
             await callback_query.message.reply_text(
@@ -222,7 +276,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         await callback_query.message.reply_text(
             reply,
             disable_web_page_preview=True,
-            reply_markup=_company_actions_keyboard(inn),
+            reply_markup=_company_actions_keyboard(inn, user_id),
         )
         return
 
@@ -232,6 +286,29 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         profile = user_store.get(user_id)
         text = _format_referral_message(profile, _bot_username(client))
         await callback_query.message.reply_text(text, disable_web_page_preview=True)
+        return
+
+    # Список «Мои компании» из карточки профиля
+    if data == "my_companies":
+        await callback_query.answer()
+        await callback_query.message.reply_text(
+            _my_companies_text(user_id),
+            reply_markup=_my_companies_keyboard(user_id),
+        )
+        return
+
+    # Удаление компании из списка отслеживания
+    if data.startswith("mc_remove:"):
+        inn = data.split(":", 1)[1]
+        removed = monitoring_store.remove(user_id, inn)
+        await callback_query.answer(
+            "Снята с отслеживания" if removed else "Не была в списке",
+            show_alert=False,
+        )
+        await callback_query.message.reply_text(
+            _my_companies_text(user_id),
+            reply_markup=_my_companies_keyboard(user_id),
+        )
         return
 
     # Кнопки выбора тарифа — создаём платёж
@@ -355,7 +432,7 @@ async def handle_text_message(client: Client, message) -> None:
             await message.reply_text(
                 reply,
                 disable_web_page_preview=True,
-                reply_markup=_company_actions_keyboard(inn),
+                reply_markup=_company_actions_keyboard(inn, user_id),
             )
         return
 
@@ -446,8 +523,17 @@ def _looks_like_company_query(text: str) -> bool:
     return any(c.isalpha() for c in clean)
 
 
-def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
+def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
+    is_monitored = bool(user_id) and monitoring_store.get(user_id, inn) is not None
+    if is_monitored:
+        monitor_btn = InlineKeyboardButton(
+            "✅ Отслеживается — снять", callback_data=f"ca_unmonitor:{inn}"
+        )
+    else:
+        monitor_btn = InlineKeyboardButton(
+            "👁 Отслеживать", callback_data=f"ca_monitor:{inn}"
+        )
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
@@ -461,6 +547,7 @@ def _company_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📜 История", callback_data=f"ca_history:{inn}"),
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
         ],
+        [monitor_btn],
         [
             InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
         ],
@@ -613,7 +700,7 @@ async def _dispatch_action(
         await message.reply_text(
             reply,
             disable_web_page_preview=True,
-            reply_markup=_company_actions_keyboard(inn),
+            reply_markup=_company_actions_keyboard(inn, user_id),
         )
 
     elif action == "mode_client_proposal":

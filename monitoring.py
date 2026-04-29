@@ -107,20 +107,26 @@ def diff_snapshots(
     return changes
 
 
+CRITICAL_FIELDS = {"status", "risk_level"}
+
+
 def format_change_message(inn: str, name: str, changes: List[FieldChange]) -> str:
     """Форматирует уведомление пользователю об изменениях."""
     if not changes:
         return ""
     title = name.strip() or inn
-    lines = [
-        f"🔔 Изменения по компании {title}",
-        f"ИНН: {inn}",
-        "",
-    ]
+    is_critical = any(ch.field in CRITICAL_FIELDS for ch in changes)
+    header = (
+        f"🚨 Серьёзное изменение по компании {title}"
+        if is_critical
+        else f"🔔 Изменения по компании {title}"
+    )
+    lines = [header, f"ИНН: {inn}", ""]
     for ch in changes:
+        marker = "❗️ " if ch.field in CRITICAL_FIELDS else "• "
         old = _fmt_value(ch.old)
         new = _fmt_value(ch.new)
-        lines.append(f"• {ch.label}: {old} → {new}")
+        lines.append(f"{marker}{ch.label}: {old} → {new}")
     return "\n".join(lines)
 
 

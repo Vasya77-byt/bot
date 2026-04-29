@@ -204,19 +204,21 @@ class SecurityService:
         name: Optional[str] = None,
         okved: Optional[str] = None,
         region: Optional[str] = None,
+        ogrn: Optional[str] = None,
     ) -> SecurityResult:
         """Полная проверка безопасности компании.
 
         Запросы ФССП и ЗЧБ-rating пускаются параллельно, чтобы не
-        задерживать ответ.
+        задерживать ответ. ЗЧБ-rating требует ОГРН (по ИНН возвращает
+        ошибку 230), card работает и по ИНН.
         """
         result = SecurityResult()
 
         zchb = self._get_zchb()
         fssp_task = asyncio.create_task(self._safe_fssp(inn, name, region))
         rating_task = (
-            asyncio.create_task(zchb.get_rating(inn))
-            if zchb.enabled else None
+            asyncio.create_task(zchb.get_rating(ogrn))
+            if zchb.enabled and ogrn else None
         )
         card_task = (
             asyncio.create_task(zchb.get_card(inn))

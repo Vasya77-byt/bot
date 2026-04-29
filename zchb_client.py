@@ -563,8 +563,16 @@ class ZchbClient:
         body = raw.get("body")
         if not isinstance(body, dict):
             return CardSummary()
-        # Если поиск был по ИНН и body имеет цифровые ключи — берём первую
-        if body.keys() and all(k.isdigit() for k in body.keys()):
+        # ЗЧБ может возвращать обёртки трёх форматов (как и в arbitration):
+        # 1) Прямые поля компании
+        # 2) {"total": N, "docs": [{...}]} при поиске по ИНН
+        # 3) {"0": {...}, "1": {...}} — старый/нестандартный
+        docs = body.get("docs")
+        if isinstance(docs, list):
+            if not docs or not isinstance(docs[0], dict):
+                return CardSummary()
+            body = docs[0]
+        elif body.keys() and all(k.isdigit() for k in body.keys()):
             first = next(iter(body.values()), None)
             if isinstance(first, dict):
                 body = first
@@ -572,6 +580,13 @@ class ZchbClient:
                 return CardSummary()
 
         result = self._parse_card(body)
+        # Диагностика: если ИНН/ОГРН в результате пустые — значит парсер
+        # не нашёл нужных полей. Логируем чтобы было видно.
+        if not result.inn and not result.ogrn:
+            logger.warning(
+                "ZCHB card returned no inn/ogrn for %s; top-level keys: %s",
+                inn_or_ogrn, list(body.keys())[:10],
+            )
         self._cache_set("card", inn_or_ogrn, result)
         return result
 

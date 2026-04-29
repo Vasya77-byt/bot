@@ -476,6 +476,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                     inn=inn_part,
                     name=company.name if company else None,
                     okved=company.okved_main if company else None,
+
+                    ogrn=company.ogrn if company else None,
                 )
             except Exception as exc:
                 logger.error("Security check failed: %s", exc)
@@ -523,6 +525,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 inn=inn,
                 name=company.name if company else None,
                 okved=company.okved_main if company else None,
+
+                ogrn=company.ogrn if company else None,
             )
         except Exception as exc:
             logger.error("Security check failed for INN %s: %s", inn, exc)
@@ -573,6 +577,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 inn=inn,
                 name=company.name if company else None,
                 okved=company.okved_main if company else None,
+
+                ogrn=company.ogrn if company else None,
             )
         except Exception as exc:
             logger.error("Security check failed for INN %s: %s", inn, exc)
@@ -794,6 +800,8 @@ async def handle_text_message(client: Client, message) -> None:
                     inn=inn,
                     name=company.name if company else None,
                     okved=company.okved_main if company else None,
+
+                    ogrn=company.ogrn if company else None,
                 )
             except Exception as exc:
                 logger.error("Security check failed: %s", exc)
@@ -1056,6 +1064,8 @@ async def _dispatch_action(
                     inn=parsed.inn,
                     name=company.name if company else None,
                     okved=company.okved_main if company else None,
+
+                    ogrn=company.ogrn if company else None,
                 )
             except Exception as exc:
                 logger.error("Security check failed for INN %s: %s", parsed.inn, exc)
@@ -1362,6 +1372,7 @@ async def _do_monitor_add(message, user_id: int, inn: str) -> None:
             inn=inn,
             name=company.name,
             okved=company.okved_main,
+            ogrn=company.ogrn,
         )
     except Exception as exc:
         logger.error("Monitoring add: security check failed for %s: %s", inn, exc)

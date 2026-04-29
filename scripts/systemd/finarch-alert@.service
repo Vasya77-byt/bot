@@ -1,0 +1,7 @@
+[Unit]
+Description=Telegram alert for failed unit %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/finarch-alert.sh %i

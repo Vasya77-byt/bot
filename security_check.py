@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, List, Optional
 import requests
 
 if TYPE_CHECKING:
-    from zchb_client import CardSummary
+    from zchb_client import ArbitrationSummary, CardSummary
 
 logger = logging.getLogger("financial-architect")
 
@@ -39,6 +39,7 @@ class SecurityResult:
     zchb_risk_level: Optional[str] = None
     zchb_details: Optional[str] = None
     zchb_card: Optional["CardSummary"] = None
+    zchb_arbitration: Optional["ArbitrationSummary"] = None
 
     # Контур.Фокус (TODO)
     focus_risk_level: Optional[str] = None
@@ -224,6 +225,10 @@ class SecurityService:
             asyncio.create_task(zchb.get_card(inn))
             if zchb.enabled else None
         )
+        arbitration_task = (
+            asyncio.create_task(zchb.get_arbitration(inn))
+            if zchb.enabled else None
+        )
 
         fssp_result = await fssp_task
         if isinstance(fssp_result, dict):
@@ -254,6 +259,15 @@ class SecurityService:
                 card = None
             if card is not None:
                 result.zchb_card = card
+
+        if arbitration_task is not None:
+            try:
+                arb = await arbitration_task
+            except Exception as exc:
+                logger.warning("ZCHB arbitration error: %s", exc)
+                arb = None
+            if arb is not None:
+                result.zchb_arbitration = arb
 
         result.calculate_risk()
         return result

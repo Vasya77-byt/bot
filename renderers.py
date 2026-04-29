@@ -134,7 +134,29 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
         lines.append(f"💰 Уст. капитал: {_fmt_money(company.capital)}")
     if company.employees_count:
         lines.append(f"👥 Штат: {company.employees_count} чел.")
+    # Категория МСП — короткая строка под штатом
+    if card is not None and card.msp_category:
+        lines.append(f"🏭 МСП: {card.msp_category}")
     lines.append("")
+
+    # ── Учредители ──
+    if card is not None and card.founders:
+        lines.append("—— Учредители ——")
+        # Показываем до 5 учредителей; если больше — добавим «и ещё N»
+        shown = card.founders[:5]
+        for f in shown:
+            mark = "⚠️ " if f.is_mass else ""
+            share_part = ""
+            if f.share_pct > 0:
+                share_part = f" — {f.share_pct:g}%"
+            elif f.share_abs > 0:
+                share_part = f" — {_fmt_money(f.share_abs)}"
+            type_emoji = "🧑" if f.type == "fl" else "🏢"
+            name = f.name or "—"
+            lines.append(f"{type_emoji} {mark}{name}{share_part}")
+        if len(card.founders) > 5:
+            lines.append(f"   … и ещё {len(card.founders) - 5}")
+        lines.append("")
 
     # ── Финансы ──
     if company.revenue_last_year or company.profit_last_year:
@@ -144,6 +166,32 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
         lines.append(f"💹 Выручка: {rev}, прибыль: {prof}")
         if company.source:
             lines.append(f"📡 Источник: {company.source}")
+        lines.append("")
+
+    # ── Сводка арбитражных судов (ZCHB) ──
+    arb = getattr(security, "zchb_arbitration", None) if security else None
+    if arb is not None and arb.has_cases:
+        lines.append("—— Арбитражные дела ——")
+        lines.append(f"⚖️ Точных дел по ИНН: {arb.total_exact}")
+        if arb.total_exact > 0:
+            lines.append(
+                f"   • Истец: {arb.as_plaintiff_count} "
+                f"({_fmt_money(arb.plaintiff_claim_sum)})"
+            )
+            lines.append(
+                f"   • Ответчик: {arb.as_defendant_count} "
+                f"({_fmt_money(arb.defendant_claim_sum)})"
+            )
+            lines.append(
+                f"   • Общая сумма исков: "
+                f"{_fmt_money(arb.total_claim_sum)}"
+            )
+        if arb.total_fuzzy:
+            lines.append(
+                f"   Похожих по названию: {arb.total_fuzzy} "
+                "(могут быть чужие)"
+            )
+        lines.append("Подробнее — кнопка «⚖️ Суды»")
         lines.append("")
 
     # ── Проверки (ФССП) ──
@@ -192,6 +240,13 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
                     f"заказчик {card.contracts_customer_count} "
                     f"({_fmt_money(card.contracts_customer_sum)})"
                 )
+            if card.tax_violations_sum > 0:
+                lines.append(
+                    f"💸 Налоговые штрафы: "
+                    f"{_fmt_money(card.tax_violations_sum)}"
+                )
+            if card.inspections_count:
+                lines.append(f"🔎 Проверок проводилось: {card.inspections_count}")
             if card.licenses_count:
                 lines.append(f"📜 Лицензий: {card.licenses_count}")
         lines.append("")

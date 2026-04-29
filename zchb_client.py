@@ -56,6 +56,8 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(ArbitrationCase, item) for item in v]
             elif "FsspProceeding" in type_repr:
                 v = [_restore_dataclass(FsspProceeding, item) for item in v]
+            elif "FounderInfo" in type_repr:
+                v = [_restore_dataclass(FounderInfo, item) for item in v]
         kwargs[k] = v
     return cls(**kwargs)
 
@@ -130,6 +132,18 @@ class RatingResult:
 
 
 @dataclass
+class FounderInfo:
+    """Один учредитель компании."""
+    name: str = ""              # ФИО или название ЮЛ
+    inn: str = ""               # ИНН (может быть пустым у физлица-нерезидента)
+    type: str = ""              # "fl" (физлицо) или "ul" (юрлицо)
+    share_abs: float = 0.0      # номинальная доля в рублях
+    share_pct: float = 0.0      # доля в процентах от уставного капитала
+    is_mass: bool = False       # признак массового учредителя
+    started_at: str = ""        # дата приобретения доли
+
+
+@dataclass
 class CardSummary:
     """Расширенные данные из метода card.
 
@@ -184,6 +198,14 @@ class CardSummary:
 
     # Признак недобросовестного поставщика
     is_unreliable_supplier: bool = False
+
+    # Учредители (полный список с долями)
+    founders: List[FounderInfo] = field(default_factory=list)
+    # Сумма уставного капитала по СвУчредит.sumCap (для расчёта процентов)
+    founders_sum_cap: float = 0.0
+
+    # Категория МСП (Микро / Малое / Среднее предприятие; пусто для крупных)
+    msp_category: str = ""
 
 
 class ZchbClient:
@@ -693,16 +715,42 @@ class ZchbClient:
                     if isinstance(boss, dict):
                         result.director_namesake_count = _int(boss.get("namesake"))
 
-        # Первый учредитель — флаг массового
-        founders = body.get("СвУчредит") or {}
-        if isinstance(founders, dict):
-            all_list = founders.get("all") or []
-            if isinstance(all_list, list) and all_list:
-                first = all_list[0]
-                if isinstance(first, dict):
-                    result.founder_is_mass = (
-                        str(first.get("mass_founders") or "0") == "1"
+        # Учредители — полный список с долями + флаг массовости первого
+        founders_block = body.get("СвУчредит") or {}
+        if isinstance(founders_block, dict):
+            sum_cap = _money(founders_block.get("sumCap")) or result.capital
+            result.founders_sum_cap = sum_cap
+            all_list = founders_block.get("all") or []
+            if isinstance(all_list, list):
+                for idx, item in enumerate(all_list):
+                    if not isinstance(item, dict):
+                        continue
+                    abs_share = _money(item.get("dol_abs"))
+                    pct = (
+                        round(abs_share * 100 / sum_cap, 2)
+                        if sum_cap > 0 and abs_share > 0 else 0.0
                     )
+                    f_info = FounderInfo(
+                        name=str(item.get("name") or "").strip(),
+                        inn=str(item.get("inn") or "").strip(),
+                        type=str(item.get("type") or ""),
+                        share_abs=abs_share,
+                        share_pct=pct,
+                        is_mass=str(item.get("mass_founders") or "0") == "1",
+                        started_at=str(item.get("date") or ""),
+                    )
+                    result.founders.append(f_info)
+                    if idx == 0:
+                        result.founder_is_mass = f_info.is_mass
+
+        # Категория МСП — приходит как dict {1: "Малое предприятие", ...}
+        msp = body.get("КатСубМСП")
+        if isinstance(msp, dict):
+            # Берём первое строковое значение — это название категории
+            for v in msp.values():
+                if isinstance(v, str) and v.strip():
+                    result.msp_category = v.strip()
+                    break
 
         return result
 

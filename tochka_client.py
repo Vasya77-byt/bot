@@ -153,7 +153,7 @@ class TochkaClient:
                 "quantity": 1,
                 "paymentMethod": "full_prepayment",
                 "paymentObject": "service",
-                "measure": "piece",
+                "measure": "шт.",
             }
         ]
         client_block = {"email": email or "noreply@example.com"}

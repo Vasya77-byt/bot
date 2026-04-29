@@ -126,11 +126,14 @@ def _my_companies_keyboard(user_id: int) -> InlineKeyboardMarkup:
     subs = monitoring_store.list_for_user(user_id)
     rows = []
     for sub in subs:
-        title = (sub.name.strip() or sub.inn)[:30]
+        title = (sub.name.strip() or sub.inn)[:24]
         rows.append([
             InlineKeyboardButton(
-                f"❌ {title}", callback_data=f"mc_remove:{sub.inn}"
-            )
+                f"📊 {title}", callback_data=f"mc_open:{sub.inn}"
+            ),
+            InlineKeyboardButton(
+                "❌", callback_data=f"mc_remove:{sub.inn}"
+            ),
         ])
     rows.append([InlineKeyboardButton("🔄 Обновить список", callback_data="my_companies")])
     return InlineKeyboardMarkup(rows)
@@ -297,6 +300,39 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         )
         return
 
+    # Открыть свежий отчёт по компании из списка «Мои компании»
+    if data.startswith("mc_open:"):
+        await callback_query.answer()
+        inn = data.split(":", 1)[1]
+        if not inn:
+            return
+        allowed = await _check_limit_and_count(callback_query.message, user_id)
+        if not allowed:
+            return
+        company = await company_service.fetch(inn)
+        sec_result = None
+        try:
+            sec_result = await security_service.check(
+                inn=inn,
+                name=company.name if company else None,
+                okved=company.okved_main if company else None,
+            )
+        except Exception as exc:
+            logger.error("Security check failed for INN %s: %s", inn, exc)
+        parsed_inner = ParseResult(
+            raw_text=inn, inn=inn, mode="internal_analysis",
+            is_request=False, is_proposal=False, company_data=company,
+        )
+        reply = render_response(
+            parsed=parsed_inner, company=company, risk=set(), security=sec_result,
+        )
+        await callback_query.message.reply_text(
+            reply,
+            disable_web_page_preview=True,
+            reply_markup=_company_actions_keyboard(inn, user_id),
+        )
+        return
+
     # Удаление компании из списка отслеживания
     if data.startswith("mc_remove:"):
         inn = data.split(":", 1)[1]
@@ -358,8 +394,10 @@ async def handle_text_message(client: Client, message) -> None:
         # Профиль — показываем сразу, ИНН не нужен
         if reply_action == "show_profile":
             profile = user_store.get(user_id)
+            mon_count = monitoring_store.count_for_user(user_id)
+            mon_limit = _monitoring_limit(profile)
             await message.reply_text(
-                render_profile(profile),
+                render_profile(profile, mon_count, mon_limit),
                 reply_markup=_profile_keyboard(),
             )
             return

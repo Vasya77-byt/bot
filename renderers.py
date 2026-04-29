@@ -338,8 +338,16 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     return "\n".join(lines)
 
 
-def render_profile(profile: UserProfile) -> str:
-    """Рендер профиля пользователя."""
+def render_profile(
+    profile: UserProfile,
+    monitoring_count: Optional[int] = None,
+    monitoring_limit: Optional[int] = None,
+) -> str:
+    """Рендер профиля пользователя.
+
+    monitoring_count/monitoring_limit — состояние списка отслеживаемых
+    компаний. monitoring_limit=None при заданном count означает ∞.
+    """
     tariff_label = TARIFF_LABELS.get(profile.tariff, profile.tariff)
     limit = profile.daily_limit()
     remaining = profile.remaining_checks()
@@ -355,9 +363,13 @@ def render_profile(profile: UserProfile) -> str:
         f"Проверок сегодня: {profile.checks_today}/{limit_str}",
         f"Осталось: {remaining_str}",
         f"Всего проверок: {profile.checks_total}",
-        "",
-        "─── Возможности ───",
     ]
+
+    if monitoring_count is not None:
+        mon_limit_str = "∞" if monitoring_limit is None else str(monitoring_limit)
+        lines.append(f"Отслеживается компаний: {monitoring_count}/{mon_limit_str}")
+
+    lines.extend(["", "─── Возможности ───"])
 
     features = TARIFF_FEATURES.get(profile.tariff, {})
     for feature, enabled in features.items():

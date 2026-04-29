@@ -20,6 +20,10 @@ class FakeTochka:
         self.next_recurring_result: Optional[RecurringResult] = None
         self.create_payment_exception: Optional[Exception] = None
         self.charge_recurring_exception: Optional[Exception] = None
+        # Поллер: get_operation_status
+        self.operation_status_results: dict[str, dict] = {}
+        self.operation_status_exception: Optional[Exception] = None
+        self.operation_status_calls: list[str] = []
 
     async def create_payment(self, **kwargs: Any) -> PaymentResult:
         self.create_payment_calls.append(kwargs)
@@ -36,6 +40,12 @@ class FakeTochka:
         if not self.next_recurring_result:
             raise AssertionError("FakeTochka: next_recurring_result not set")
         return self.next_recurring_result
+
+    async def get_operation_status(self, operation_id: str) -> dict:
+        self.operation_status_calls.append(operation_id)
+        if self.operation_status_exception:
+            raise self.operation_status_exception
+        return self.operation_status_results.get(operation_id, {})
 
 
 @pytest.fixture
@@ -507,3 +517,137 @@ class TestExpiringSoon:
 
         assert service.expiring_soon(days=1) == []
         assert len(service.expiring_soon(days=5)) == 1
+
+
+class TestPollPendingPayments:
+    """Поллер: safety-net для случаев когда webhook не пришёл."""
+
+    @pytest.mark.asyncio
+    async def test_no_pending_no_calls(self, service, payments, tochka):
+        # В сторе нет created-записей
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        assert result == []
+        assert tochka.operation_status_calls == []
+
+    @pytest.mark.asyncio
+    async def test_paid_status_activates_subscription(
+        self, service, payments, users, tochka
+    ):
+        # Запись pending: создана, но webhook не пришёл
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        tochka.operation_status_results["op-1"] = {
+            "status": "approved",
+            "cardToken": "tok-late",
+            "amount": 1290.0,
+        }
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        assert ("op-1", "activated") in result
+        # Подписка активирована
+        assert users.get(42).is_subscription_active() is True
+        assert users.get(42).card_token == "tok-late"
+        # Запись помечена paid
+        assert payments.find_by_operation("op-1").status == "paid"
+
+    @pytest.mark.asyncio
+    async def test_failed_status_marks_failed(self, service, payments, tochka):
+        payments.record_created(
+            operation_id="op-decl", order_id="sub_1_pro_x",
+            user_id=1, tariff="pro", amount=1290.0,
+        )
+        tochka.operation_status_results["op-decl"] = {
+            "status": "declined",
+            "errorMessage": "card blocked",
+        }
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        assert ("op-decl", "failed") in result
+        rec = payments.find_by_operation("op-decl")
+        assert rec.status == "failed"
+        assert "card blocked" in rec.error
+
+    @pytest.mark.asyncio
+    async def test_still_pending_keeps_status(self, service, payments, tochka):
+        payments.record_created(
+            operation_id="op-wait", order_id="sub_1_pro_x",
+            user_id=1, tariff="pro", amount=1290.0,
+        )
+        tochka.operation_status_results["op-wait"] = {"status": "pending"}
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        assert ("op-wait", "still_pending") in result
+        # Запись осталась created, не paid и не failed
+        assert payments.find_by_operation("op-wait").status == "created"
+
+    @pytest.mark.asyncio
+    async def test_tochka_error_isolated(self, service, payments, tochka):
+        payments.record_created(
+            operation_id="op-err", order_id="sub_1_pro_x",
+            user_id=1, tariff="pro", amount=1290.0,
+        )
+        tochka.operation_status_exception = RuntimeError("Tochka 500")
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        assert ("op-err", "error") in result
+        # Запись осталась created — не сломали
+        assert payments.find_by_operation("op-err").status == "created"
+
+    @pytest.mark.asyncio
+    async def test_idempotent_with_already_paid_record(
+        self, service, payments, users, tochka
+    ):
+        # Сначала handle_webhook_paid активировал подписку (или вручную)
+        payments.record_created(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        # Симулируем что webhook уже прошёл
+        service.handle_webhook_paid(
+            operation_id="op-1", order_id="sub_42_pro_x",
+            card_token="tok", amount=1290.0,
+        )
+        first_expires = users.get(42).tariff_expires_at
+
+        # Теперь поллер запрашивает Точку — она тоже отвечает paid
+        # Запись paid уже не попадает в iter_pending → API не дёрнется
+        tochka.operation_status_results["op-1"] = {"status": "approved"}
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        # Записей со статусом created нет — поллер ничего не делает
+        assert result == []
+        assert tochka.operation_status_calls == []
+        # Подписка не продлевается дважды
+        assert users.get(42).tariff_expires_at == first_expires
+
+    @pytest.mark.asyncio
+    async def test_skips_payments_younger_than_threshold(
+        self, service, payments, tochka
+    ):
+        payments.record_created(
+            operation_id="fresh", order_id="o",
+            user_id=1, tariff="pro", amount=1.0,
+        )
+        # older_than_seconds=300 → свежая запись не попадает
+        result = await service.poll_pending_payments(older_than_seconds=300)
+        assert result == []
+        assert tochka.operation_status_calls == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_pending_processed_independently(
+        self, service, payments, users, tochka
+    ):
+        payments.record_created(
+            operation_id="ok", order_id="sub_1_pro_x",
+            user_id=1, tariff="pro", amount=1290.0,
+        )
+        payments.record_created(
+            operation_id="bad", order_id="sub_2_pro_y",
+            user_id=2, tariff="pro", amount=1290.0,
+        )
+        tochka.operation_status_results = {
+            "ok": {"status": "approved", "cardToken": "tok"},
+            "bad": {"status": "declined"},
+        }
+        result = await service.poll_pending_payments(older_than_seconds=0)
+        actions = dict(result)
+        assert actions["ok"] == "activated"
+        assert actions["bad"] == "failed"
+        assert users.get(1).is_subscription_active() is True

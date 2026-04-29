@@ -35,6 +35,7 @@ from metadata_store import MetadataStore
 from monitoring import make_snapshot
 from monitoring_scheduler import run_monitoring_loop
 from monitoring_store import MonitoringStore
+from payment_poller import run_payment_poller
 from telemetry import init_sentry
 from user_store import REFERRAL_BONUS_DAYS, TARIFF_MONITORING_LIMITS
 from webhook_server import build_app as build_webhook_app, start_webhook_server
@@ -1168,6 +1169,10 @@ def main() -> None:
             )
             tasks.append(asyncio.create_task(
                 run_renewal_loop(subscription_service, notify=notify)
+            ))
+            # Поллер pending-платежей — safety-net если webhook потерялся
+            tasks.append(asyncio.create_task(
+                run_payment_poller(subscription_service, notify=notify)
             ))
 
         # Мониторинг подписок на ИНН — запускаем независимо от платежей

@@ -197,3 +197,65 @@ class SubscriptionService:
             if now <= expires <= cutoff:
                 result.append(profile)
         return result
+
+    async def poll_pending_payments(
+        self,
+        *,
+        older_than_seconds: int = 300,
+        max_age_seconds: int = 24 * 60 * 60,
+    ) -> list[tuple[str, str]]:
+        """Опрашивает Точку по всем платежам в статусе 'created'.
+
+        Это safety-net на случай, когда webhook не дошёл до нашего сервера
+        (сетевой обрыв, прокси, кратковременное падение). Без этого
+        пользователь оплачивает, но подписка не активируется до ручного
+        вмешательства.
+
+        - older_than_seconds: не опрашиваем платежи моложе N секунд —
+          Точка не успела создать операцию.
+        - max_age_seconds: платежи старше суток считаем брошенными,
+          не опрашиваем (клиент уже не ждёт).
+
+        Возвращает список (operation_id, action), где action ∈
+        {"activated", "failed", "still_pending", "error"}.
+        """
+        pending = self.payments.iter_pending(
+            older_than_seconds=older_than_seconds,
+            max_age_seconds=max_age_seconds,
+        )
+        results: list[tuple[str, str]] = []
+        for rec in pending:
+            try:
+                data = await self.tochka.get_operation_status(rec.operation_id)
+            except Exception as exc:
+                logger.warning("Poll status failed for %s: %s",
+                               rec.operation_id, exc)
+                results.append((rec.operation_id, "error"))
+                continue
+
+            status = (data.get("status") or "").lower()
+            card_token = data.get("cardToken") or data.get("savedCardToken") or ""
+            amount = float(data.get("amount") or rec.amount)
+
+            if status in ("paid", "approved", "confirmed", "completed"):
+                # Активируем как при webhook'е — handle_webhook_paid
+                # идемпотентен (не активирует уже paid повторно).
+                self.handle_webhook_paid(
+                    operation_id=rec.operation_id,
+                    order_id=rec.order_id,
+                    card_token=card_token,
+                    amount=amount,
+                )
+                results.append((rec.operation_id, "activated"))
+                logger.info("Poller: activated subscription for op=%s",
+                            rec.operation_id)
+            elif status in ("failed", "declined", "cancelled", "rejected"):
+                self.handle_webhook_failed(
+                    operation_id=rec.operation_id,
+                    error=str(data.get("errorMessage", "")),
+                )
+                results.append((rec.operation_id, "failed"))
+            else:
+                # Точка ещё думает — оставляем в created
+                results.append((rec.operation_id, "still_pending"))
+        return results

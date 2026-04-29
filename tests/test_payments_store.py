@@ -150,6 +150,54 @@ class TestTotalRevenue:
         assert store.total_revenue() == 0
 
 
+class TestIterPending:
+    def test_returns_only_created(self, store):
+        store.record_created(operation_id="a", order_id="oa", user_id=1,
+                             tariff="pro", amount=1.0)
+        store.record_created(operation_id="b", order_id="ob", user_id=1,
+                             tariff="pro", amount=1.0)
+        store.mark_paid("b")
+        result = store.iter_pending()
+        ids = {r.operation_id for r in result}
+        assert ids == {"a"}
+
+    def test_returns_only_failed_excluded(self, store):
+        store.record_created(operation_id="x", order_id="o", user_id=1,
+                             tariff="pro", amount=1.0)
+        store.mark_failed("x", "declined")
+        assert store.iter_pending() == []
+
+    def test_older_than_filter(self, store):
+        # Только что созданная — не попадает в "old"
+        store.record_created(operation_id="fresh", order_id="o", user_id=1,
+                             tariff="pro", amount=1.0)
+        assert store.iter_pending(older_than_seconds=10) == []
+        # А с порогом 0 — попадает
+        assert len(store.iter_pending(older_than_seconds=0)) == 1
+
+    def test_max_age_filter_excludes_ancient(self, store, monkeypatch):
+        # Создаём запись, потом подменяем created_at на старое значение
+        store.record_created(operation_id="old", order_id="o", user_id=1,
+                             tariff="pro", amount=1.0)
+        # 2 дня назад
+        from datetime import datetime, timezone, timedelta
+        ancient = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        store._data[0]["created_at"] = ancient
+        # max_age=24 часа — должен пропустить
+        result = store.iter_pending(max_age_seconds=86400)
+        assert result == []
+        # Без max_age — попадает
+        result_all = store.iter_pending()
+        assert len(result_all) == 1
+
+    def test_invalid_created_at_skipped(self, store):
+        store.record_created(operation_id="x", order_id="o", user_id=1,
+                             tariff="pro", amount=1.0)
+        store._data[0]["created_at"] = "not-iso"
+        # Не должно бросить
+        assert store.iter_pending() == []
+
+
 class TestPersistenceLoad:
     def test_load_existing_file(self, tmp_path):
         path = tmp_path / "p.json"

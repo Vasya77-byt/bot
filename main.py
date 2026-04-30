@@ -615,7 +615,8 @@ def _format_finance(card, security, company, inn: str) -> str:
     подсветкой 🔴/🟡/✅, чтобы новичок сразу видел на что обратить внимание.
 
     Источники: ZCHB card (выручка/налоги/задолженности/контракты),
-    SecurityResult (ФССП, индекс ЗЧБ), CompanyData (имя, капитал-fallback).
+    SecurityResult (ФССП, индекс ЗЧБ), CompanyData (имя, fallback-финансы
+    из DaData/SBIS если в ZCHB пусто — типично для банков).
     """
     name = ""
     if company is not None and company.name:
@@ -623,22 +624,29 @@ def _format_finance(card, security, company, inn: str) -> str:
     elif card is not None and (card.name_short or card.name_full):
         name = card.name_short or card.name_full
 
+    # Финансовая компания (банк/страховщик/НПФ) — особенный случай:
+    # их отчётность хранится по форме ЦБ, а не ФНС
+    is_financial = False
+    if company and company.okved_main:
+        prefix = company.okved_main.split(".")[0]
+        is_financial = prefix in ("64", "65", "66")
+
     title_lines = ["📊 Финансы"]
     if name:
         title_lines.append(name)
     title_lines.append(f"ИНН {inn}")
 
-    if card is None and security is None:
+    if card is None and security is None and company is None:
         return "\n".join(title_lines + ["", "Не удалось получить данные. Попробуйте позже."])
 
     sections: list[str] = []
-    findings: list[str] = []  # для блока «На что обратить внимание»
+    findings: list[str] = []
 
     # ━━━ ВЫРУЧКА И ПРИБЫЛЬ ━━━
-    if card is not None and card.finance_history:
-        block = ["━━━ 💹 ВЫРУЧКА И ПРИБЫЛЬ ━━━"]
-        history = card.finance_history[:5]  # последние 5 лет
-        for f in history:
+    block = ["━━━ 💹 ВЫРУЧКА И ПРИБЫЛЬ ━━━"]
+    history = (card.finance_history if card else None) or []
+    if history:
+        for f in history[:5]:
             rev = int(f.revenue) if f.revenue else 0
             prof = int(f.profit) if f.profit else 0
             inc = int(f.income) if f.income else 0
@@ -668,47 +676,67 @@ def _format_finance(card, security, company, inn: str) -> str:
                     block.append(f"↗️ Выручка растёт: +{delta_pct:.0f}% к прошлому году")
                 elif delta_pct <= -5:
                     block.append(f"↘️ Выручка падает: {delta_pct:.0f}% к прошлому году")
-                    findings.append(
-                        f"⚠️ Падение выручки на {abs(delta_pct):.0f}% "
-                        "год к году"
-                    )
+                    findings.append(f"⚠️ Падение выручки на {abs(delta_pct):.0f}% год к году")
                 else:
                     block.append(f"→ Выручка стабильна ({delta_pct:+.0f}%)")
 
-        # Признак убыточности
         last_profit = next(
             (f.profit for f in history if f.profit is not None and f.profit != 0),
             None,
         )
         if last_profit is not None and last_profit < 0:
             findings.append(f"⚠️ Компания убыточна: {_fmt_money_short(int(last_profit))}")
-
-        sections.append("\n".join(block))
+    elif (not is_financial) and company and (
+        company.revenue_last_year or company.profit_last_year
+    ):
+        # Fallback на CompanyData (DaData/SBIS) — только для НЕ-финансовых
+        # компаний. Для банков/страховщиков DaData часто отдаёт данные
+        # одного юрлица из группы, не консолидированные → не показываем.
+        rev = int(company.revenue_last_year or 0)
+        prof = int(company.profit_last_year or 0)
+        margin_str = f" (рент. {prof/rev*100:.0f}%)" if rev > 0 else ""
+        block.append(
+            f"Выручка: {_fmt_money_short(rev)}, "
+            f"прибыль: {_fmt_money_short(prof)}{margin_str}"
+        )
+        block.append("Источник: реестры ФНС/DaData (упрощённо)")
+    else:
+        if is_financial:
+            block.append(
+                "ℹ️ Это финансовая организация (ОКВЭД 64-66). "
+                "Полная отчётность ведётся по форме ЦБ (101/102) "
+                "и публикуется на cbr.ru."
+            )
+        else:
+            block.append("Финансовая отчётность в открытых реестрах ФНС не найдена.")
+    sections.append("\n".join(block))
 
     # ━━━ НАЛОГИ ━━━
     tax_lines = ["━━━ 🏛 НАЛОГИ ━━━"]
-    has_tax_info = False
-    if card is not None and card.tax_regime:
+    if card and card.tax_regime:
         tax_lines.append(f"Режим: {card.tax_regime}")
-        has_tax_info = True
-    if card is not None and card.msp_category:
+    elif is_financial:
+        tax_lines.append("Режим: ОСНО (банки/страховщики)")
+    else:
+        tax_lines.append("Режим: не указан в открытых реестрах")
+    if card and card.msp_category:
         tax_lines.append(f"Категория МСП: {card.msp_category}")
-        has_tax_info = True
-    if card is not None and card.tax_violations_sum > 0:
+    else:
+        tax_lines.append("Категория МСП: не входит (крупное предприятие или иное)")
+    if card and card.tax_violations_sum > 0:
         tax_lines.append(
             f"💸 Налоговые штрафы за период: "
             f"{_fmt_money_short(int(card.tax_violations_sum))}"
         )
-        has_tax_info = True
         if card.tax_violations_history:
             for year, summ in card.tax_violations_history[:3]:
                 tax_lines.append(f"   {year}: {_fmt_money_short(int(summ))}")
-    if has_tax_info:
-        sections.append("\n".join(tax_lines))
+    else:
+        tax_lines.append("✅ Налоговых штрафов в открытых данных нет")
+    sections.append("\n".join(tax_lines))
 
     # ━━━ ⚠️ ЗАДОЛЖЕННОСТИ ━━━
     debts: list[str] = []
-    has_debts = False
     fssp_count = security.enforcement_count if security else 0
     fssp_sum = security.enforcement_total_sum if security else 0
     if fssp_count > 0:
@@ -719,7 +747,6 @@ def _format_finance(card, security, company, inn: str) -> str:
         )
         if fssp_count > 10:
             findings.append(f"🔴 Много исполнительных производств: {fssp_count}")
-        has_debts = True
     else:
         debts.append("✅ ФССП: исполнительных производств нет")
 
@@ -730,12 +757,9 @@ def _format_finance(card, security, company, inn: str) -> str:
                 f"{marker} Налоговая задолженность: "
                 f"{_fmt_money_short(int(card.tax_debt_sum))}"
             )
-            has_debts = True
             for item in card.tax_debt_items[:5]:
                 name_short = item.tax_name[:55].lower()
-                debts.append(
-                    f"   • {name_short}: {_fmt_money_short(int(item.total))}"
-                )
+                debts.append(f"   • {name_short}: {_fmt_money_short(int(item.total))}")
             if card.tax_debt_sum > 1_000_000:
                 findings.append(
                     f"🔴 Крупная налоговая задолженность: "
@@ -753,32 +777,43 @@ def _format_finance(card, security, company, inn: str) -> str:
     sections.append("━━━ ⚠️ ЗАДОЛЖЕННОСТИ ━━━\n" + "\n".join(debts))
 
     # ━━━ ПЕРСОНАЛ ━━━
-    if card is not None and (card.employees_count or card.payroll_fund or card.avg_salary):
+    employees = 0
+    payroll = 0
+    avg = 0
+    if card:
+        employees = card.employees_count or 0
+        payroll = card.payroll_fund or 0
+        avg = card.avg_salary or 0
+    # Fallback на CompanyData если в card пусто.
+    # Для финансовых организаций (банки) НЕ используем — там DaData отдаёт
+    # данные филиала, а не группы (например, у Сбера 25 «сотрудников» в DaData).
+    if not employees and company and company.employees_count and not is_financial:
+        employees = company.employees_count
+
+    if employees or payroll or avg:
         block = ["━━━ 👥 ПЕРСОНАЛ ━━━"]
-        if card.employees_count:
-            block.append(f"Сотрудников: {card.employees_count}")
-        if card.payroll_fund:
-            block.append(f"Фонд оплаты труда: {_fmt_money_short(int(card.payroll_fund))}")
-        if card.avg_salary:
-            block.append(f"Средняя ЗП: {_fmt_money_short(int(card.avg_salary))}")
-        # Выручка на сотрудника — только если есть и выручка, и штат
+        if employees:
+            block.append(f"Сотрудников: {employees}")
+        if payroll:
+            block.append(f"Фонд оплаты труда: {_fmt_money_short(int(payroll))}")
+        if avg:
+            block.append(f"Средняя ЗП: {_fmt_money_short(int(avg))}")
+        # Выручка на сотрудника
         last_revenue = 0
-        if card.finance_history:
+        if card and card.finance_history:
             last_revenue = next(
                 (f.revenue for f in card.finance_history if f.revenue and f.revenue > 0),
                 0,
             )
-        if last_revenue and card.employees_count:
-            per_emp = last_revenue / card.employees_count
-            block.append(
-                f"Выручка на сотрудника: {_fmt_money_short(int(per_emp))}/год"
-            )
+        if not last_revenue and company and company.revenue_last_year:
+            last_revenue = company.revenue_last_year
+        if last_revenue and employees:
+            per_emp = last_revenue / employees
+            block.append(f"Выручка на сотрудника: {_fmt_money_short(int(per_emp))}/год")
         sections.append("\n".join(block))
 
     # ━━━ ГОСКОНТРАКТЫ ━━━
-    if card is not None and (
-        card.contracts_supplier_count or card.contracts_customer_count
-    ):
+    if card and (card.contracts_supplier_count or card.contracts_customer_count):
         block = ["━━━ 📦 ГОСКОНТРАКТЫ ━━━"]
         if card.contracts_supplier_count:
             block.append(
@@ -799,17 +834,19 @@ def _format_finance(card, security, company, inn: str) -> str:
 
     # ━━━ КАПИТАЛ И ЛИЦЕНЗИИ ━━━
     capital_block = []
-    cap_value = (card.capital if card and card.capital
-                 else (company.capital if company and company.capital else 0))
+    cap_value = 0
+    if card and card.capital:
+        cap_value = card.capital
+    elif company and company.capital:
+        cap_value = company.capital
     if cap_value:
-        cap_str = _fmt_money_short(int(cap_value))
-        capital_block.append(f"Уставный капитал: {cap_str}")
+        capital_block.append(f"Уставный капитал: {_fmt_money_short(int(cap_value))}")
         if cap_value <= 10_000:
             capital_block.append(
-                "🟡 Минимальный размер — стандарт для ООО, но "
-                "ограничивает ответственность по обязательствам"
+                "🟡 Минимальный размер — стандарт для ООО, "
+                "ограничивает ответственность"
             )
-    if card is not None and card.licenses_count:
+    if card and card.licenses_count:
         capital_block.append(f"Лицензий: {card.licenses_count}")
     if capital_block:
         sections.append("━━━ 💰 КАПИТАЛ И ЛИЦЕНЗИИ ━━━\n" + "\n".join(capital_block))
@@ -824,7 +861,6 @@ def _format_finance(card, security, company, inn: str) -> str:
         sections.append("\n".join(block))
 
     # ━━━ НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ━━━
-    # Положительные сигналы
     positives = []
     if card is not None:
         if not card.in_debt_registry and not card.in_no_reporting_registry:
@@ -840,12 +876,17 @@ def _format_finance(card, security, company, inn: str) -> str:
         positives.append("✅ Нет исполнительных производств ФССП")
     if card and card.tax_debt_sum == 0:
         positives.append("✅ Нет задолженности перед бюджетом")
+    if is_financial and not history:
+        # Для банков — отметим что финданные ограничены, чтобы клиент не обманывался
+        positives.append(
+            "ℹ️ Это банк/страховщик — расширенная отчётность на cbr.ru"
+        )
 
     summary_block = ["━━━ 📋 НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ━━━"]
     if findings:
         summary_block.extend(findings)
     if positives:
-        summary_block.extend(positives[:5])  # не больше 5 положительных, чтобы не разводнять
+        summary_block.extend(positives[:5])
     if not findings and not positives:
         summary_block.append(
             "Нет ярких сигналов — обычная картина. "

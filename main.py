@@ -2089,16 +2089,31 @@ async def handle_text_message(client: Client, message) -> None:
                 reply_markup=_search_results_keyboard(suggestions),
             )
             return
-        # Поиск выполнен, но пусто — сообщим пользователю
+        # Поиск выполнен, но пусто — спросим ИИ-помощника, может это
+        # был вопрос а не название компании
+        ai_reply = await gigachat.help_user(text.strip())
+        if ai_reply:
+            await message.reply_text(
+                f"🔎 По запросу «{text.strip()}» компаний не найдено.\n\n"
+                f"🤖 {ai_reply}"
+            )
+            return
         await message.reply_text(
             f"🔎 По запросу «{text.strip()}» ничего не найдено.\n\n"
             "Попробуйте другое начало названия или отправьте ИНН напрямую."
         )
         return
 
-    # Если ни ИНН, ни команды — подсказка
+    # Ничего не подошло — это либо неизвестная slash-команда, либо
+    # короткий текст / приветствие. Зовём ИИ-помощника, он подскажет.
+    ai_reply = await gigachat.help_user(text.strip())
+    if ai_reply:
+        await message.reply_text(f"🤖 {ai_reply}")
+        return
+
+    # Fallback если ИИ недоступен
     await message.reply_text(
-        "👋 Отправьте ИНН компании или нажмите /menu для выбора действия."
+        "👋 Отправьте ИНН или название компании, либо нажмите /menu."
     )
 
 

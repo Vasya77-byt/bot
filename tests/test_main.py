@@ -1393,7 +1393,9 @@ class TestHandleStartReferral:
     async def test_help_command_uses_same_handler(self):
         msg = FakeMessage(text="/help", user_id=1)
         await main.handle_start(client=None, message=msg)
-        assert any("умею" in r["text"].lower() for r in msg.replies)
+        # Welcome-сообщение приветствует от имени MondayCompany
+        assert any("mondaycompany" in r["text"].lower()
+                   for r in msg.replies)
 
     @pytest.mark.asyncio
     async def test_valid_referral_code_attaches_user(self):

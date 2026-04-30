@@ -933,53 +933,6 @@ class TestSendKpFile:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ca_refresh callback flow
-# ──────────────────────────────────────────────────────────────────────
-
-
-class TestCaRefresh:
-    @pytest.mark.asyncio
-    async def test_refresh_triggers_fetch_and_security(self, monkeypatch):
-        fetch_calls = []
-        security_calls = []
-
-        async def fake_fetch(inn):
-            fetch_calls.append(inn)
-            return CompanyData(inn=inn, name="ООО Свежая", okved_main="62.01")
-
-        async def fake_security(**kw):
-            security_calls.append(kw)
-            return SecurityResult(risk_level="low")
-
-        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
-        monkeypatch.setattr(main.security_service, "check", fake_security)
-
-        cb = FakeCallbackQuery("ca_refresh:7707083893", user_id=1)
-        await main.handle_callback(client=None, callback_query=cb)
-
-        assert fetch_calls == ["7707083893"]
-        assert security_calls and security_calls[0]["inn"] == "7707083893"
-        # Ответы: "Обновляю..." + результат
-        assert any("Обновляю" in r["text"] for r in cb.message.replies)
-
-    @pytest.mark.asyncio
-    async def test_refresh_swallows_security_error(self, monkeypatch):
-        async def fake_fetch(inn):
-            return CompanyData(inn=inn, name="X")
-
-        async def boom_security(**kw):
-            raise RuntimeError("FSSP down")
-
-        monkeypatch.setattr(main.company_service, "fetch", fake_fetch)
-        monkeypatch.setattr(main.security_service, "check", boom_security)
-
-        cb = FakeCallbackQuery("ca_refresh:1234567890", user_id=1)
-        # Не должно бросить
-        await main.handle_callback(client=None, callback_query=cb)
-        # Всё равно отправлено сообщение с обновлением
-        assert len(cb.message.replies) >= 2
-
-
 # ──────────────────────────────────────────────────────────────────────
 # _handle_buy_tariff success path
 # ──────────────────────────────────────────────────────────────────────

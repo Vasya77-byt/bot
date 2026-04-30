@@ -808,6 +808,40 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
             return
 
+        if action_part == "ca_pdf" and inn_part:
+            await callback_query.answer()
+            await callback_query.message.reply_text("📄 Готовлю PDF-отчёт...")
+            company = await company_service.fetch(inn_part)
+            sec = None
+            try:
+                sec = await security_service.check(
+                    inn=inn_part,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                    ogrn=company.ogrn if company else None,
+                )
+            except Exception as exc:
+                logger.error("PDF report security check failed for %s: %s",
+                             inn_part, exc)
+            parsed = ParseResult(
+                raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                is_request=False, is_proposal=False, company_data=company,
+            )
+            body = render_response(
+                parsed=parsed, company=company, risk=set(), security=sec,
+            )
+            company_name = (company.name if company else inn_part) or inn_part
+            title = f"Отчёт о проверке: {company_name}"
+            content = build_kp_pdf(title, body, company)
+            filename = f"report_{inn_part}.pdf"
+            doc = BytesIO(content)
+            doc.name = filename
+            await callback_query.message.reply_document(
+                document=doc, file_name=filename,
+                caption=f"📄 Отчёт по ИНН {inn_part}",
+            )
+            return
+
         if action_part == "ca_ai" and inn_part:
             await callback_query.answer()
             await callback_query.message.reply_text("🤖 Запрашиваю ИИ-анализ у GigaChat...")
@@ -837,30 +871,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             return
 
-        if action_part == "ca_refresh" and inn_part:
-            _user_state[user_id] = "mode_internal_analysis"
-            await callback_query.message.reply_text("🔄 Обновляю данные...")
-            company = await company_service.fetch(inn_part)
-            parsed_refresh = ParseResult(raw_text=inn_part, inn=inn_part, mode="internal_analysis",
-                                         is_request=False, is_proposal=False, company_data=company)
-            sec_result = None
-            try:
-                sec_result = await security_service.check(
-                    inn=inn_part,
-                    name=company.name if company else None,
-                    okved=company.okved_main if company else None,
-
-                    ogrn=company.ogrn if company else None,
-                )
-            except Exception as exc:
-                logger.error("Security check failed: %s", exc)
-            reply = render_response(parsed=parsed_refresh, company=company, risk=set(), security=sec_result)
-            await callback_query.message.reply_text(
-                reply,
-                disable_web_page_preview=True,
-                reply_markup=_company_actions_keyboard(inn_part, user_id),
-            )
-        elif action_part == "ca_monitor" and inn_part:
+        if action_part == "ca_monitor" and inn_part:
             await callback_query.message.reply_text("⏳ Добавляю в отслеживаемые...")
             await _do_monitor_add(callback_query.message, user_id, inn_part)
         elif action_part == "ca_unmonitor" and inn_part:
@@ -1303,7 +1314,7 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         ],
         [monitor_btn],
         [
-            InlineKeyboardButton("🔄 Обновить", callback_data=f"ca_refresh:{inn}"),
+            InlineKeyboardButton("📄 Скачать PDF", callback_data=f"ca_pdf:{inn}"),
         ],
     ])
 

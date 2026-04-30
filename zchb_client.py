@@ -68,6 +68,8 @@ def _restore_dataclass(cls, data: Dict[str, Any]):
                 v = [_restore_dataclass(InspectionRecord, item) for item in v]
             elif "EgrulRecord" in type_repr:
                 v = [_restore_dataclass(EgrulRecord, item) for item in v]
+            elif "CompanyChangeEvent" in type_repr:
+                v = [_restore_dataclass(CompanyChangeEvent, item) for item in v]
             # tax_violations_history — list[tuple] — оставляем как list[list]
             # из JSON, обработаем в рендерере как итерацию пар.
         kwargs[k] = v
@@ -141,6 +143,20 @@ class RatingResult:
     """Результат метода rating."""
     rating_category: str = ""   # "высокий", "средний", "низкий"
     risk_level: str = ""        # уровень налоговых рисков
+
+
+@dataclass
+class CompanyChangeEvent:
+    """Одно изменение из метода diffs ЗЧБ."""
+    timestamp: int = 0           # unix timestamp когда зафиксировано
+    date_iso: str = ""           # дата записи в ЕГРЮЛ (если есть)
+    field_type: str = ""         # 'director' / 'founders' / 'address' /
+                                 # 'okved_main' / 'okved_extra' / 'name' /
+                                 # 'capital' / 'other'
+    summary: str = ""            # человекочитаемое описание
+    person_name: str = ""        # ФИО (для директора/учредителя)
+    person_inn: str = ""         # ИНН ФЛ
+    extra: str = ""              # дополнительная инфа (доля, должность)
 
 
 @dataclass
@@ -771,6 +787,319 @@ class ZchbClient:
                             rec.has_violations = True
 
         return rec
+
+    # ────────────────────────────────────────────────────────────────
+    # Diffs — лента изменений компании в ЕГРЮЛ
+    # ────────────────────────────────────────────────────────────────
+
+    # Карта интересных нод -> тип события
+    _DIFF_FIELD_TYPES = {
+        "СвНаимЮЛ":      "name",
+        "СведДолжнФЛ":   "director",
+        "Руководители":  "director",
+        "СвУчредит":     "founders",
+        "УчрФЛ":         "founders",
+        "СвАдресЮЛ":     "address",
+        "АдресРФ":       "address",
+        "СвОКВЭД":       "okved",
+        "СвОКВЭДОсн":    "okved_main",
+        "СвОКВЭДДоп":    "okved_extra",
+        "СвУстКап":      "capital",
+        "СвРеорг":       "reorganization",
+    }
+
+    async def get_diffs(self, ogrn: str) -> Optional[List[CompanyChangeEvent]]:
+        """Лента всех изменений компании в ЕГРЮЛ через метод diffs ЗЧБ.
+        Принимает ТОЛЬКО ОГРН/ОГРНИП.
+
+        Возвращает упорядоченный по дате убывания список значимых
+        изменений (директор, учредители, адрес, ОКВЭД, наименование,
+        уставный капитал)."""
+        if not self.enabled or not ogrn:
+            return None
+
+        cached_dict = self._cache.get(self._cache_key("diffs", ogrn))
+        if isinstance(cached_dict, list):
+            try:
+                return [_restore_dataclass(CompanyChangeEvent, item)
+                        for item in cached_dict]
+            except Exception:
+                pass
+
+        raw = await asyncio.to_thread(self._simple_call, "diffs", ogrn)
+        if raw is None:
+            return None
+
+        status = str(raw.get("status", ""))
+        if status in ZCHB_STATUS_KEY_INVALID:
+            return None
+        if status != "200":
+            logger.warning("ZCHB diffs status=%s message=%s",
+                           status, raw.get("message", ""))
+            return []
+
+        body = raw.get("body")
+        if not isinstance(body, dict):
+            return []
+
+        events: List[CompanyChangeEvent] = []
+        for ts_str, day_events in body.items():
+            try:
+                ts = int(ts_str)
+            except (TypeError, ValueError):
+                ts = 0
+            if not isinstance(day_events, list):
+                continue
+            for event in day_events:
+                events.extend(self._extract_change_events(event, ts))
+
+        # Дедупликация (одинаковые события за один и тот же timestamp)
+        seen = set()
+        unique: List[CompanyChangeEvent] = []
+        for ev in events:
+            key = (ev.timestamp, ev.field_type, ev.summary, ev.person_inn)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(ev)
+
+        unique.sort(key=lambda e: e.timestamp, reverse=True)
+        self._cache.set(
+            self._cache_key("diffs", ogrn),
+            [asdict(e) for e in unique],
+        )
+        return unique
+
+    def _extract_change_events(
+        self, event: Any, ts: int,
+    ) -> List[CompanyChangeEvent]:
+        """Извлекает CompanyChangeEvent из одной записи diffs.
+
+        ZCHB шлёт два вида источников:
+        - basicData: готовый человекочитаемый text
+        - egrul_diff_runtime: структурированный diff с ins/del/upd
+        """
+        if not isinstance(event, dict):
+            return []
+        source = event.get("source", "")
+        data = event.get("data")
+        if source == "basicData":
+            return self._parse_basic_data(data, ts)
+        if source == "egrul_diff_runtime":
+            return self._parse_egrul_diff(data, ts)
+        return []
+
+    @staticmethod
+    def _parse_basic_data(data: Any, ts: int) -> List[CompanyChangeEvent]:
+        """Парсит basicData — список текстовых описаний.
+        Фильтруем только значимые типы изменений по ключевым словам."""
+        if not isinstance(data, list):
+            return []
+        events: List[CompanyChangeEvent] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            tlow = text.lower()
+            field_type = "other"
+            # Ключевые слова → тип события
+            if "руководител" in tlow or "директор" in tlow or "глав" in tlow:
+                field_type = "director"
+            elif "учредител" in tlow or "участник" in tlow or "доля" in tlow:
+                field_type = "founders"
+            elif "адрес" in tlow:
+                field_type = "address"
+            elif "оквэд" in tlow or "вид деятельност" in tlow:
+                field_type = "okved"
+            elif "наименован" in tlow or "название" in tlow:
+                field_type = "name"
+            elif "капитал" in tlow:
+                field_type = "capital"
+            elif "реорганиз" in tlow or "ликвид" in tlow:
+                field_type = "reorganization"
+            else:
+                continue  # пропускаем мусорные изменения (товарные знаки, проверки и т.п.)
+
+            events.append(CompanyChangeEvent(
+                timestamp=ts,
+                field_type=field_type,
+                summary=text[:500],
+            ))
+        return events
+
+    def _parse_egrul_diff(
+        self, data: Any, ts: int,
+    ) -> List[CompanyChangeEvent]:
+        """Парсит egrul_diff_runtime — структурированный diff."""
+        if not isinstance(data, dict):
+            return []
+        node = data.get("node", "")
+        diff = data.get("diff")
+        if not isinstance(diff, dict):
+            return []
+
+        field_type = self._DIFF_FIELD_TYPES.get(node, "other")
+        if field_type == "other":
+            return []
+
+        events: List[CompanyChangeEvent] = []
+        # Рекурсивно собираем все ins/upd-блоки с @attributes
+        for ins_block, grn_date in self._collect_ins_blocks(diff):
+            ev = self._build_event_from_attrs(
+                field_type, ins_block, grn_date, ts,
+            )
+            if ev is not None:
+                events.append(ev)
+        return events
+
+    @staticmethod
+    def _collect_ins_blocks(node: Any, depth: int = 0) -> List[tuple]:
+        """Рекурсивно собирает все блоки с @attributes под ins/upd-вложенностью.
+        Возвращает список (attrs_dict, grn_date_str)."""
+        results: List[tuple] = []
+        if depth > 8:  # защита от бесконечной рекурсии
+            return results
+        if isinstance(node, dict):
+            # Если есть ins — это новое значение, парсим его
+            ins = node.get("ins")
+            if isinstance(ins, dict):
+                attrs = ins.get("@attributes")
+                if isinstance(attrs, dict):
+                    grn_date = ""
+                    grn = ins.get("ГРНДата")
+                    if isinstance(grn, dict):
+                        grn_attrs = grn.get("@attributes") or {}
+                        grn_date = str(grn_attrs.get("ДатаЗаписи") or "")
+                    results.append((attrs, grn_date))
+                # Идём ещё глубже в ins (там тоже могут быть вложенности)
+                results.extend(
+                    ZchbClient._collect_ins_blocks(ins, depth + 1)
+                )
+            # Также ищем в upd рекурсивно
+            upd = node.get("upd")
+            if isinstance(upd, dict):
+                results.extend(
+                    ZchbClient._collect_ins_blocks(upd, depth + 1)
+                )
+            # Прочие ключи могут содержать вложенности
+            for k, v in node.items():
+                if k in ("ins", "upd", "del", "@attributes", "ГРНДата"):
+                    continue
+                if isinstance(v, (dict, list)):
+                    results.extend(
+                        ZchbClient._collect_ins_blocks(v, depth + 1)
+                    )
+        elif isinstance(node, list):
+            for item in node:
+                results.extend(
+                    ZchbClient._collect_ins_blocks(item, depth + 1)
+                )
+        return results
+
+    @staticmethod
+    def _build_event_from_attrs(
+        field_type: str, attrs: Dict[str, Any], grn_date: str, ts: int,
+    ) -> Optional[CompanyChangeEvent]:
+        """Строит CompanyChangeEvent из @attributes ins-блока."""
+        if not isinstance(attrs, dict):
+            return None
+
+        ev = CompanyChangeEvent(
+            timestamp=ts, date_iso=grn_date, field_type=field_type,
+        )
+
+        if field_type == "director":
+            fio_parts = [
+                attrs.get("Фамилия"), attrs.get("Имя"), attrs.get("Отчество"),
+            ]
+            fio = " ".join(p for p in fio_parts if p).strip()
+            if not fio:
+                return None
+            ev.person_name = fio
+            ev.person_inn = str(attrs.get("ИННФЛ") or "").strip()
+            position = (attrs.get("НаимДолжн") or
+                        attrs.get("НаимВидДолжн") or "")
+            ev.extra = str(position).strip()
+            ev.summary = fio + (f" — {ev.extra}" if ev.extra else "")
+            return ev
+
+        if field_type == "founders":
+            # Проверяем что это блок учредителя ФЛ
+            fio_parts = [
+                attrs.get("Фамилия"), attrs.get("Имя"), attrs.get("Отчество"),
+            ]
+            fio = " ".join(p for p in fio_parts if p).strip()
+            if fio:
+                ev.person_name = fio
+                ev.person_inn = str(attrs.get("ИННФЛ") or "").strip()
+                ev.summary = fio
+                return ev
+            # ЮЛ-учредитель
+            name = attrs.get("НаимЮЛПолн") or attrs.get("НаимЮЛСокр")
+            if name:
+                ev.person_name = str(name)
+                ev.person_inn = str(attrs.get("ИНН") or "").strip()
+                ev.summary = str(name)
+                return ev
+            return None
+
+        if field_type == "address":
+            parts = [
+                attrs.get("Индекс"),
+                attrs.get("НаимРегион") and f"{attrs.get('ТипРегион') or ''} {attrs.get('НаимРегион')}".strip(),
+                attrs.get("НаимГород") and f"{attrs.get('ТипГород') or ''} {attrs.get('НаимГород')}".strip(),
+                attrs.get("НаимУлица") and f"{attrs.get('ТипУлица') or ''} {attrs.get('НаимУлица')}".strip(),
+                attrs.get("Дом") and f"д. {attrs.get('Дом')}",
+                attrs.get("Корпус") and f"корп. {attrs.get('Корпус')}",
+                attrs.get("Кварт") and f"кв./офис {attrs.get('Кварт')}",
+            ]
+            address = ", ".join(p for p in parts if p)
+            if not address.strip():
+                return None
+            ev.summary = address
+            return ev
+
+        if field_type in ("okved", "okved_main", "okved_extra"):
+            code = attrs.get("КодОКВЭД")
+            name = attrs.get("НаимОКВЭД")
+            if not code:
+                return None
+            ev.summary = f"{code}" + (f" — {name}" if name else "")
+            return ev
+
+        if field_type == "capital":
+            cap = attrs.get("СумКап")
+            kind = attrs.get("НаимВидКап")
+            if cap is None:
+                return None
+            try:
+                cap_n = float(cap)
+                cap_str = f"{int(cap_n):,}".replace(",", " ") + " ₽"
+            except (TypeError, ValueError):
+                cap_str = str(cap)
+            ev.summary = cap_str
+            ev.extra = str(kind or "")
+            return ev
+
+        if field_type == "name":
+            full = attrs.get("НаимЮЛПолн") or ""
+            short = attrs.get("НаимЮЛСокр") or ""
+            display = short or full
+            if not display:
+                return None
+            ev.summary = str(display)
+            return ev
+
+        if field_type == "reorganization":
+            status_name = attrs.get("НаимСтатусЮЛ") or attrs.get("СостЮЛпосле")
+            if not status_name:
+                return None
+            ev.summary = str(status_name)
+            return ev
+
+        return None
 
     # ────────────────────────────────────────────────────────────────
     # FL-card — карточка физлица (директор/учредитель)

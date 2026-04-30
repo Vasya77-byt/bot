@@ -403,96 +403,192 @@ def _format_egrul_history(records, ogrn: str) -> str:
     return "\n".join(lines)
 
 
-def _format_history(card, inspections, inn: str) -> str:
-    """Объединённая хронологическая история изменений компании.
-    Соединяет события из ЕГРЮЛ (СвЗапЕГРЮЛ) и ЕРП-проверок,
-    сортирует по дате убывания."""
-    events: list[tuple[str, str, str]] = []  # (date_iso, marker, text)
+def _format_history(card, events, inn: str) -> str:
+    """Структурированная история изменений компании по разделам:
+    директор / учредители / адрес / ОКВЭД / наименование / капитал.
 
-    # ── ЕГРЮЛ-записи ──
+    `events` — список CompanyChangeEvent от ZchbClient.get_diffs(ogrn).
+    Внутри каждого раздела события сортируются от свежих (🔹 «Действует с»)
+    к старым (🔸 «Действовал с»). Если в разделе ничего не было —
+    раздел выводится с пометкой «✅ Не менялся».
+    """
+    name = ""
     if card is not None:
-        for r in (card.egrul_records or []):
-            date = r.date[:10] if r.date else ""
-            text = r.type_name or r.type_code or "Запись в ЕГРЮЛ"
-            marker = "🏛"
-            # Подсветка значимых типов
-            tlow = text.lower()
-            if "руководител" in tlow or "должн" in tlow:
-                marker = "👤"  # смена руководителя
-            elif "адрес" in tlow:
-                marker = "📍"
-            elif "учредител" in tlow or "уставн" in tlow:
-                marker = "👥"
-            elif "реорг" in tlow or "присоедин" in tlow:
-                marker = "🔄"
-            elif "ликвид" in tlow:
-                marker = "⛔"
-            events.append((date, marker, text))
+        name = card.name_short or card.name_full or ""
 
-    # ── ЕРП-проверки ──
-    if inspections:
-        for r in inspections:
-            date = (r.start_date[:10] if r.start_date else "")
-            # Тип — короткий: «Внеплановое КНМ» / «Плановая проверка»
-            type_part = (r.inspection_type or "Проверка").strip()
-            # Орган — обрезаем до 50 символов
-            authority = r.authority.strip()
-            if len(authority) > 50:
-                authority = authority[:47] + "…"
-            details = type_part
-            if authority:
-                details += f": {authority}"
-            if r.has_violations:
-                details += " ⚠️"
-            events.append((date, "🔎", details))
+    title_lines = ["📜 История изменений"]
+    if name:
+        title_lines.append(name)
+    title_lines.append(f"ИНН {inn}")
 
     if not events:
-        return (
-            f"📜 История изменений (ИНН {inn})\n\n"
-            "В открытых источниках записей не найдено.\n"
-            "Возможные причины:\n"
-            "• Свежая компания без изменений в ЕГРЮЛ\n"
-            "• Проверки не публикуются по этой категории риска"
-        )
+        return "\n".join(title_lines + [
+            "",
+            "В открытых источниках значимых изменений не найдено.",
+            "Возможные причины:",
+            "• Свежая компания без изменений в ЕГРЮЛ",
+            "• Уже была закрыта/реорганизована давно",
+        ])
 
-    # Сортируем по дате (свежие сверху)
-    events.sort(key=lambda e: e[0] or "", reverse=True)
+    # Группируем события по типу
+    by_field: dict[str, list] = {
+        "name": [], "director": [], "founders": [], "address": [],
+        "okved": [], "okved_main": [], "okved_extra": [],
+        "capital": [], "reorganization": [], "other": [],
+    }
+    for ev in events:
+        if ev.field_type in by_field:
+            by_field[ev.field_type].append(ev)
+        else:
+            by_field["other"].append(ev)
 
-    egrul_count = sum(1 for _, m, _ in events if m != "🔎")
-    insp_count = sum(1 for _, m, _ in events if m == "🔎")
-    header_lines = [f"📜 История изменений (ИНН {inn})", ""]
-    summary_parts = []
-    if egrul_count:
-        summary_parts.append(f"записей ЕГРЮЛ: {egrul_count}")
-    if insp_count:
-        summary_parts.append(f"проверок: {insp_count}")
-    if summary_parts:
-        header_lines.append("Всего: " + ", ".join(summary_parts))
-        header_lines.append("")
+    # Объединяем okved_main + okved_extra + okved в один раздел
+    okved_all = by_field["okved_main"] + by_field["okved"] + by_field["okved_extra"]
+    okved_all.sort(key=lambda e: e.timestamp, reverse=True)
 
-    # Telegram-лимит — 4096 символов. Держим бюджет ~3800 для запаса.
-    # Если события не влезают — обрезаем количество и добавляем хвост.
-    max_chars = 3800
-    body_lines: list[str] = []
-    used = sum(len(line) + 1 for line in header_lines)
-    shown = 0
-    for date, marker, text in events:
-        line = f"{marker} {date or '—'} — {text}"
-        # Защита от слишком длинной отдельной записи
-        if len(line) > 200:
-            line = line[:197] + "…"
-        if used + len(line) + 1 > max_chars:
-            break
-        body_lines.append(line)
-        used += len(line) + 1
-        shown += 1
+    sections: list[str] = []
 
-    lines = header_lines + body_lines
-    if shown < len(events):
-        tail = f"… показано {shown} из {len(events)} событий."
-        lines.append("")
-        lines.append(tail)
-    return "\n".join(lines)
+    # Хелпер форматирования даты события — берём date_iso если есть, иначе ts
+    from datetime import datetime as _dt
+
+    def _fmt_date(ev) -> str:
+        if ev.date_iso:
+            return ev.date_iso[:10].replace("-", ".")[8:10] + "." + ev.date_iso[5:7] + "." + ev.date_iso[:4] if False else ev.date_iso[:10]
+        if ev.timestamp:
+            return _dt.utcfromtimestamp(ev.timestamp).strftime("%Y-%m-%d")
+        return "—"
+
+    # ── Директор ──
+    section = ["━━━ 👤 РУКОВОДИТЕЛЬ ━━━"]
+    director_events = by_field["director"]
+    director_events.sort(key=lambda e: e.timestamp, reverse=True)
+    if not director_events:
+        section.append("✅ Не менялся")
+    else:
+        # Дедупликация по ФИО+позиции — несколько событий с одним
+        # человеком сжимаем
+        seen_keys = set()
+        unique_dirs = []
+        for ev in director_events:
+            key = (ev.person_name, ev.extra)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique_dirs.append(ev)
+        for i, ev in enumerate(unique_dirs[:8]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовал с"
+            line = f"{marker} {ev.person_name}"
+            if ev.person_inn:
+                line += f" (ИНН {ev.person_inn})"
+            section.append(line)
+            if ev.extra:
+                section.append(f"   {ev.extra}")
+            section.append(f"   {verb} {_fmt_date(ev)}")
+        if len(unique_dirs) >= 5:
+            section.append(f"⚠️ Директор менялся {len(unique_dirs)} раз")
+    sections.append("\n".join(section))
+
+    # ── Учредители ──
+    section = ["━━━ 👥 УЧРЕДИТЕЛИ ━━━"]
+    founder_events = by_field["founders"]
+    founder_events.sort(key=lambda e: e.timestamp, reverse=True)
+    if not founder_events:
+        section.append("✅ Не менялись")
+    else:
+        for i, ev in enumerate(founder_events[:8]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовал с"
+            line = f"{marker} {ev.summary}"
+            if ev.person_inn:
+                line += f" (ИНН {ev.person_inn})"
+            section.append(line)
+            section.append(f"   {verb} {_fmt_date(ev)}")
+    sections.append("\n".join(section))
+
+    # ── Адрес ──
+    section = ["━━━ 📍 АДРЕС ━━━"]
+    address_events = by_field["address"]
+    address_events.sort(key=lambda e: e.timestamp, reverse=True)
+    if not address_events:
+        section.append("✅ Не менялся")
+    else:
+        # Дедупликация одинаковых адресов (только косметика)
+        unique_addrs = []
+        seen_addrs = set()
+        for ev in address_events:
+            normalized = ev.summary.lower().replace(" ", "").replace(",", "")
+            if normalized in seen_addrs:
+                continue
+            seen_addrs.add(normalized)
+            unique_addrs.append(ev)
+        for i, ev in enumerate(unique_addrs[:5]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовал с"
+            section.append(f"{marker} {ev.summary[:120]}")
+            section.append(f"   {verb} {_fmt_date(ev)}")
+        if len(address_events) > 1 and len(unique_addrs) == 1:
+            section.append("✅ Адрес фактически не менялся (только формальные правки)")
+    sections.append("\n".join(section))
+
+    # ── Основной ОКВЭД ──
+    section = ["━━━ 🏷 ОКВЭД ━━━"]
+    if not okved_all:
+        section.append("✅ Не менялся")
+    else:
+        # Берём только первые 5 (свежие)
+        for i, ev in enumerate(okved_all[:5]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовал с"
+            section.append(f"{marker} {ev.summary[:120]}")
+            section.append(f"   {verb} {_fmt_date(ev)}")
+        if len(okved_all) > 5:
+            section.append(f"… и ещё {len(okved_all) - 5} изменений")
+    sections.append("\n".join(section))
+
+    # ── Наименование ──
+    section = ["━━━ 📛 НАИМЕНОВАНИЕ ━━━"]
+    name_events = by_field["name"]
+    name_events.sort(key=lambda e: e.timestamp, reverse=True)
+    if not name_events:
+        section.append("✅ Не менялось")
+    else:
+        for i, ev in enumerate(name_events[:5]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовало с"
+            section.append(f"{marker} {ev.summary[:100]}")
+            section.append(f"   {verb} {_fmt_date(ev)}")
+    sections.append("\n".join(section))
+
+    # ── Уставный капитал ──
+    section = ["━━━ 💰 УСТАВНЫЙ КАПИТАЛ ━━━"]
+    cap_events = by_field["capital"]
+    cap_events.sort(key=lambda e: e.timestamp, reverse=True)
+    if not cap_events:
+        section.append("✅ Не менялся")
+    else:
+        for i, ev in enumerate(cap_events[:5]):
+            marker = "🔹" if i == 0 else "🔸"
+            verb = "Действует с" if i == 0 else "Действовал с"
+            section.append(f"{marker} {ev.summary}")
+            section.append(f"   {verb} {_fmt_date(ev)}")
+    sections.append("\n".join(section))
+
+    # ── Реорганизация (если есть) ──
+    reorg_events = by_field["reorganization"]
+    if reorg_events:
+        reorg_events.sort(key=lambda e: e.timestamp, reverse=True)
+        section = ["━━━ 🔄 РЕОРГАНИЗАЦИЯ ━━━"]
+        for ev in reorg_events[:3]:
+            section.append(f"⚠️ {ev.summary} ({_fmt_date(ev)})")
+        sections.append("\n".join(section))
+
+    text = "\n".join(title_lines) + "\n\n" + "\n\n".join(sections)
+
+    # Бюджет под Telegram (4096). Если перебрали — отрезаем последние секции
+    if len(text) > 3900:
+        text = text[:3900] + "\n\n…отчёт обрезан до лимита Telegram."
+    return text
 
 
 def _format_inspections(inspections, inn: str) -> str:
@@ -1116,23 +1212,27 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 "📜 Собираю историю изменений компании..."
             )
+            # Метод diffs ЗЧБ принимает только ОГРН — берём его из card
             try:
                 card = await zchb.get_card(inn_part)
             except Exception as exc:
-                logger.exception("ca_history: get_card failed for %s: %s",
-                                 inn_part, exc)
+                logger.exception("ca_history: get_card failed: %s", exc)
                 card = None
+            ogrn = (card.ogrn if card else "") or ""
+            if not ogrn:
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось определить ОГРН для запроса истории."
+                )
+                return
             try:
-                inspections = await zchb.get_inspections(inn_part)
+                events = await zchb.get_diffs(ogrn)
             except Exception as exc:
-                logger.exception("ca_history: get_inspections failed for %s: %s",
-                                 inn_part, exc)
-                inspections = None
+                logger.exception("ca_history: get_diffs failed: %s", exc)
+                events = None
             try:
-                text = _format_history(card, inspections, inn_part)
+                text = _format_history(card, events, inn_part)
             except Exception as exc:
-                logger.exception("ca_history: format failed for %s: %s",
-                                 inn_part, exc)
+                logger.exception("ca_history: format failed: %s", exc)
                 await callback_query.message.reply_text(
                     "⚠️ Не удалось собрать историю. Попробуйте позже.\n"
                     "Если ошибка повторяется — сообщите в поддержку: @YRS75"

@@ -735,6 +735,8 @@ async def _format_links(card, inn: str) -> str:
     # Накопители для итоговой статистики
     all_related_inns: set[str] = set()
     warnings: list[str] = []
+    # Чтобы не показывать саму проверяемую компанию в списке "связанных"
+    self_inn = (card.inn or inn or "").strip()
 
     # ━━━ РУКОВОДИТЕЛЬ ━━━
     section = ["━━━ 👤 РУКОВОДИТЕЛЬ ━━━"]
@@ -754,7 +756,7 @@ async def _format_links(card, inn: str) -> str:
             fl = await zchb.get_fl_card(card.director_inn)
             if fl:
                 _append_fl_summary(section, fl, all_related_inns, warnings,
-                                   indent=True)
+                                   self_inn=self_inn, indent=True)
             else:
                 section.append("   Связанных компаний не найдено.")
         elif card.director_namesake_count >= 50:
@@ -772,8 +774,12 @@ async def _format_links(card, inn: str) -> str:
         # Не дёргаем fl-card для директора повторно (если он же и учредитель)
         if card.director_inn:
             seen_inns.add(card.director_inn)
-        # Берём до 5 уникальных учредителей-ФЛ для запросов
-        to_query = []
+
+        # Учредители у которых нет ИНН (по ним fl-card сделать нельзя)
+        no_inn_founders = [f for f in fl_founders if not f.inn]
+
+        # Уникальные с ИНН — берём до 5 для запросов
+        to_query: list = []
         for f in fl_founders:
             if f.inn and f.inn not in seen_inns:
                 seen_inns.add(f.inn)
@@ -781,7 +787,7 @@ async def _format_links(card, inn: str) -> str:
             if len(to_query) >= 5:
                 break
 
-        if not to_query:
+        if not to_query and not no_inn_founders:
             section.append(
                 "Все физлица-учредители совпадают с руководителем "
                 "(см. блок выше)."
@@ -797,14 +803,25 @@ async def _format_links(card, inn: str) -> str:
                 fl = await zchb.get_fl_card(f.inn)
                 if fl:
                     _append_fl_summary(section, fl, all_related_inns,
-                                       warnings, indent=True)
+                                       warnings, self_inn=self_inn, indent=True)
                 else:
                     section.append("   Связанных компаний не найдено.")
 
-            if len(fl_founders) > len(to_query):
+            for f in no_inn_founders[:5]:
+                line = f"👤 {f.name or 'Без имени'}"
+                if f.share_pct > 0:
+                    line += f" — доля {f.share_pct:g}%"
+                section.append(line)
                 section.append(
-                    f"   … и ещё {len(fl_founders) - len(to_query)} "
-                    "учредителей-физлиц (не показаны для экономии запросов)."
+                    "   ℹ️ ИНН не указан в реестре — углублённую проверку "
+                    "связей сделать нельзя."
+                )
+
+            shown = len(to_query) + min(len(no_inn_founders), 5)
+            if len(fl_founders) > shown:
+                section.append(
+                    f"   … и ещё {len(fl_founders) - shown} "
+                    "учредителей-физлиц"
                 )
         sections.append("\n".join(section))
 
@@ -814,7 +831,7 @@ async def _format_links(card, inn: str) -> str:
         section = ["━━━ 🏢 УЧРЕДИТЕЛИ-ЮРЛИЦА ━━━"]
         for f in ul_founders[:7]:
             line = f"🏢 {f.name or 'Без названия'}"
-            if f.inn:
+            if f.inn and f.inn != self_inn:
                 line += f" (ИНН {f.inn})"
                 all_related_inns.add(f.inn)
             if f.share_pct > 0:
@@ -826,16 +843,22 @@ async def _format_links(card, inn: str) -> str:
 
     # ━━━ ИТОГ ━━━
     summary = ["━━━ 📋 ИТОГ ━━━"]
-    summary.append(
-        f"Связанных компаний обнаружено: {len(all_related_inns)}"
-    )
-    if warnings:
-        summary.extend(warnings)
-    if not warnings and len(all_related_inns) == 0:
+    if all_related_inns:
+        summary.append(
+            f"Связанных компаний обнаружено: {len(all_related_inns)}"
+        )
+    else:
         summary.append(
             "✅ Связей с другими компаниями не найдено — компания "
             "выглядит обособленной."
         )
+    if warnings:
+        # Дедупликация
+        seen = set()
+        for w in warnings:
+            if w not in seen:
+                seen.add(w)
+                summary.append(w)
     sections.append("\n".join(summary))
 
     text = "\n".join(title_lines) + "\n\n" + "\n\n".join(sections)
@@ -845,10 +868,15 @@ async def _format_links(card, inn: str) -> str:
 
 
 def _append_fl_summary(section: list, fl, related_inns: set,
-                       warnings: list, indent: bool = False) -> None:
+                       warnings: list, self_inn: str = "",
+                       indent: bool = False) -> None:
     """Добавляет в section строки с компаниями где физлицо
     руководит/учредитель/ИП. Аккумулирует ИНН в related_inns
-    и ⚠️ предупреждения о массовости в warnings."""
+    и ⚠️ предупреждения о массовости в warnings.
+
+    Сама проверяемая компания (self_inn) исключается из списков —
+    нет смысла показывать её как «связанную».
+    """
     pad = "   " if indent else ""
 
     if fl.is_mass_leader:
@@ -862,35 +890,44 @@ def _append_fl_summary(section: list, fl, related_inns: set,
             f"⚠️ {fl.full_name or fl.inn_fl}: массовый учредитель"
         )
 
-    if not fl.leads and not fl.founds and not fl.sole_props:
+    # Фильтруем self_inn — сама проверяемая компания не должна быть
+    # в списках "связанных"
+    leads = [c for c in (fl.leads or []) if (c.inn or "") != self_inn]
+    founds = [c for c in (fl.founds or []) if (c.inn or "") != self_inn]
+    sole = fl.sole_props or []
+
+    has_external = bool(leads or founds or sole)
+    if not has_external:
         if not fl.is_mass_leader and not fl.is_mass_founder:
-            section.append(f"{pad}Дополнительных компаний не найдено.")
+            section.append(
+                f"{pad}✅ В других компаниях не фигурирует"
+            )
         return
 
-    if fl.leads:
-        section.append(f"{pad}Руководит в {len(fl.leads)} комп.:")
-        for c in fl.leads[:4]:
+    if leads:
+        section.append(f"{pad}Руководит ещё в {len(leads)} комп.:")
+        for c in leads[:4]:
             marker = "✅" if c.is_active else "⛔"
             cname = (c.name_short or c.name_full or f"ИНН {c.inn}")[:45]
             section.append(f"{pad}• {marker} {cname}")
             if c.inn:
                 related_inns.add(c.inn)
-        if len(fl.leads) > 4:
-            section.append(f"{pad}  … и ещё {len(fl.leads) - 4}")
+        if len(leads) > 4:
+            section.append(f"{pad}  … и ещё {len(leads) - 4}")
 
-    if fl.founds:
-        section.append(f"{pad}Учредитель в {len(fl.founds)} комп.:")
-        for c in fl.founds[:4]:
+    if founds:
+        section.append(f"{pad}Учредитель ещё в {len(founds)} комп.:")
+        for c in founds[:4]:
             marker = "✅" if c.is_active else "⛔"
             cname = (c.name_short or c.name_full or f"ИНН {c.inn}")[:45]
             section.append(f"{pad}• {marker} {cname}")
             if c.inn:
                 related_inns.add(c.inn)
-        if len(fl.founds) > 4:
-            section.append(f"{pad}  … и ещё {len(fl.founds) - 4}")
+        if len(founds) > 4:
+            section.append(f"{pad}  … и ещё {len(founds) - 4}")
 
-    if fl.sole_props:
-        section.append(f"{pad}ИП на этом ИНН: {len(fl.sole_props)}")
+    if sole:
+        section.append(f"{pad}ИП на этом ИНН: {len(sole)}")
 
 
 def _format_finance(card, security, company, inn: str) -> str:

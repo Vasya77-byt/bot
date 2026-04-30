@@ -832,14 +832,29 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
             company_name = (company.name if company else inn_part) or inn_part
             title = f"Отчёт о проверке: {company_name}"
-            content = build_kp_pdf(title, body, company)
+            try:
+                content = build_kp_pdf(title, body, company)
+            except Exception as exc:
+                logger.exception("PDF build failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось собрать PDF. "
+                    "Сохраните текст отчёта из чата или попробуйте ещё раз."
+                )
+                return
             filename = f"report_{inn_part}.pdf"
             doc = BytesIO(content)
             doc.name = filename
-            await callback_query.message.reply_document(
-                document=doc, file_name=filename,
-                caption=f"📄 Отчёт по ИНН {inn_part}",
-            )
+            try:
+                await callback_query.message.reply_document(
+                    document=doc, file_name=filename,
+                    caption=f"📄 Отчёт по ИНН {inn_part}",
+                )
+            except Exception as exc:
+                logger.exception("PDF send failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ PDF собрался, но Telegram отказался принимать файл. "
+                    "Сообщите в поддержку: @YRS75"
+                )
             return
 
         if action_part == "ca_ai" and inn_part:

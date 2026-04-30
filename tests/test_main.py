@@ -218,19 +218,23 @@ class TestInnPromptText:
         text = main._inn_prompt_text("mode_compare")
         assert "первой компании" in text
 
-    @pytest.mark.parametrize("action,word", [
-        ("mode_internal_analysis", "внутреннего анализа"),
-        ("mode_client_proposal", "коммерческого предложения"),
-        ("kp_pdf", "генерации КП (PDF)"),
-        ("kp_png", "генерации КП (PNG)"),
-        ("mode_mass_check", "массовой проверки"),
+    @pytest.mark.parametrize("action,title_word", [
+        ("mode_internal_analysis", "Внутренний анализ"),
+        ("mode_client_proposal",   "Коммерческое предложение"),
+        ("kp_pdf",                 "Генерация КП (PDF)"),
+        ("kp_png",                 "Генерация КП (PNG)"),
+        ("mode_mass_check",        "Массовая проверка"),
     ])
-    def test_known_actions_have_label(self, action, word):
-        assert word in main._inn_prompt_text(action)
+    def test_known_actions_have_label(self, action, title_word):
+        text = main._inn_prompt_text(action)
+        assert title_word in text
+        # Все промпты должны просить ИНН или название
+        assert "ИНН" in text and "НАЗВАНИЕ" in text
 
     def test_unknown_action_uses_default_label(self):
         text = main._inn_prompt_text("totally_new_action")
-        assert "обработки" in text
+        assert "Проверка компании" in text
+        assert "ИНН" in text and "НАЗВАНИЕ" in text
 
 
 class TestMatchReplyButton:

@@ -6,6 +6,7 @@
 """
 from io import BytesIO
 
+import pytest
 from PIL import Image
 
 import exports
@@ -133,11 +134,12 @@ class TestBuildKpPdf:
         data = build_kp_pdf("Title", "Body")
         assert data.startswith(b"%PDF-")
 
-    def test_works_without_truetype_font(self, monkeypatch):
+    def test_raises_when_font_not_found(self, monkeypatch):
+        # Без TTF-шрифта Helvetica не поддерживает кириллицу — лучше явно
+        # упасть с понятной ошибкой, чем выдавать сломанный PDF.
         monkeypatch.setattr(exports, "_FONT_SEARCH_PATHS", [])
-        data = build_kp_pdf("Title", "Body")
-        # Падать не должен — fallback на Helvetica
-        assert data.startswith(b"%PDF-")
+        with pytest.raises(exports.FontNotFoundError):
+            build_kp_pdf("Title", "Body")
 
 
 class TestBuildKpPng:

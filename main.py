@@ -836,10 +836,15 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 content = build_kp_pdf(title, body, company)
             except Exception as exc:
                 logger.exception("PDF build failed for %s: %s", inn_part, exc)
-                await callback_query.message.reply_text(
-                    "⚠️ Не удалось собрать PDF. "
-                    "Сохраните текст отчёта из чата или попробуйте ещё раз."
-                )
+                error_text = "⚠️ Не удалось собрать PDF.\n"
+                if "шрифт не найден" in str(exc).lower() or "font" in str(exc).lower():
+                    error_text += (
+                        "На сервере не установлен шрифт с поддержкой кириллицы. "
+                        "Сообщите в поддержку: @YRS75"
+                    )
+                else:
+                    error_text += "Сохраните текст отчёта из чата или попробуйте ещё раз."
+                await callback_query.message.reply_text(error_text)
                 return
             filename = f"report_{inn_part}.pdf"
             doc = BytesIO(content)

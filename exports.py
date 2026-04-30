@@ -9,11 +9,26 @@ from PIL import Image, ImageDraw, ImageFont
 
 from schemas import CompanyData
 
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 _FONT_SEARCH_PATHS = [
+    # Локально в проекте — самый надёжный путь, не зависит от ОС
+    os.path.join(_PROJECT_DIR, "assets", "DejaVuSans.ttf"),
+    os.path.join(_PROJECT_DIR, "DejaVuSans.ttf"),
+    # Системные пути (Linux / Ubuntu / Debian)
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/DejaVuSans.ttf",
+    # macOS
+    "/Library/Fonts/DejaVuSans.ttf",
+    # Windows (fallback)
     "C:/Windows/Fonts/arial.ttf",
 ]
+
+
+class FontNotFoundError(RuntimeError):
+    """Не найден TrueType-шрифт, поддерживающий кириллицу."""
 
 
 # Эмодзи, которые мы используем в текстовых отчётах. DejaVu/Helvetica их
@@ -116,22 +131,24 @@ def _find_truetype_font() -> Optional[str]:
 
 
 def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -> bytes:
+    font_path = _find_truetype_font()
+    if not font_path:
+        # Helvetica не поддерживает кириллицу — без TTF не получим
+        # читаемый PDF. Бросаем явное исключение, обработчик ловит и
+        # показывает осмысленное сообщение.
+        raise FontNotFoundError(
+            "TrueType-шрифт не найден. Установите fonts-dejavu-core "
+            "(apt-get install fonts-dejavu-core) или положите "
+            "DejaVuSans.ttf в каталог проекта."
+        )
+
     pdf = FPDF()
     pdf.add_page()
-
-    font_path = _find_truetype_font()
-    if font_path:
-        pdf.add_font("CustomFont", "", font_path)
-        pdf.set_font("CustomFont", size=14)
-    else:
-        pdf.set_font("Helvetica", size=14)
-
+    pdf.add_font("CustomFont", "", font_path)
+    pdf.set_font("CustomFont", size=14)
     pdf.cell(0, 10, text=_pdf_safe(title), new_x="LMARGIN", new_y="NEXT")
 
-    if font_path:
-        pdf.set_font("CustomFont", size=11)
-    else:
-        pdf.set_font("Helvetica", size=11)
+    pdf.set_font("CustomFont", size=11)
 
     if company:
         pdf.multi_cell(0, 8, text=_pdf_safe(_company_block(company)))

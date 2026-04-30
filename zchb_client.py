@@ -703,86 +703,72 @@ class ZchbClient:
 
     @staticmethod
     def _parse_inspection(raw: Dict[str, Any]) -> Optional[InspectionRecord]:
+        """Парсит одну запись из ответа метода proverki.
+
+        Реальная структура ЗЧБ (XML→JSON): все поля в @attributes блоках.
+        Пример record["@attributes"]["ERPID"], record["I_AUTHORITY"]["@attributes"]["FRGU_ORG_NAME"].
+        """
         if not isinstance(raw, dict):
             return None
 
-        # ЗЧБ возвращает разные форматы обёрток. Базовые поля
-        # (ERPID/ITYPE_NAME/...) могут быть:
-        # 1) прямо в raw
-        # 2) в raw["item"] (dict)
-        # 3) в raw["item"][0] (list — XML-сериализация)
-        # Соберём кандидатов и возьмём первый где есть ERPID или ITYPE_NAME.
-        candidates: List[Dict[str, Any]] = [raw]
-        item = raw.get("item")
-        if isinstance(item, dict):
-            candidates.append(item)
-        elif isinstance(item, list):
-            for it in item:
-                if isinstance(it, dict):
-                    candidates.append(it)
-
-        head: Dict[str, Any] = raw
-        for c in candidates:
-            if any(k in c for k in ("ERPID", "ITYPE_NAME", "FZ_NAME", "START_DATE")):
-                head = c
-                break
+        attrs = raw.get("@attributes")
+        if not isinstance(attrs, dict):
+            attrs = {}
 
         rec = InspectionRecord(
-            erp_id=str(head.get("ERPID") or ""),
-            inspection_type=str(head.get("ITYPE_NAME") or ""),
-            fz=str(head.get("FZ_NAME") or ""),
-            prosecutor=str(head.get("PROSEC_NAME") or ""),
-            start_date=str(head.get("START_DATE") or ""),
-            status=str(head.get("STATUS") or ""),
+            erp_id=str(attrs.get("ERPID") or ""),
+            inspection_type=str(attrs.get("ITYPE_NAME") or ""),
+            fz=str(attrs.get("FZ_NAME") or ""),
+            prosecutor=str(attrs.get("PROSEC_NAME") or ""),
+            start_date=str(attrs.get("START_DATE") or ""),
+            status=str(attrs.get("STATUS") or ""),
         )
 
-        def _unwrap(node: Any) -> Optional[Dict[str, Any]]:
-            """Рекурсивно ищет dict с полезными полями внутри nested item-обёрток."""
+        def _attrs(node: Any) -> Dict[str, Any]:
+            """Достаёт @attributes из dict, либо пустой dict."""
             if isinstance(node, dict):
-                # Если есть item — заглядываем глубже
-                inner = node.get("item")
-                if isinstance(inner, dict):
-                    return inner
-                if isinstance(inner, list) and inner:
-                    if isinstance(inner[0], dict):
-                        return inner[0]
-                return node
-            if isinstance(node, list) and node:
-                first = node[0]
-                if isinstance(first, dict):
-                    return _unwrap(first)
-            return None
+                a = node.get("@attributes")
+                if isinstance(a, dict):
+                    return a
+            return {}
 
         # I_AUTHORITY — орган контроля
-        auth = _unwrap(raw.get("I_AUTHORITY"))
-        if auth:
-            rec.authority = str(auth.get("FRGU_ORG_NAME") or "")
+        auth = _attrs(raw.get("I_AUTHORITY"))
+        rec.authority = str(auth.get("FRGU_ORG_NAME") or "")
 
-        # I_CLASSIFICATION
-        cls_block = _unwrap(raw.get("I_CLASSIFICATION"))
-        if cls_block:
-            rec.carryout_form = str(cls_block.get("ICARRYOUT_TYPE_NAME") or "")
-            rec.risk_category = str(cls_block.get("IRISK_NAME") or "")
+        # I_CLASSIFICATION — форма проведения и категория риска
+        cls_attrs = _attrs(raw.get("I_CLASSIFICATION"))
+        rec.carryout_form = str(cls_attrs.get("ICARRYOUT_TYPE_NAME") or "")
+        rec.risk_category = str(cls_attrs.get("IRISK_NAME") or "")
+        # Если форма не указана — берём вид надзора (полезный контекст)
+        if not rec.carryout_form:
+            rec.carryout_form = str(cls_attrs.get("ISUPERVISION_NAME") or "")
 
-        # I_OBJECT[].I_RESULT — даты окончания и наличие нарушений
+        # I_OBJECT может быть dict или list. Обходим всё.
         objects = raw.get("I_OBJECT")
+        if isinstance(objects, dict):
+            objects = [objects]
         if isinstance(objects, list):
             for obj in objects:
                 if not isinstance(obj, dict):
                     continue
-                ir_block = _unwrap(obj.get("I_RESULT"))
-                if ir_block:
-                    end_date = str(ir_block.get("ACT_DATE_CREATE") or "")
-                    if end_date and not rec.end_date:
-                        rec.end_date = end_date
-                if obj.get("I_VIOLATION") or (
-                    isinstance(obj.get("I_RESULT"), list)
-                    and any(
-                        isinstance(r, dict) and r.get("I_VIOLATION")
-                        for r in obj["I_RESULT"]
-                    )
-                ):
-                    rec.has_violations = True
+                # I_RESULT тоже может быть dict или list
+                res_block = obj.get("I_RESULT")
+                if isinstance(res_block, dict):
+                    res_block = [res_block]
+                if isinstance(res_block, list):
+                    for res in res_block:
+                        if not isinstance(res, dict):
+                            continue
+                        res_attrs = _attrs(res)
+                        end = str(res_attrs.get("ACT_DATE_CREATE") or "")
+                        if end and not rec.end_date:
+                            rec.end_date = end
+                        # I_VIOLATION есть всегда, но поля null если нарушений нет
+                        viol_attrs = _attrs(res.get("I_VIOLATION"))
+                        if (viol_attrs.get("VIOLATION_NOTE")
+                                or viol_attrs.get("IVIOLATION_TYPE_NAME")):
+                            rec.has_violations = True
 
         return rec
 

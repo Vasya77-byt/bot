@@ -218,11 +218,25 @@ async def _ensure_onboarded(client, message) -> bool:
     return False
 
 
-def _profile_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def _profile_keyboard(profile=None) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("📋 Мои компании", callback_data="my_companies")],
         [InlineKeyboardButton("🤝 Реферальная программа", callback_data="referral_show")],
-    ])
+    ]
+    # Кнопка управления автопродлением — только для платников с активной
+    # подпиской. Подписка не отменяется здесь и сейчас, отключается только
+    # авто-списание.
+    if (profile is not None and profile.tariff != "free"
+            and profile.is_subscription_active()):
+        if profile.auto_renew:
+            rows.append([InlineKeyboardButton(
+                "🛑 Отменить автопродление", callback_data="sub_cancel"
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                "✅ Включить автопродление", callback_data="sub_enable"
+            )])
+    return InlineKeyboardMarkup(rows)
 
 
 def _my_companies_text(user_id: int) -> str:
@@ -1710,6 +1724,51 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         )
         return
 
+    # Управление автопродлением подписки (из карточки профиля)
+    if data == "sub_cancel":
+        await callback_query.answer()
+        profile = user_store.get(user_id)
+        if profile.tariff == "free" or not profile.is_subscription_active():
+            await callback_query.message.reply_text(
+                "У вас нет активной платной подписки."
+            )
+            return
+        # Если подключены платежи — отменяем подписку и в Точке.
+        # В любом случае выключаем auto_renew локально.
+        if subscription_service is not None:
+            try:
+                await subscription_service.cancel_user_subscription(user_id)
+            except Exception as exc:
+                logger.warning("sub_cancel via Tochka failed: %s", exc)
+                user_store.disable_auto_renew(user_id)
+        else:
+            user_store.disable_auto_renew(user_id)
+        profile = user_store.get(user_id)
+        expires = profile.tariff_expires_at[:10] if profile.tariff_expires_at else "—"
+        await callback_query.message.reply_text(
+            "🔕 Автопродление отключено.\n\n"
+            f"Подписка останется активной до {expires}, "
+            "после этого тариф переключится на Free.\n\n"
+            "Можно включить обратно в любой момент — кнопка появится "
+            "в карточке профиля."
+        )
+        return
+
+    if data == "sub_enable":
+        await callback_query.answer()
+        profile = user_store.get(user_id)
+        if profile.tariff == "free" or not profile.is_subscription_active():
+            await callback_query.message.reply_text(
+                "Сначала оформите подписку через «💎 Тарифы»."
+            )
+            return
+        user_store.enable_auto_renew(user_id)
+        await callback_query.message.reply_text(
+            "🔔 Автопродление включено.\n\n"
+            "Тариф будет автоматически продлеваться по окончании срока."
+        )
+        return
+
     # Открыть свежий отчёт по компании из списка «Мои компании»
     if data.startswith("mc_open:"):
         await callback_query.answer()
@@ -1888,7 +1947,7 @@ async def handle_text_message(client: Client, message) -> None:
             mon_limit = _monitoring_limit(profile)
             await message.reply_text(
                 render_profile(profile, mon_count, mon_limit),
-                reply_markup=_profile_keyboard(),
+                reply_markup=_profile_keyboard(profile),
             )
             return
         # Остальные действия — запрашиваем ИНН

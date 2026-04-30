@@ -1297,9 +1297,15 @@ def _inn_prompt_text(action: str) -> str:
         "mode_mass_check": "массовой проверки",
     }
     if action == "mode_compare":
-        return "Отправьте ИНН первой компании (10 или 12 цифр):"
+        return (
+            "Отправьте ИНН первой компании (10 или 12 цифр) "
+            "или её название."
+        )
     label = labels.get(action, "обработки")
-    return f"Для {label} отправьте ИНН компании (10 или 12 цифр):"
+    return (
+        f"Для {label} отправьте ИНН компании (10 или 12 цифр) "
+        f"или её название (например, «ООО Ромашка»)."
+    )
 
 
 async def handle_callback(client: Client, callback_query: CallbackQuery) -> None:
@@ -1955,10 +1961,30 @@ async def handle_text_message(client: Client, message) -> None:
         await _dispatch_action(message, pending_action, parsed, company)
         return
     elif pending_action and not parsed.inn:
-        # Не ИНН — сбрасываем состояние, не застреваем
+        # Не ИНН — пробуем найти по названию через DaData suggest
+        if _looks_like_company_query(text):
+            suggestions = await company_service.suggest(text.strip(), count=5)
+            if suggestions:
+                # Возвращаем pending_action на место — пусть пользователь
+                # сначала выберет компанию из списка, потом получит отчёт
+                # через search_select callback.
+                await message.reply_text(
+                    f"🔎 По запросу «{text.strip()}» найдено "
+                    f"{len(suggestions)}. Выберите компанию для проверки:",
+                    reply_markup=_search_results_keyboard(suggestions),
+                )
+                return
+            await message.reply_text(
+                f"🔎 По запросу «{text.strip()}» ничего не найдено.\n\n"
+                "Попробуйте другое начало названия или отправьте ИНН "
+                "напрямую (10 или 12 цифр)."
+            )
+            return
+        # Совсем не похоже на название (например, «привет») — сбрасываем
         await message.reply_text(
-            "⚠️ Не распознала ИНН. Состояние сброшено.\n\n"
-            "Отправьте ИНН (10 или 12 цифр) или нажмите /menu для выбора действия."
+            "⚠️ Не распознала ИНН или название. Состояние сброшено.\n\n"
+            "Отправьте ИНН (10 или 12 цифр) или название компании, "
+            "либо нажмите /menu для выбора действия."
         )
         return
 

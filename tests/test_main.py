@@ -694,13 +694,55 @@ class TestHandleTextMessage:
         assert "ИНН" in msg.replies[0]["text"]
 
     @pytest.mark.asyncio
-    async def test_pending_action_with_invalid_inn_resets(self):
+    async def test_pending_action_with_short_input_resets(self):
+        """Слишком короткий ввод (не ИНН и не похоже на название) —
+        сбрасываем pending_action чтобы юзер не застрял."""
         main._user_state[1] = "mode_internal_analysis"
-        msg = FakeMessage(text="не ИНН", user_id=1)
+        msg = FakeMessage(text="X", user_id=1)
         await main.handle_text_message(client=None, message=msg)
         # Состояние сброшено
         assert 1 not in main._user_state
         assert "сброшено" in msg.replies[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_pending_action_with_company_name_runs_suggest(
+        self, monkeypatch,
+    ):
+        """При pending_action + ввод похож на название → suggest через
+        DaData, показ списка для выбора."""
+        main._user_state[1] = "mode_internal_analysis"
+        suggested = [
+            CompanyData(inn="7707083893", name="ПАО Сбербанк"),
+            CompanyData(inn="7728168971", name="ПАО Газпром"),
+        ]
+
+        async def fake_suggest(query, count=5):
+            return suggested
+
+        monkeypatch.setattr(main.company_service, "suggest", fake_suggest)
+        msg = FakeMessage(text="сбербанк", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        # Прислано сообщение с клавиатурой выбора
+        assert any("найдено" in r["text"].lower() for r in msg.replies)
+        last = msg.replies[-1]
+        assert last.get("reply_markup") is not None
+
+    @pytest.mark.asyncio
+    async def test_pending_action_with_unknown_name_friendly_fallback(
+        self, monkeypatch,
+    ):
+        """pending_action + suggest пуст → дружелюбное сообщение
+        без сброса состояния (юзер может ввести ИНН напрямую)."""
+        main._user_state[1] = "mode_internal_analysis"
+
+        async def fake_suggest(query, count=5):
+            return []
+
+        monkeypatch.setattr(main.company_service, "suggest", fake_suggest)
+        msg = FakeMessage(text="несуществующая компания", user_id=1)
+        await main.handle_text_message(client=None, message=msg)
+        joined = " ".join(r["text"] for r in msg.replies)
+        assert "ничего не найдено" in joined.lower()
 
     @pytest.mark.asyncio
     async def test_compare_step1_asks_for_second_inn(self, monkeypatch):
@@ -1557,17 +1599,21 @@ class TestSearchTrigger:
         assert msg.replies
 
     @pytest.mark.asyncio
-    async def test_search_skipped_when_pending_action(self, monkeypatch):
-        # При активном pending state поиск не должен запускаться
-        async def must_not_be_called(query, count=5):
-            raise AssertionError("suggest must not be called with pending state")
+    async def test_search_runs_when_pending_action_and_not_inn(self, monkeypatch):
+        """С новой логикой: при pending_action и вводе названия — suggest
+        ДОЛЖЕН запускаться (раньше бот сразу сбрасывал состояние)."""
+        called: list[str] = []
 
-        monkeypatch.setattr(main.company_service, "suggest", must_not_be_called)
+        async def fake_suggest(query, count=5):
+            called.append(query)
+            return [CompanyData(inn="7707083893", name="ПАО Сбербанк")]
+
+        monkeypatch.setattr(main.company_service, "suggest", fake_suggest)
         main._user_state[1] = "mode_internal_analysis"
-        msg = FakeMessage(text="название без инн", user_id=1)
+        msg = FakeMessage(text="сбербанк", user_id=1)
         await main.handle_text_message(client=None, message=msg)
-        # Должно быть сообщение про сброс состояния
-        assert "сброшено" in msg.replies[0]["text"].lower()
+        assert called, "suggest должен запуститься при pending_action и названии"
+        assert any("найдено" in r["text"].lower() for r in msg.replies)
 
 
 class TestSearchSelectCallback:

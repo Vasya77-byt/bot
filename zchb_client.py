@@ -284,6 +284,11 @@ class CardSummary:
     # Массовые директора/учредители (по первому руководителю)
     director_is_mass_leader: bool = False
     director_namesake_count: int = 0   # сколько тёзок-директоров с такими же ФИО
+    # Текущий руководитель (для рендера в истории и связях)
+    director_name: str = ""             # ФИО
+    director_inn: str = ""              # ИНН ФЛ
+    director_position: str = ""         # «ДИРЕКТОР», «ГЕНЕРАЛЬНЫЙ ДИРЕКТОР» и т.п.
+    director_started_at: str = ""       # ISO-дата вступления в должность
     founder_is_mass: bool = False
 
     # Сотрудники, фонд, ЗП
@@ -1382,7 +1387,8 @@ class ZchbClient:
                 if isinstance(item, dict):
                     result.tax_debt_sum += _money(item.get("ОбщСумНедоим"))
 
-        # Первый руководитель — флаги массовости и тёзок
+        # Первый руководитель — флаги массовости и тёзок + сохраняем
+        # ФИО/ИНН/должность для отображения текущего директора в отчётах.
         leaders = body.get("Руководители")
         if isinstance(leaders, list) and leaders:
             first = leaders[0]
@@ -1395,6 +1401,11 @@ class ZchbClient:
                     boss = aff.get("boss") or {}
                     if isinstance(boss, dict):
                         result.director_namesake_count = _int(boss.get("namesake"))
+                # Текущий директор
+                result.director_name = str(first.get("fl") or "").strip()
+                result.director_inn = str(first.get("inn") or "").strip()
+                result.director_position = str(first.get("post") or "").strip()
+                result.director_started_at = str(first.get("date") or "").strip()
 
         # Учредители — полный список с долями + флаг массовости первого
         founders_block = body.get("СвУчредит") or {}

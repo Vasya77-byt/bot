@@ -403,32 +403,30 @@ def _format_egrul_history(records, ogrn: str) -> str:
     return "\n".join(lines)
 
 
-def _format_history(card, events, inn: str) -> str:
-    """Структурированная история изменений компании по разделам:
+def _format_history(card, events, inn: str, company=None) -> str:
+    """Текущее состояние + лента свежих изменений по разделам:
     директор / учредители / адрес / ОКВЭД / наименование / капитал.
 
-    `events` — список CompanyChangeEvent от ZchbClient.get_diffs(ogrn).
-    Внутри каждого раздела события сортируются от свежих (🔹 «Действует с»)
-    к старым (🔸 «Действовал с»). Если в разделе ничего не было —
-    раздел выводится с пометкой «✅ Не менялся».
+    Структура раздела:
+    - 🔹 ТЕКУЩЕЕ значение из card/company (всегда видно)
+    - 🔸 Историческое из events (если есть)
+    - Если ни того ни другого — ✅ Не менялся
+
+    ВАЖНО: метод diffs ЗЧБ возвращает только свежие изменения
+    (~6-12 месяцев), не полную биографию с момента регистрации.
     """
     name = ""
     if card is not None:
         name = card.name_short or card.name_full or ""
+    elif company is not None and company.name:
+        name = company.name
 
     title_lines = ["📜 История изменений"]
     if name:
         title_lines.append(name)
     title_lines.append(f"ИНН {inn}")
 
-    if not events:
-        return "\n".join(title_lines + [
-            "",
-            "В открытых источниках значимых изменений не найдено.",
-            "Возможные причины:",
-            "• Свежая компания без изменений в ЕГРЮЛ",
-            "• Уже была закрыта/реорганизована давно",
-        ])
+    events = events or []
 
     # Группируем события по типу
     by_field: dict[str, list] = {
@@ -462,109 +460,185 @@ def _format_history(card, events, inn: str) -> str:
     section = ["━━━ 👤 РУКОВОДИТЕЛЬ ━━━"]
     director_events = by_field["director"]
     director_events.sort(key=lambda e: e.timestamp, reverse=True)
-    if not director_events:
-        section.append("✅ Не менялся")
-    else:
-        # Дедупликация по ФИО+позиции — несколько событий с одним
-        # человеком сжимаем
-        seen_keys = set()
-        unique_dirs = []
-        for ev in director_events:
-            key = (ev.person_name, ev.extra)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            unique_dirs.append(ev)
-        for i, ev in enumerate(unique_dirs[:8]):
-            marker = "🔹" if i == 0 else "🔸"
-            verb = "Действует с" if i == 0 else "Действовал с"
-            line = f"{marker} {ev.person_name}"
-            if ev.person_inn:
-                line += f" (ИНН {ev.person_inn})"
-            section.append(line)
-            if ev.extra:
-                section.append(f"   {ev.extra}")
-            section.append(f"   {verb} {_fmt_date(ev)}")
-        if len(unique_dirs) >= 5:
-            section.append(f"⚠️ Директор менялся {len(unique_dirs)} раз")
+
+    # Текущий директор из card
+    current_director_added = False
+    if card and card.director_name:
+        line = f"🔹 {card.director_name}"
+        if card.director_inn:
+            line += f" (ИНН {card.director_inn})"
+        section.append(line)
+        if card.director_position:
+            section.append(f"   {card.director_position}")
+        if card.director_started_at:
+            section.append(f"   Действует с {card.director_started_at[:10]}")
+        current_director_added = True
+
+    # Исторические события — показываем только если ФИО не совпадает с текущим
+    seen_keys = set()
+    if card and card.director_name:
+        seen_keys.add((card.director_name.upper(), ""))
+    historical_dirs = []
+    for ev in director_events:
+        key = (ev.person_name.upper(), ev.extra)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        historical_dirs.append(ev)
+
+    for ev in historical_dirs[:5]:
+        line = f"🔸 {ev.person_name}"
+        if ev.person_inn:
+            line += f" (ИНН {ev.person_inn})"
+        section.append(line)
+        if ev.extra:
+            section.append(f"   {ev.extra}")
+        section.append(f"   Действовал с {_fmt_date(ev)}")
+
+    if not current_director_added and not historical_dirs:
+        section.append("Данных о руководителе нет в открытых источниках")
     sections.append("\n".join(section))
 
     # ── Учредители ──
     section = ["━━━ 👥 УЧРЕДИТЕЛИ ━━━"]
     founder_events = by_field["founders"]
     founder_events.sort(key=lambda e: e.timestamp, reverse=True)
-    if not founder_events:
-        section.append("✅ Не менялись")
-    else:
-        for i, ev in enumerate(founder_events[:8]):
-            marker = "🔹" if i == 0 else "🔸"
-            verb = "Действует с" if i == 0 else "Действовал с"
-            line = f"{marker} {ev.summary}"
-            if ev.person_inn:
-                line += f" (ИНН {ev.person_inn})"
+
+    # Текущие учредители из card
+    current_founders = (card.founders if card else []) or []
+    if current_founders:
+        for f in current_founders[:5]:
+            line = f"🔹 {f.name or 'Неизвестно'}"
+            if f.inn:
+                line += f" (ИНН {f.inn})"
+            if f.share_pct > 0:
+                line += f" — доля {f.share_pct:g}%"
+            elif f.share_abs > 0:
+                line += f" — {_fmt_money(f.share_abs)}"
             section.append(line)
-            section.append(f"   {verb} {_fmt_date(ev)}")
+            if f.started_at:
+                section.append(f"   Действует с {f.started_at}")
+        if len(current_founders) > 5:
+            section.append(f"… и ещё {len(current_founders) - 5} учредителей")
+
+    # Исторические события — учредители которых уже нет в текущем составе
+    current_inns = {f.inn for f in current_founders if f.inn}
+    historical_founders = [
+        ev for ev in founder_events
+        if ev.person_inn and ev.person_inn not in current_inns
+    ]
+    for ev in historical_founders[:3]:
+        line = f"🔸 {ev.summary}"
+        if ev.person_inn:
+            line += f" (ИНН {ev.person_inn})"
+        section.append(line)
+        section.append(f"   Действовал с {_fmt_date(ev)}")
+
+    if not current_founders and not historical_founders:
+        section.append("Данных об учредителях нет в открытых источниках")
     sections.append("\n".join(section))
 
     # ── Адрес ──
     section = ["━━━ 📍 АДРЕС ━━━"]
     address_events = by_field["address"]
     address_events.sort(key=lambda e: e.timestamp, reverse=True)
-    if not address_events:
+
+    # Текущий адрес из company
+    current_address = ""
+    if company and company.address:
+        current_address = company.address
+    if current_address:
+        section.append(f"🔹 {current_address[:150]}")
+        if company.reg_date:
+            section.append(f"   В ЕГРЮЛ с {company.reg_date}")
+
+    # Исторические — только если адрес отличается от текущего
+    norm_current = current_address.lower().replace(" ", "").replace(",", "")[:50]
+    historical_addrs = []
+    seen_norms = {norm_current} if norm_current else set()
+    for ev in address_events:
+        norm = ev.summary.lower().replace(" ", "").replace(",", "")[:50]
+        if norm in seen_norms:
+            continue
+        seen_norms.add(norm)
+        historical_addrs.append(ev)
+
+    for ev in historical_addrs[:3]:
+        section.append(f"🔸 {ev.summary[:120]}")
+        section.append(f"   Действовал с {_fmt_date(ev)}")
+
+    if not current_address and not historical_addrs:
         section.append("✅ Не менялся")
-    else:
-        # Дедупликация одинаковых адресов (только косметика)
-        unique_addrs = []
-        seen_addrs = set()
-        for ev in address_events:
-            normalized = ev.summary.lower().replace(" ", "").replace(",", "")
-            if normalized in seen_addrs:
-                continue
-            seen_addrs.add(normalized)
-            unique_addrs.append(ev)
-        for i, ev in enumerate(unique_addrs[:5]):
-            marker = "🔹" if i == 0 else "🔸"
-            verb = "Действует с" if i == 0 else "Действовал с"
-            section.append(f"{marker} {ev.summary[:120]}")
-            section.append(f"   {verb} {_fmt_date(ev)}")
-        if len(address_events) > 1 and len(unique_addrs) == 1:
-            section.append("✅ Адрес фактически не менялся (только формальные правки)")
     sections.append("\n".join(section))
 
     # ── Основной ОКВЭД ──
     section = ["━━━ 🏷 ОКВЭД ━━━"]
-    if not okved_all:
+    # Текущий ОКВЭД из company
+    if company and company.okved_main:
+        line = f"🔹 {company.okved_main}"
+        if company.okved_name:
+            line += f" — {company.okved_name}"
+        section.append(line[:200])
+
+    # Исторические из events — только если код отличается
+    current_code = (company.okved_main if company else "") or ""
+    seen_codes = {current_code} if current_code else set()
+    historical_okveds = []
+    for ev in okved_all:
+        # Извлекаем код из summary "X.YZ — название"
+        code_part = ev.summary.split("—")[0].strip().split()[0] if ev.summary else ""
+        if code_part in seen_codes:
+            continue
+        seen_codes.add(code_part)
+        historical_okveds.append(ev)
+
+    for ev in historical_okveds[:5]:
+        section.append(f"🔸 {ev.summary[:120]}")
+        section.append(f"   Действовал с {_fmt_date(ev)}")
+
+    if not (company and company.okved_main) and not historical_okveds:
         section.append("✅ Не менялся")
-    else:
-        # Берём только первые 5 (свежие)
-        for i, ev in enumerate(okved_all[:5]):
-            marker = "🔹" if i == 0 else "🔸"
-            verb = "Действует с" if i == 0 else "Действовал с"
-            section.append(f"{marker} {ev.summary[:120]}")
-            section.append(f"   {verb} {_fmt_date(ev)}")
-        if len(okved_all) > 5:
-            section.append(f"… и ещё {len(okved_all) - 5} изменений")
     sections.append("\n".join(section))
 
     # ── Наименование ──
     section = ["━━━ 📛 НАИМЕНОВАНИЕ ━━━"]
     name_events = by_field["name"]
     name_events.sort(key=lambda e: e.timestamp, reverse=True)
-    if not name_events:
+    current_name = ""
+    if card:
+        current_name = card.name_full or card.name_short or ""
+    if current_name:
+        section.append(f"🔹 {current_name[:120]}")
+    seen_names = {current_name.upper().strip()} if current_name else set()
+    historical_names = []
+    for ev in name_events:
+        n = ev.summary.upper().strip()
+        if n in seen_names:
+            continue
+        seen_names.add(n)
+        historical_names.append(ev)
+    for ev in historical_names[:3]:
+        section.append(f"🔸 {ev.summary[:100]}")
+        section.append(f"   Действовало с {_fmt_date(ev)}")
+    if not current_name and not historical_names:
         section.append("✅ Не менялось")
-    else:
-        for i, ev in enumerate(name_events[:5]):
-            marker = "🔹" if i == 0 else "🔸"
-            verb = "Действует с" if i == 0 else "Действовало с"
-            section.append(f"{marker} {ev.summary[:100]}")
-            section.append(f"   {verb} {_fmt_date(ev)}")
     sections.append("\n".join(section))
 
     # ── Уставный капитал ──
     section = ["━━━ 💰 УСТАВНЫЙ КАПИТАЛ ━━━"]
     cap_events = by_field["capital"]
     cap_events.sort(key=lambda e: e.timestamp, reverse=True)
-    if not cap_events:
+    current_capital = 0
+    if card and card.capital:
+        current_capital = card.capital
+    elif company and company.capital:
+        current_capital = company.capital
+    if current_capital:
+        section.append(f"🔹 {_fmt_money(current_capital)}")
+    for ev in cap_events[:3]:
+        section.append(f"🔸 {ev.summary}")
+        section.append(f"   Действовал с {_fmt_date(ev)}")
+    if not current_capital and not cap_events:
         section.append("✅ Не менялся")
     else:
         for i, ev in enumerate(cap_events[:5]):
@@ -1212,25 +1286,26 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 "📜 Собираю историю изменений компании..."
             )
-            # Метод diffs ЗЧБ принимает только ОГРН — берём его из card
+            company = await company_service.fetch(inn_part)
             try:
                 card = await zchb.get_card(inn_part)
             except Exception as exc:
                 logger.exception("ca_history: get_card failed: %s", exc)
                 card = None
-            ogrn = (card.ogrn if card else "") or ""
-            if not ogrn:
-                await callback_query.message.reply_text(
-                    "⚠️ Не удалось определить ОГРН для запроса истории."
-                )
-                return
+            ogrn = ""
+            if card and card.ogrn:
+                ogrn = card.ogrn
+            elif company and company.ogrn:
+                ogrn = company.ogrn
+            events = None
+            if ogrn:
+                try:
+                    events = await zchb.get_diffs(ogrn)
+                except Exception as exc:
+                    logger.exception("ca_history: get_diffs failed: %s", exc)
+                    events = None
             try:
-                events = await zchb.get_diffs(ogrn)
-            except Exception as exc:
-                logger.exception("ca_history: get_diffs failed: %s", exc)
-                events = None
-            try:
-                text = _format_history(card, events, inn_part)
+                text = _format_history(card, events, inn_part, company)
             except Exception as exc:
                 logger.exception("ca_history: format failed: %s", exc)
                 await callback_query.message.reply_text(

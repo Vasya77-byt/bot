@@ -610,86 +610,250 @@ async def _format_links(card, inn: str) -> str:
     return "\n".join(lines)
 
 
-def _format_finance(card, inn: str) -> str:
-    """Текстовый рендер финансового раздела по компании."""
-    if card is None:
-        return (
-            f"📊 Финансы (ИНН {inn})\n\n"
-            "Не удалось получить данные. Попробуйте позже."
+def _format_finance(card, security, company, inn: str) -> str:
+    """Финансовый отчёт по компании. Структурирован по разделам с
+    подсветкой 🔴/🟡/✅, чтобы новичок сразу видел на что обратить внимание.
+
+    Источники: ZCHB card (выручка/налоги/задолженности/контракты),
+    SecurityResult (ФССП, индекс ЗЧБ), CompanyData (имя, капитал-fallback).
+    """
+    name = ""
+    if company is not None and company.name:
+        name = company.name
+    elif card is not None and (card.name_short or card.name_full):
+        name = card.name_short or card.name_full
+
+    title_lines = ["📊 Финансы"]
+    if name:
+        title_lines.append(name)
+    title_lines.append(f"ИНН {inn}")
+
+    if card is None and security is None:
+        return "\n".join(title_lines + ["", "Не удалось получить данные. Попробуйте позже."])
+
+    sections: list[str] = []
+    findings: list[str] = []  # для блока «На что обратить внимание»
+
+    # ━━━ ВЫРУЧКА И ПРИБЫЛЬ ━━━
+    if card is not None and card.finance_history:
+        block = ["━━━ 💹 ВЫРУЧКА И ПРИБЫЛЬ ━━━"]
+        history = card.finance_history[:5]  # последние 5 лет
+        for f in history:
+            rev = int(f.revenue) if f.revenue else 0
+            prof = int(f.profit) if f.profit else 0
+            inc = int(f.income) if f.income else 0
+            exp = int(f.expense) if f.expense else 0
+            if rev or prof:
+                margin = (prof / rev * 100) if rev > 0 else 0
+                margin_str = f" (рент. {margin:.0f}%)" if rev > 0 else ""
+                block.append(
+                    f"{f.year}: {_fmt_money_short(rev)} выручки, "
+                    f"{_fmt_money_short(prof)} прибыли{margin_str}"
+                )
+            elif inc or exp:
+                block.append(
+                    f"{f.year} (УСН): доход {_fmt_money_short(inc)}, "
+                    f"расход {_fmt_money_short(exp)}"
+                )
+
+        # Тренд: сравнение последних 2 годов с непустой выручкой
+        revenues = [(f.year, f.revenue or f.income or 0) for f in history
+                    if (f.revenue or f.income or 0) > 0]
+        if len(revenues) >= 2:
+            current = revenues[0][1]
+            prev = revenues[1][1]
+            if prev > 0:
+                delta_pct = (current - prev) / prev * 100
+                if delta_pct >= 5:
+                    block.append(f"↗️ Выручка растёт: +{delta_pct:.0f}% к прошлому году")
+                elif delta_pct <= -5:
+                    block.append(f"↘️ Выручка падает: {delta_pct:.0f}% к прошлому году")
+                    findings.append(
+                        f"⚠️ Падение выручки на {abs(delta_pct):.0f}% "
+                        "год к году"
+                    )
+                else:
+                    block.append(f"→ Выручка стабильна ({delta_pct:+.0f}%)")
+
+        # Признак убыточности
+        last_profit = next(
+            (f.profit for f in history if f.profit is not None and f.profit != 0),
+            None,
         )
-    has_anything = (
-        card.tax_regime or card.finance_history or card.tax_violations_sum
-        or card.tax_debt_items or card.payroll_fund or card.avg_salary
-    )
-    if not has_anything:
-        return (
-            f"📊 Финансы (ИНН {inn})\n\n"
-            "Нет финансовых данных в открытых источниках.\n"
-            "Возможные причины:\n"
-            "• Компания на ОСНО (для банков/страховщиков отчётность ЦБ — не ФНС)\n"
-            "• Свежая регистрация без сданных отчётов"
+        if last_profit is not None and last_profit < 0:
+            findings.append(f"⚠️ Компания убыточна: {_fmt_money_short(int(last_profit))}")
+
+        sections.append("\n".join(block))
+
+    # ━━━ НАЛОГИ ━━━
+    tax_lines = ["━━━ 🏛 НАЛОГИ ━━━"]
+    has_tax_info = False
+    if card is not None and card.tax_regime:
+        tax_lines.append(f"Режим: {card.tax_regime}")
+        has_tax_info = True
+    if card is not None and card.msp_category:
+        tax_lines.append(f"Категория МСП: {card.msp_category}")
+        has_tax_info = True
+    if card is not None and card.tax_violations_sum > 0:
+        tax_lines.append(
+            f"💸 Налоговые штрафы за период: "
+            f"{_fmt_money_short(int(card.tax_violations_sum))}"
         )
+        has_tax_info = True
+        if card.tax_violations_history:
+            for year, summ in card.tax_violations_history[:3]:
+                tax_lines.append(f"   {year}: {_fmt_money_short(int(summ))}")
+    if has_tax_info:
+        sections.append("\n".join(tax_lines))
 
-    lines = [f"📊 Финансы (ИНН {inn})", ""]
+    # ━━━ ⚠️ ЗАДОЛЖЕННОСТИ ━━━
+    debts: list[str] = []
+    has_debts = False
+    fssp_count = security.enforcement_count if security else 0
+    fssp_sum = security.enforcement_total_sum if security else 0
+    if fssp_count > 0:
+        marker = "🔴" if fssp_sum > 1_000_000 or fssp_count > 10 else "🟡"
+        debts.append(
+            f"{marker} ФССП: {fssp_count} производств "
+            f"на {_fmt_money_short(int(fssp_sum))}"
+        )
+        if fssp_count > 10:
+            findings.append(f"🔴 Много исполнительных производств: {fssp_count}")
+        has_debts = True
+    else:
+        debts.append("✅ ФССП: исполнительных производств нет")
 
-    if card.tax_regime:
-        lines.append(f"💼 Налоговый режим: {card.tax_regime}")
-        lines.append("")
+    if card is not None:
+        if card.tax_debt_sum > 0:
+            marker = "🔴" if card.tax_debt_sum > 1_000_000 else "🟡"
+            debts.append(
+                f"{marker} Налоговая задолженность: "
+                f"{_fmt_money_short(int(card.tax_debt_sum))}"
+            )
+            has_debts = True
+            for item in card.tax_debt_items[:5]:
+                name_short = item.tax_name[:55].lower()
+                debts.append(
+                    f"   • {name_short}: {_fmt_money_short(int(item.total))}"
+                )
+            if card.tax_debt_sum > 1_000_000:
+                findings.append(
+                    f"🔴 Крупная налоговая задолженность: "
+                    f"{_fmt_money_short(int(card.tax_debt_sum))}"
+                )
+        else:
+            debts.append("✅ Налоговая задолженность: чисто")
 
-    # Тренд по годам
-    if card.finance_history:
-        lines.append("📈 Динамика по годам:")
-        for f in card.finance_history[:5]:  # последние 5 лет
-            if f.revenue or f.profit:
-                rev = _fmt_money_short(int(f.revenue))
-                prof = _fmt_money_short(int(f.profit))
-                lines.append(f"   {f.year}: выручка {rev}, прибыль {prof}")
-            elif f.income or f.expense:
-                inc = _fmt_money_short(int(f.income))
-                exp = _fmt_money_short(int(f.expense))
-                lines.append(f"   {f.year} (УСН): доход {inc}, расход {exp}")
-        lines.append("")
+        if card.in_debt_registry:
+            debts.append("🔴 В реестре ФНС: взыскиваемая судебными приставами задолженность")
+            findings.append("🔴 Включена в реестр ФНС по взыскиваемой задолженности")
+        else:
+            debts.append("✅ Реестр взыскиваемой задолженности ФНС: чисто")
 
-    # Сотрудники и зарплата
-    if card.payroll_fund or card.avg_salary or card.employees_count:
-        lines.append("👥 Персонал и оплата труда:")
+    sections.append("━━━ ⚠️ ЗАДОЛЖЕННОСТИ ━━━\n" + "\n".join(debts))
+
+    # ━━━ ПЕРСОНАЛ ━━━
+    if card is not None and (card.employees_count or card.payroll_fund or card.avg_salary):
+        block = ["━━━ 👥 ПЕРСОНАЛ ━━━"]
         if card.employees_count:
-            lines.append(f"   Сотрудников: {card.employees_count}")
+            block.append(f"Сотрудников: {card.employees_count}")
         if card.payroll_fund:
-            lines.append(
-                f"   Фонд оплаты труда: {_fmt_money_short(int(card.payroll_fund))}"
-            )
+            block.append(f"Фонд оплаты труда: {_fmt_money_short(int(card.payroll_fund))}")
         if card.avg_salary:
-            lines.append(
-                f"   Средняя ЗП: {_fmt_money_short(int(card.avg_salary))}"
+            block.append(f"Средняя ЗП: {_fmt_money_short(int(card.avg_salary))}")
+        # Выручка на сотрудника — только если есть и выручка, и штат
+        last_revenue = 0
+        if card.finance_history:
+            last_revenue = next(
+                (f.revenue for f in card.finance_history if f.revenue and f.revenue > 0),
+                0,
             )
-        lines.append("")
+        if last_revenue and card.employees_count:
+            per_emp = last_revenue / card.employees_count
+            block.append(
+                f"Выручка на сотрудника: {_fmt_money_short(int(per_emp))}/год"
+            )
+        sections.append("\n".join(block))
 
-    # Налоговые штрафы
-    if card.tax_violations_sum > 0 or card.tax_violations_history:
-        lines.append("💸 Налоговые штрафы:")
-        if card.tax_violations_sum > 0:
-            lines.append(
-                f"   Сумма за период: "
-                f"{_fmt_money_short(int(card.tax_violations_sum))}"
+    # ━━━ ГОСКОНТРАКТЫ ━━━
+    if card is not None and (
+        card.contracts_supplier_count or card.contracts_customer_count
+    ):
+        block = ["━━━ 📦 ГОСКОНТРАКТЫ ━━━"]
+        if card.contracts_supplier_count:
+            block.append(
+                f"Поставщик: {card.contracts_supplier_count} контрактов "
+                f"на {_fmt_money_short(int(card.contracts_supplier_sum))}"
             )
-        for year, summ in card.tax_violations_history[:5]:
-            lines.append(
-                f"   {year}: {_fmt_money_short(int(summ))}"
+        if card.contracts_customer_count:
+            block.append(
+                f"Заказчик: {card.contracts_customer_count} "
+                f"на {_fmt_money_short(int(card.contracts_customer_sum))}"
             )
-        lines.append("")
+        if card.contracts_supplier_count > 50:
+            block.append("✅ Активный поставщик государства")
+        if card.is_unreliable_supplier:
+            block.append("🔴 В реестре недобросовестных поставщиков (ФАС)")
+            findings.append("🔴 В реестре недобросовестных поставщиков ФАС")
+        sections.append("\n".join(block))
 
-    # Подробности недоимок
-    if card.tax_debt_items:
-        lines.append("⚠️ Налоговые недоимки и задолженности:")
-        for item in card.tax_debt_items[:10]:
-            name = (item.tax_name[:60] + "…") if len(item.tax_name) > 63 else item.tax_name
-            lines.append(
-                f"   • {name}: {_fmt_money_short(int(item.total))}"
+    # ━━━ КАПИТАЛ И ЛИЦЕНЗИИ ━━━
+    capital_block = []
+    cap_value = (card.capital if card and card.capital
+                 else (company.capital if company and company.capital else 0))
+    if cap_value:
+        cap_str = _fmt_money_short(int(cap_value))
+        capital_block.append(f"Уставный капитал: {cap_str}")
+        if cap_value <= 10_000:
+            capital_block.append(
+                "🟡 Минимальный размер — стандарт для ООО, но "
+                "ограничивает ответственность по обязательствам"
             )
-        lines.append("")
+    if card is not None and card.licenses_count:
+        capital_block.append(f"Лицензий: {card.licenses_count}")
+    if capital_block:
+        sections.append("━━━ 💰 КАПИТАЛ И ЛИЦЕНЗИИ ━━━\n" + "\n".join(capital_block))
 
-    return "\n".join(lines)
+    # ━━━ ИНДЕКС ЗЧБ ━━━
+    if security and (security.zchb_risk_level or security.zchb_details):
+        block = ["━━━ 🎯 ИНДЕКС ЗЧБ ━━━"]
+        if security.zchb_risk_level:
+            block.append(f"Индекс компании: {security.zchb_risk_level}")
+        if security.zchb_details:
+            block.append(security.zchb_details)
+        sections.append("\n".join(block))
+
+    # ━━━ НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ━━━
+    # Положительные сигналы
+    positives = []
+    if card is not None:
+        if not card.in_debt_registry and not card.in_no_reporting_registry:
+            positives.append("✅ В реестрах ФНС нет негативных записей")
+        if card.contracts_supplier_count > 0 and not card.is_unreliable_supplier:
+            positives.append("✅ Работает с госконтрактами без претензий")
+        if card.licenses_count > 0:
+            positives.append(f"✅ Имеет лицензии ({card.licenses_count})")
+    if security and security.zchb_risk_level:
+        if "высок" in security.zchb_risk_level.lower():
+            positives.append("✅ Высокий индекс надёжности (ЗЧБ)")
+    if fssp_count == 0:
+        positives.append("✅ Нет исполнительных производств ФССП")
+    if card and card.tax_debt_sum == 0:
+        positives.append("✅ Нет задолженности перед бюджетом")
+
+    summary_block = ["━━━ 📋 НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ━━━"]
+    if findings:
+        summary_block.extend(findings)
+    if positives:
+        summary_block.extend(positives[:5])  # не больше 5 положительных, чтобы не разводнять
+    if not findings and not positives:
+        summary_block.append(
+            "Нет ярких сигналов — обычная картина. "
+            "Проверьте основные параметры в разделах выше."
+        )
+    sections.append("\n".join(summary_block))
+
+    return "\n".join(title_lines) + "\n\n" + "\n\n".join(sections)
 
 
 def _inn_prompt_text(action: str) -> str:
@@ -803,11 +967,33 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                     "⚠️ Источник финансовых данных не настроен (ZCHB_API_KEY)."
                 )
                 return
-            await callback_query.message.reply_text("📊 Запрашиваю финансовые данные...")
-            card = await zchb.get_card(inn_part)
+            await callback_query.message.reply_text("📊 Собираю финансовый отчёт...")
+            company = await company_service.fetch(inn_part)
+            try:
+                card = await zchb.get_card(inn_part)
+            except Exception as exc:
+                logger.exception("ca_finance: get_card failed: %s", exc)
+                card = None
+            sec = None
+            try:
+                sec = await security_service.check(
+                    inn=inn_part,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                    ogrn=company.ogrn if company else None,
+                )
+            except Exception as exc:
+                logger.exception("ca_finance: security check failed: %s", exc)
+            try:
+                text = _format_finance(card, sec, company, inn_part)
+            except Exception as exc:
+                logger.exception("ca_finance: format failed: %s", exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось собрать финансовый отчёт. Попробуйте позже."
+                )
+                return
             await callback_query.message.reply_text(
-                _format_finance(card, inn_part),
-                disable_web_page_preview=True,
+                text, disable_web_page_preview=True,
             )
             return
 

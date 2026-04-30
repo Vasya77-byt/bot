@@ -25,6 +25,7 @@ from parsers import ParseResult, parse_message
 from payments_store import PaymentsStore
 from renderers import render_comparison, render_profile, render_response
 from renewal_scheduler import run_renewal_loop
+from expiry_reminder import run_expiry_reminder_loop
 from schemas import CompanyData
 from security_check import SecurityService
 from subscription import SubscriptionService
@@ -2929,6 +2930,12 @@ def main() -> None:
                 security_service=security_service,
                 notify=notify,
             )
+        ))
+
+        # Напоминания об окончании платной подписки —
+        # тоже независимо от платежей (нужно даже когда auto_renew=False)
+        tasks.append(asyncio.create_task(
+            run_expiry_reminder_loop(users=user_store, notify=notify)
         ))
 
         logger.info("Bot is running. Press Ctrl+C to stop.")

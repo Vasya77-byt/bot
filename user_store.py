@@ -134,6 +134,11 @@ class UserProfile:
     auto_renew: bool = True          # автопродление
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
+    # Напоминания об истечении подписки — чтобы не отправлять одно и то же
+    # уведомление дважды за день. Хранит ISO-дату последней отправки.
+    last_expiry_reminder_date: str = ""
+    # Флаг, что юзер уже получил уведомление о переходе на Free (один раз)
+    expired_notice_sent: bool = False
     email: str = ""                  # email для чека
     phone: str = ""                  # телефон в формате +79991234567
     full_name: str = ""              # ФИО клиента (опц., из профиля)

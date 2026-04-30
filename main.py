@@ -339,41 +339,38 @@ def _egrul_actions_keyboard(inn: str) -> InlineKeyboardMarkup:
 
 
 def _format_egrul_summary(card, inn: str) -> str:
-    """Сводка ЕГРЮЛ: основные сведения + краткая история (если есть в card)."""
+    """Сводка ЕГРЮЛ: основные сведения о компании.
+    История изменений вынесена в отдельную кнопку «📜 История»."""
     if card is None:
         return (
             f"🏛 ЕГРЮЛ (ИНН {inn})\n\n"
             "Не удалось получить данные. Попробуйте позже."
         )
 
-    lines = [f"🏛 ЕГРЮЛ — {card.name_short or card.name_full or ('ИНН ' + inn)}"]
+    lines = [f"🏛 ЕГРЮЛ — {card.name_short or card.name_full or ('ИНН ' + inn)}", ""]
+    if card.name_full and card.name_full != card.name_short:
+        lines.append(f"Полное наименование: {card.name_full}")
     if card.inn:
         lines.append(f"ИНН: {card.inn}")
     if card.ogrn:
         lines.append(f"ОГРН: {card.ogrn}")
     if card.status:
         lines.append(f"Статус: {card.status}")
+    if card.tax_regime:
+        lines.append(f"Налоговый режим: {card.tax_regime}")
+    if card.msp_category:
+        lines.append(f"Категория МСП: {card.msp_category}")
+    if card.licenses_count:
+        lines.append(f"Лицензий: {card.licenses_count}")
     lines.append("")
-
-    if card.egrul_records:
-        lines.append("📜 История записей (свежие сверху):")
-        sorted_records = sorted(
-            card.egrul_records, key=lambda r: r.date or "", reverse=True,
-        )
-        for r in sorted_records[:10]:
-            date = r.date[:10] if r.date else "—"
-            lines.append(f"   {date} — {r.type_name or r.type_code or 'запись'}")
-            if r.authority_name:
-                short = r.authority_name[:80] + ("…" if len(r.authority_name) > 80 else "")
-                lines.append(f"      ({short})")
-        if len(sorted_records) > 10:
-            lines.append(f"   … и ещё {len(sorted_records) - 10}")
-    else:
-        lines.append(
-            "📜 История записей в краткой карточке отсутствует.\n"
-            "Нажмите кнопку ниже, чтобы запросить полную историю "
-            "из ФНС-карточки (стоимость +10 запросов ЗЧБ)."
-        )
+    lines.append(
+        "📜 Полная история изменений (директор/адрес/реорганизация) — "
+        "нажмите кнопку «📜 История» под отчётом."
+    )
+    lines.append("")
+    lines.append(
+        "📥 Бесплатная выписка с ЭЦП ФНС — egrul.nalog.ru (кнопка ниже)."
+    )
     return "\n".join(lines)
 
 
@@ -403,6 +400,82 @@ def _format_egrul_history(records, ogrn: str) -> str:
         lines.append("")
     if len(sorted_records) > 30:
         lines.append(f"… показано 30 из {len(sorted_records)}.")
+    return "\n".join(lines)
+
+
+def _format_history(card, inspections, inn: str) -> str:
+    """Объединённая хронологическая история изменений компании.
+    Соединяет события из ЕГРЮЛ (СвЗапЕГРЮЛ) и ЕРП-проверок,
+    сортирует по дате убывания."""
+    events: list[tuple[str, str, str]] = []  # (date_iso, marker, text)
+
+    # ── ЕГРЮЛ-записи ──
+    if card is not None:
+        for r in (card.egrul_records or []):
+            date = r.date[:10] if r.date else ""
+            text = r.type_name or r.type_code or "Запись в ЕГРЮЛ"
+            marker = "🏛"
+            # Подсветка значимых типов
+            tlow = text.lower()
+            if "руководител" in tlow or "должн" in tlow:
+                marker = "👤"  # смена руководителя
+            elif "адрес" in tlow:
+                marker = "📍"
+            elif "учредител" in tlow or "уставн" in tlow:
+                marker = "👥"
+            elif "реорг" in tlow or "присоедин" in tlow:
+                marker = "🔄"
+            elif "ликвид" in tlow:
+                marker = "⛔"
+            events.append((date, marker, text))
+
+    # ── ЕРП-проверки ──
+    if inspections:
+        for r in inspections:
+            date = (r.start_date[:10] if r.start_date else "")
+            type_part = " ".join(filter(None, [r.inspection_type, r.carryout_form])) or "Проверка"
+            authority = r.authority[:60] + ("…" if len(r.authority) > 60 else "")
+            status_part = ""
+            if r.status:
+                status_part = f" — {r.status.lower()}"
+            details = type_part
+            if authority:
+                details += f" ({authority})"
+            details += status_part
+            if r.has_violations:
+                details += " ⚠️"
+            events.append((date, "🔎", details))
+
+    if not events:
+        return (
+            f"📜 История изменений (ИНН {inn})\n\n"
+            "В открытых источниках записей не найдено.\n"
+            "Возможные причины:\n"
+            "• Свежая компания без изменений в ЕГРЮЛ\n"
+            "• Проверки не публикуются по этой категории риска"
+        )
+
+    # Сортируем по дате (свежие сверху)
+    events.sort(key=lambda e: e[0] or "", reverse=True)
+
+    lines = [f"📜 История изменений (ИНН {inn})", ""]
+    egrul_count = sum(1 for _, m, _ in events if m != "🔎")
+    insp_count = sum(1 for _, m, _ in events if m == "🔎")
+    summary_parts = []
+    if egrul_count:
+        summary_parts.append(f"записей ЕГРЮЛ: {egrul_count}")
+    if insp_count:
+        summary_parts.append(f"проверок: {insp_count}")
+    if summary_parts:
+        lines.append("Всего: " + ", ".join(summary_parts))
+        lines.append("")
+
+    for date, marker, text in events[:30]:
+        date_str = date or "—"
+        lines.append(f"{marker} {date_str} — {text}")
+    if len(events) > 30:
+        lines.append("")
+        lines.append(f"… показано 30 из {len(events)} событий.")
     return "\n".join(lines)
 
 
@@ -743,15 +816,20 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник проверок не настроен (ZCHB_API_KEY)."
+                    "⚠️ Источник истории не настроен (ZCHB_API_KEY)."
                 )
                 return
             await callback_query.message.reply_text(
-                "📜 Запрашиваю Единый Реестр Проверок..."
+                "📜 Собираю историю изменений компании..."
             )
+            # Объединяем три источника:
+            # 1) СвЗапЕГРЮЛ — изменения в ЕГРЮЛ (директор/адрес/реорганизация)
+            # 2) ЕРП — проверки от Роспотребнадзора и т.п.
+            # 3) Если есть ОГРН — пробуем fns-card для расширенной истории ЕГРЮЛ
+            card = await zchb.get_card(inn_part)
             inspections = await zchb.get_inspections(inn_part)
             await callback_query.message.reply_text(
-                _format_inspections(inspections, inn_part),
+                _format_history(card, inspections, inn_part),
                 disable_web_page_preview=True,
             )
             return

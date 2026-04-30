@@ -706,10 +706,26 @@ class ZchbClient:
         if not isinstance(raw, dict):
             return None
 
-        # Базовые поля могут быть прямо в raw или в "item"-обёртке
-        head = raw
-        if "item" in raw and isinstance(raw["item"], dict):
-            head = raw["item"]
+        # ЗЧБ возвращает разные форматы обёрток. Базовые поля
+        # (ERPID/ITYPE_NAME/...) могут быть:
+        # 1) прямо в raw
+        # 2) в raw["item"] (dict)
+        # 3) в raw["item"][0] (list — XML-сериализация)
+        # Соберём кандидатов и возьмём первый где есть ERPID или ITYPE_NAME.
+        candidates: List[Dict[str, Any]] = [raw]
+        item = raw.get("item")
+        if isinstance(item, dict):
+            candidates.append(item)
+        elif isinstance(item, list):
+            for it in item:
+                if isinstance(it, dict):
+                    candidates.append(it)
+
+        head: Dict[str, Any] = raw
+        for c in candidates:
+            if any(k in c for k in ("ERPID", "ITYPE_NAME", "FZ_NAME", "START_DATE")):
+                head = c
+                break
 
         rec = InspectionRecord(
             erp_id=str(head.get("ERPID") or ""),
@@ -720,28 +736,33 @@ class ZchbClient:
             status=str(head.get("STATUS") or ""),
         )
 
-        # I_AUTHORITY — орган контроля (берём первый)
-        auth = raw.get("I_AUTHORITY")
-        if isinstance(auth, list) and auth:
-            first = auth[0]
-            if isinstance(first, dict):
-                a = first.get("item") if "item" in first else first
-                if isinstance(a, dict):
-                    rec.authority = str(a.get("FRGU_ORG_NAME") or "")
-        elif isinstance(auth, dict):
-            inner = auth.get("item") or auth
-            if isinstance(inner, dict):
-                rec.authority = str(inner.get("FRGU_ORG_NAME") or "")
+        def _unwrap(node: Any) -> Optional[Dict[str, Any]]:
+            """Рекурсивно ищет dict с полезными полями внутри nested item-обёрток."""
+            if isinstance(node, dict):
+                # Если есть item — заглядываем глубже
+                inner = node.get("item")
+                if isinstance(inner, dict):
+                    return inner
+                if isinstance(inner, list) and inner:
+                    if isinstance(inner[0], dict):
+                        return inner[0]
+                return node
+            if isinstance(node, list) and node:
+                first = node[0]
+                if isinstance(first, dict):
+                    return _unwrap(first)
+            return None
+
+        # I_AUTHORITY — орган контроля
+        auth = _unwrap(raw.get("I_AUTHORITY"))
+        if auth:
+            rec.authority = str(auth.get("FRGU_ORG_NAME") or "")
 
         # I_CLASSIFICATION
-        cls_block = raw.get("I_CLASSIFICATION")
-        if isinstance(cls_block, list) and cls_block:
-            first = cls_block[0]
-            if isinstance(first, dict):
-                inner = first.get("item") if "item" in first else first
-                if isinstance(inner, dict):
-                    rec.carryout_form = str(inner.get("ICARRYOUT_TYPE_NAME") or "")
-                    rec.risk_category = str(inner.get("IRISK_NAME") or "")
+        cls_block = _unwrap(raw.get("I_CLASSIFICATION"))
+        if cls_block:
+            rec.carryout_form = str(cls_block.get("ICARRYOUT_TYPE_NAME") or "")
+            rec.risk_category = str(cls_block.get("IRISK_NAME") or "")
 
         # I_OBJECT[].I_RESULT — даты окончания и наличие нарушений
         objects = raw.get("I_OBJECT")
@@ -749,18 +770,19 @@ class ZchbClient:
             for obj in objects:
                 if not isinstance(obj, dict):
                     continue
-                ir = obj.get("I_RESULT")
-                if isinstance(ir, list):
-                    for result_item in ir:
-                        if not isinstance(result_item, dict):
-                            continue
-                        end_date = str(result_item.get("ACT_DATE_CREATE") or "")
-                        if end_date and not rec.end_date:
-                            rec.end_date = end_date
-                        # Нарушения: I_VIOLATION
-                        violations = obj.get("I_VIOLATION") or result_item.get("I_VIOLATION")
-                        if violations:
-                            rec.has_violations = True
+                ir_block = _unwrap(obj.get("I_RESULT"))
+                if ir_block:
+                    end_date = str(ir_block.get("ACT_DATE_CREATE") or "")
+                    if end_date and not rec.end_date:
+                        rec.end_date = end_date
+                if obj.get("I_VIOLATION") or (
+                    isinstance(obj.get("I_RESULT"), list)
+                    and any(
+                        isinstance(r, dict) and r.get("I_VIOLATION")
+                        for r in obj["I_RESULT"]
+                    )
+                ):
+                    rec.has_violations = True
 
         return rec
 

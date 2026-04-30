@@ -772,13 +772,18 @@ async def _format_links(card, inn: str) -> str:
         section = ["━━━ 👥 УЧРЕДИТЕЛИ-ФИЗЛИЦА ━━━"]
         seen_inns: set[str] = set()
         # Не дёргаем fl-card для директора повторно (если он же и учредитель)
-        if card.director_inn:
-            seen_inns.add(card.director_inn)
+        director_inn = card.director_inn or ""
+        if director_inn:
+            seen_inns.add(director_inn)
 
+        # Учредители-ФЛ, совпадающие с директором (по ИНН)
+        same_as_director = [
+            f for f in fl_founders if f.inn and f.inn == director_inn
+        ]
         # Учредители у которых нет ИНН (по ним fl-card сделать нельзя)
         no_inn_founders = [f for f in fl_founders if not f.inn]
 
-        # Уникальные с ИНН — берём до 5 для запросов
+        # Уникальные с ИНН и не совпадающие с директором — для запросов (макс 5)
         to_query: list = []
         for f in fl_founders:
             if f.inn and f.inn not in seen_inns:
@@ -787,10 +792,9 @@ async def _format_links(card, inn: str) -> str:
             if len(to_query) >= 5:
                 break
 
-        if not to_query and not no_inn_founders:
+        if not to_query and not no_inn_founders and not same_as_director:
             section.append(
-                "Все физлица-учредители совпадают с руководителем "
-                "(см. блок выше)."
+                "Учредителей-физлиц не указано (см. блок Юрлица ниже)."
             )
         else:
             for f in to_query:
@@ -817,11 +821,24 @@ async def _format_links(card, inn: str) -> str:
                     "связей сделать нельзя."
                 )
 
-            shown = len(to_query) + min(len(no_inn_founders), 5)
+            # Учредители = директор: явная пометка вместо "не показаны"
+            for f in same_as_director:
+                line = f"👤 {f.name or 'Без имени'}"
+                if f.inn:
+                    line += f" (ИНН {f.inn})"
+                if f.share_pct > 0:
+                    line += f" — доля {f.share_pct:g}%"
+                section.append(line)
+                section.append(
+                    "   ↑ Это руководитель компании (связи показаны выше)"
+                )
+
+            shown = (len(to_query) + min(len(no_inn_founders), 5)
+                     + len(same_as_director))
             if len(fl_founders) > shown:
                 section.append(
                     f"   … и ещё {len(fl_founders) - shown} "
-                    "учредителей-физлиц"
+                    "учредителей-физлиц (показаны не все для экономии запросов)"
                 )
         sections.append("\n".join(section))
 

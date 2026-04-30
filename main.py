@@ -539,7 +539,7 @@ def _format_history(card, events, inn: str, company=None) -> str:
             if f.share_pct > 0:
                 line += f" — доля {f.share_pct:g}%"
             elif f.share_abs > 0:
-                line += f" — {_fmt_money(f.share_abs)}"
+                line += f" — {_fmt_money_short(f.share_abs)}"
             section.append(line)
             if f.started_at:
                 section.append(f"   Действует с {f.started_at}")
@@ -659,7 +659,7 @@ def _format_history(card, events, inn: str, company=None) -> str:
     elif company and company.capital:
         current_capital = company.capital
     if current_capital:
-        section.append(f"🔹 {_fmt_money(current_capital)}")
+        section.append(f"🔹 {_fmt_money_short(current_capital)}")
     for ev in cap_events[:3]:
         section.append(f"🔸 {ev.summary}")
         section.append(f"   Действовал с {_fmt_date(ev)}")

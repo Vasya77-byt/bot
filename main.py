@@ -433,15 +433,15 @@ def _format_history(card, inspections, inn: str) -> str:
     if inspections:
         for r in inspections:
             date = (r.start_date[:10] if r.start_date else "")
-            type_part = " ".join(filter(None, [r.inspection_type, r.carryout_form])) or "Проверка"
-            authority = r.authority[:60] + ("…" if len(r.authority) > 60 else "")
-            status_part = ""
-            if r.status:
-                status_part = f" — {r.status.lower()}"
+            # Тип — короткий: «Внеплановое КНМ» / «Плановая проверка»
+            type_part = (r.inspection_type or "Проверка").strip()
+            # Орган — обрезаем до 50 символов
+            authority = r.authority.strip()
+            if len(authority) > 50:
+                authority = authority[:47] + "…"
             details = type_part
             if authority:
-                details += f" ({authority})"
-            details += status_part
+                details += f": {authority}"
             if r.has_violations:
                 details += " ⚠️"
             events.append((date, "🔎", details))
@@ -458,24 +458,40 @@ def _format_history(card, inspections, inn: str) -> str:
     # Сортируем по дате (свежие сверху)
     events.sort(key=lambda e: e[0] or "", reverse=True)
 
-    lines = [f"📜 История изменений (ИНН {inn})", ""]
     egrul_count = sum(1 for _, m, _ in events if m != "🔎")
     insp_count = sum(1 for _, m, _ in events if m == "🔎")
+    header_lines = [f"📜 История изменений (ИНН {inn})", ""]
     summary_parts = []
     if egrul_count:
         summary_parts.append(f"записей ЕГРЮЛ: {egrul_count}")
     if insp_count:
         summary_parts.append(f"проверок: {insp_count}")
     if summary_parts:
-        lines.append("Всего: " + ", ".join(summary_parts))
-        lines.append("")
+        header_lines.append("Всего: " + ", ".join(summary_parts))
+        header_lines.append("")
 
-    for date, marker, text in events[:30]:
-        date_str = date or "—"
-        lines.append(f"{marker} {date_str} — {text}")
-    if len(events) > 30:
+    # Telegram-лимит — 4096 символов. Держим бюджет ~3800 для запаса.
+    # Если события не влезают — обрезаем количество и добавляем хвост.
+    max_chars = 3800
+    body_lines: list[str] = []
+    used = sum(len(line) + 1 for line in header_lines)
+    shown = 0
+    for date, marker, text in events:
+        line = f"{marker} {date or '—'} — {text}"
+        # Защита от слишком длинной отдельной записи
+        if len(line) > 200:
+            line = line[:197] + "…"
+        if used + len(line) + 1 > max_chars:
+            break
+        body_lines.append(line)
+        used += len(line) + 1
+        shown += 1
+
+    lines = header_lines + body_lines
+    if shown < len(events):
+        tail = f"… показано {shown} из {len(events)} событий."
         lines.append("")
-        lines.append(f"… показано 30 из {len(events)} событий.")
+        lines.append(tail)
     return "\n".join(lines)
 
 
@@ -822,15 +838,30 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 "📜 Собираю историю изменений компании..."
             )
-            # Объединяем три источника:
-            # 1) СвЗапЕГРЮЛ — изменения в ЕГРЮЛ (директор/адрес/реорганизация)
-            # 2) ЕРП — проверки от Роспотребнадзора и т.п.
-            # 3) Если есть ОГРН — пробуем fns-card для расширенной истории ЕГРЮЛ
-            card = await zchb.get_card(inn_part)
-            inspections = await zchb.get_inspections(inn_part)
+            try:
+                card = await zchb.get_card(inn_part)
+            except Exception as exc:
+                logger.exception("ca_history: get_card failed for %s: %s",
+                                 inn_part, exc)
+                card = None
+            try:
+                inspections = await zchb.get_inspections(inn_part)
+            except Exception as exc:
+                logger.exception("ca_history: get_inspections failed for %s: %s",
+                                 inn_part, exc)
+                inspections = None
+            try:
+                text = _format_history(card, inspections, inn_part)
+            except Exception as exc:
+                logger.exception("ca_history: format failed for %s: %s",
+                                 inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось собрать историю. Попробуйте позже.\n"
+                    "Если ошибка повторяется — сообщите в поддержку: @YRS75"
+                )
+                return
             await callback_query.message.reply_text(
-                _format_history(card, inspections, inn_part),
-                disable_web_page_preview=True,
+                text, disable_web_page_preview=True,
             )
             return
 

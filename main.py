@@ -711,73 +711,186 @@ def _format_inspections(inspections, inn: str) -> str:
 
 
 async def _format_links(card, inn: str) -> str:
-    """Связи: компании где директор/учредители фигурируют как
-    руководители или учредители. Делает дополнительные запросы fl-card."""
+    """Связи компании: куда тянутся нити через директора и учредителей.
+
+    Структура:
+    - 👤 РУКОВОДИТЕЛЬ — текущий директор + где он ещё работает
+    - 👥 УЧРЕДИТЕЛИ-ФИЗЛИЦА — каждый + его компании
+    - 🏢 УЧРЕДИТЕЛИ-ЮРЛИЦА — список (без углубления)
+    - 📋 ИТОГ — общая статистика связанных компаний
+
+    Жгём максимум 6 fl-card запросов на отчёт (1 директор + до 5 учредителей).
+    Кеш 24ч.
+    """
     if card is None:
         return (
             f"🔗 Связи (ИНН {inn})\n\n"
             "Не удалось получить данные. Попробуйте позже."
         )
 
-    # Собираем уникальные ИНН ФЛ из руководителей и учредителей карточки.
-    # У card.founders есть inn у физлиц; у руководителей — нужно из card
-    # хранить отдельно. Сейчас в CardSummary есть только director_namesake_count
-    # и флаги; чтобы делать связи по руководителю, нужно достать его ИНН
-    # отдельно. В _parse_card мы храним только первого руководителя без ИНН.
-    # Используем учредителей-физлиц (у них inn заполнен в большинстве случаев).
-    fl_inns: list[tuple[str, str, str]] = []  # (inn, role, name)
-    for f in (card.founders or []):
-        if f.type == "fl" and f.inn:
-            fl_inns.append((f.inn, "учредитель", f.name))
+    name = card.name_short or card.name_full or f"ИНН {inn}"
+    title_lines = ["🔗 Связи компании", name, f"ИНН {inn}"]
+    sections: list[str] = []
 
-    if not fl_inns:
-        return (
-            f"🔗 Связи (ИНН {inn})\n\n"
-            "Нет данных о связанных физлицах с указанным ИНН.\n"
-            "Возможные причины: учредители — иностранцы / юрлица, "
-            "или у них нет ИНН в открытых данных."
+    # Накопители для итоговой статистики
+    all_related_inns: set[str] = set()
+    warnings: list[str] = []
+
+    # ━━━ РУКОВОДИТЕЛЬ ━━━
+    section = ["━━━ 👤 РУКОВОДИТЕЛЬ ━━━"]
+    if not card.director_name:
+        section.append("Текущий руководитель не указан в карточке.")
+    else:
+        line = f"👤 {card.director_name}"
+        if card.director_inn:
+            line += f" (ИНН {card.director_inn})"
+        section.append(line)
+        if card.director_position:
+            section.append(f"   {card.director_position}")
+        if card.director_started_at:
+            section.append(f"   Действует с {card.director_started_at[:10]}")
+
+        if card.director_inn:
+            fl = await zchb.get_fl_card(card.director_inn)
+            if fl:
+                _append_fl_summary(section, fl, all_related_inns, warnings,
+                                   indent=True)
+            else:
+                section.append("   Связанных компаний не найдено.")
+        elif card.director_namesake_count >= 50:
+            section.append(
+                f"   ℹ️ ИНН руководителя не указан в карточке. "
+                f"Однофамильцев-руководителей: {card.director_namesake_count}"
+            )
+    sections.append("\n".join(section))
+
+    # ━━━ УЧРЕДИТЕЛИ-ФИЗЛИЦА ━━━
+    fl_founders = [f for f in (card.founders or []) if f.type == "fl"]
+    if fl_founders:
+        section = ["━━━ 👥 УЧРЕДИТЕЛИ-ФИЗЛИЦА ━━━"]
+        seen_inns: set[str] = set()
+        # Не дёргаем fl-card для директора повторно (если он же и учредитель)
+        if card.director_inn:
+            seen_inns.add(card.director_inn)
+        # Берём до 5 уникальных учредителей-ФЛ для запросов
+        to_query = []
+        for f in fl_founders:
+            if f.inn and f.inn not in seen_inns:
+                seen_inns.add(f.inn)
+                to_query.append(f)
+            if len(to_query) >= 5:
+                break
+
+        if not to_query:
+            section.append(
+                "Все физлица-учредители совпадают с руководителем "
+                "(см. блок выше)."
+            )
+        else:
+            for f in to_query:
+                line = f"👤 {f.name or 'Без имени'}"
+                if f.inn:
+                    line += f" (ИНН {f.inn})"
+                if f.share_pct > 0:
+                    line += f" — доля {f.share_pct:g}%"
+                section.append(line)
+                fl = await zchb.get_fl_card(f.inn)
+                if fl:
+                    _append_fl_summary(section, fl, all_related_inns,
+                                       warnings, indent=True)
+                else:
+                    section.append("   Связанных компаний не найдено.")
+
+            if len(fl_founders) > len(to_query):
+                section.append(
+                    f"   … и ещё {len(fl_founders) - len(to_query)} "
+                    "учредителей-физлиц (не показаны для экономии запросов)."
+                )
+        sections.append("\n".join(section))
+
+    # ━━━ УЧРЕДИТЕЛИ-ЮРЛИЦА ━━━
+    ul_founders = [f for f in (card.founders or []) if f.type == "ul"]
+    if ul_founders:
+        section = ["━━━ 🏢 УЧРЕДИТЕЛИ-ЮРЛИЦА ━━━"]
+        for f in ul_founders[:7]:
+            line = f"🏢 {f.name or 'Без названия'}"
+            if f.inn:
+                line += f" (ИНН {f.inn})"
+                all_related_inns.add(f.inn)
+            if f.share_pct > 0:
+                line += f" — доля {f.share_pct:g}%"
+            section.append(line)
+        if len(ul_founders) > 7:
+            section.append(f"… и ещё {len(ul_founders) - 7} юрлиц-учредителей")
+        sections.append("\n".join(section))
+
+    # ━━━ ИТОГ ━━━
+    summary = ["━━━ 📋 ИТОГ ━━━"]
+    summary.append(
+        f"Связанных компаний обнаружено: {len(all_related_inns)}"
+    )
+    if warnings:
+        summary.extend(warnings)
+    if not warnings and len(all_related_inns) == 0:
+        summary.append(
+            "✅ Связей с другими компаниями не найдено — компания "
+            "выглядит обособленной."
+        )
+    sections.append("\n".join(summary))
+
+    text = "\n".join(title_lines) + "\n\n" + "\n\n".join(sections)
+    if len(text) > 3900:
+        text = text[:3900] + "\n\n…отчёт обрезан до лимита Telegram."
+    return text
+
+
+def _append_fl_summary(section: list, fl, related_inns: set,
+                       warnings: list, indent: bool = False) -> None:
+    """Добавляет в section строки с компаниями где физлицо
+    руководит/учредитель/ИП. Аккумулирует ИНН в related_inns
+    и ⚠️ предупреждения о массовости в warnings."""
+    pad = "   " if indent else ""
+
+    if fl.is_mass_leader:
+        section.append(f"{pad}⚠️ Признан МАССОВЫМ руководителем")
+        warnings.append(
+            f"⚠️ {fl.full_name or fl.inn_fl}: массовый руководитель"
+        )
+    if fl.is_mass_founder:
+        section.append(f"{pad}⚠️ Признан МАССОВЫМ учредителем")
+        warnings.append(
+            f"⚠️ {fl.full_name or fl.inn_fl}: массовый учредитель"
         )
 
-    lines = [f"🔗 Связи (ИНН {inn})", ""]
-    # Запрашиваем fl-card для каждого уникального ИНН (макс 5, чтобы не сжечь лимит)
-    seen: set[str] = set()
-    queue = [t for t in fl_inns if not (t[0] in seen or seen.add(t[0]))][:5]
+    if not fl.leads and not fl.founds and not fl.sole_props:
+        if not fl.is_mass_leader and not fl.is_mass_founder:
+            section.append(f"{pad}Дополнительных компаний не найдено.")
+        return
 
-    for fl_inn, role, name in queue:
-        fl = await zchb.get_fl_card(fl_inn)
-        title = name or f"ИНН {fl_inn}"
-        lines.append(f"👤 {title} ({role})")
-        if fl is None or (not fl.leads and not fl.founds and not fl.sole_props):
-            lines.append("   Дополнительных компаний не найдено.")
-            lines.append("")
-            continue
-        if fl.is_mass_leader:
-            lines.append("   ⚠️ Признан массовым руководителем")
-        if fl.is_mass_founder:
-            lines.append("   ⚠️ Признан массовым учредителем")
-        if fl.leads:
-            lines.append(f"   Руководит ({len(fl.leads)} комп.):")
-            for c in fl.leads[:5]:
-                marker = "✅" if c.is_active else "⛔"
-                cname = c.name_short or c.name_full or f"ИНН {c.inn}"
-                lines.append(f"   • {marker} {cname} (ИНН {c.inn})")
-            if len(fl.leads) > 5:
-                lines.append(f"   … и ещё {len(fl.leads) - 5}")
-        if fl.founds:
-            lines.append(f"   Учредитель в ({len(fl.founds)} комп.):")
-            for c in fl.founds[:5]:
-                marker = "✅" if c.is_active else "⛔"
-                cname = c.name_short or c.name_full or f"ИНН {c.inn}"
-                lines.append(f"   • {marker} {cname} (ИНН {c.inn})")
-            if len(fl.founds) > 5:
-                lines.append(f"   … и ещё {len(fl.founds) - 5}")
-        if fl.sole_props:
-            lines.append(f"   ИП на этом ИНН: {len(fl.sole_props)}")
-        lines.append("")
+    if fl.leads:
+        section.append(f"{pad}Руководит в {len(fl.leads)} комп.:")
+        for c in fl.leads[:4]:
+            marker = "✅" if c.is_active else "⛔"
+            cname = (c.name_short or c.name_full or f"ИНН {c.inn}")[:45]
+            section.append(f"{pad}• {marker} {cname}")
+            if c.inn:
+                related_inns.add(c.inn)
+        if len(fl.leads) > 4:
+            section.append(f"{pad}  … и ещё {len(fl.leads) - 4}")
 
-    if len(fl_inns) > 5:
-        lines.append(f"… показано 5 из {len(fl_inns)} физлиц.")
-    return "\n".join(lines)
+    if fl.founds:
+        section.append(f"{pad}Учредитель в {len(fl.founds)} комп.:")
+        for c in fl.founds[:4]:
+            marker = "✅" if c.is_active else "⛔"
+            cname = (c.name_short or c.name_full or f"ИНН {c.inn}")[:45]
+            section.append(f"{pad}• {marker} {cname}")
+            if c.inn:
+                related_inns.add(c.inn)
+        if len(fl.founds) > 4:
+            section.append(f"{pad}  … и ещё {len(fl.founds) - 4}")
+
+    if fl.sole_props:
+        section.append(f"{pad}ИП на этом ИНН: {len(fl.sole_props)}")
 
 
 def _format_finance(card, security, company, inn: str) -> str:

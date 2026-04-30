@@ -13,6 +13,7 @@ from pyrogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 from company_service import CompanyService
@@ -40,6 +41,7 @@ from monitoring import make_snapshot
 from monitoring_scheduler import run_monitoring_loop
 from monitoring_store import MonitoringStore
 from payment_poller import run_payment_poller
+from report_tokens import ReportTokenStore
 from telemetry import init_sentry
 from user_store import REFERRAL_BONUS_DAYS, TARIFF_MONITORING_LIMITS
 from webhook_server import build_app as build_webhook_app, start_webhook_server
@@ -56,6 +58,7 @@ zchb = ZchbClient()
 user_store = UserStore()
 payments_store = PaymentsStore()
 monitoring_store = MonitoringStore()
+report_tokens = ReportTokenStore()
 
 # Сервис подписок инициализируется в main() когда есть Settings
 subscription_service: Optional[SubscriptionService] = None
@@ -66,6 +69,9 @@ required_channel: str = ""
 
 # Admin user IDs для команды /admin. Заполняется в main() из Settings.
 admin_user_ids: set[int] = set()
+
+# База для ссылок Telegram WebApp. Пусто = кнопка не показывается.
+report_base_url: str = ""
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -2195,6 +2201,37 @@ def _looks_like_question(text: str) -> bool:
                for m in _QUESTION_MARKERS)
 
 
+def _user_has_premium(user_id: int) -> bool:
+    """Премиум = активная подписка Pro или Business."""
+    if not user_id:
+        return False
+    profile = user_store.get(user_id)
+    if not profile.is_subscription_active():
+        return False
+    return profile.effective_tariff() in ("pro", "business")
+
+
+def _build_web_report_button(
+    inn: str, user_id: int,
+) -> Optional[InlineKeyboardButton]:
+    """Кнопка «🌐 Веб-отчёт» — только для премиума и при настроенном URL.
+
+    Возвращает None, если функция недоступна (не премиум, нет URL,
+    создание токена упало) — кнопку показывать не будем.
+    """
+    if not report_base_url:
+        return None
+    if not _user_has_premium(user_id):
+        return None
+    try:
+        token = report_tokens.create(user_id=user_id, inn=inn)
+    except Exception as exc:
+        logger.warning("Не удалось создать токен веб-отчёта: %s", exc)
+        return None
+    url = f"{report_base_url}/report/{token}"
+    return InlineKeyboardButton("🌐 Веб-отчёт", web_app=WebAppInfo(url=url))
+
+
 def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
     is_monitored = bool(user_id) and monitoring_store.get(user_id, inn) is not None
@@ -2206,7 +2243,7 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         monitor_btn = InlineKeyboardButton(
             "👁 Отслеживать", callback_data=f"ca_monitor:{inn}"
         )
-    return InlineKeyboardMarkup([
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton("⚖️ Суды", callback_data=f"ca_courts:{inn}"),
             InlineKeyboardButton("📊 Финансы", callback_data=f"ca_finance:{inn}"),
@@ -2223,7 +2260,12 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         [
             InlineKeyboardButton("📄 Скачать PDF", callback_data=f"ca_pdf:{inn}"),
         ],
-    ])
+    ]
+    web_btn = _build_web_report_button(inn, user_id)
+    if web_btn is not None:
+        # Веб-отчёт ставим самой первой кнопкой — это главная фича премиума.
+        rows.insert(0, [web_btn])
+    return InlineKeyboardMarkup(rows)
 
 
 def _tariffs_text() -> str:
@@ -2909,6 +2951,7 @@ async def handle_admin(client: Client, message) -> None:
 
 def main() -> None:
     global subscription_service, required_channel, admin_user_ids
+    global report_base_url
 
     settings = Settings.from_env()
     required_channel = settings.required_channel
@@ -2917,6 +2960,9 @@ def main() -> None:
     admin_user_ids = parse_admin_user_ids(settings.admin_user_ids)
     if admin_user_ids:
         logger.info("Admins configured: %d user(s)", len(admin_user_ids))
+    report_base_url = settings.report_base_url
+    if report_base_url:
+        logger.info("Web report base URL: %s", report_base_url)
     app = build_app(settings)
 
     # Инициализация платёжного сервиса
@@ -3009,6 +3055,10 @@ def main() -> None:
                 tochka=subscription_service.tochka,
                 subscription=subscription_service,
                 notify=notify,
+                report_tokens=report_tokens,
+                company_service=company_service,
+                security_service=security_service,
+                zchb=zchb,
             )
             webhook_runner = await start_webhook_server(
                 web_app, host=settings.webhook_host, port=settings.webhook_port

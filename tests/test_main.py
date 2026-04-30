@@ -100,10 +100,11 @@ def _install_fake_pyrogram() -> None:
     class CallbackQuery: ...
 
     class InlineKeyboardButton:
-        def __init__(self, text, callback_data=None, url=None):
+        def __init__(self, text, callback_data=None, url=None, web_app=None):
             self.text = text
             self.callback_data = callback_data
             self.url = url
+            self.web_app = web_app
 
     class InlineKeyboardMarkup:
         def __init__(self, inline_keyboard):
@@ -118,11 +119,16 @@ def _install_fake_pyrogram() -> None:
             self.keyboard = keyboard
             self.resize_keyboard = resize_keyboard
 
+    class WebAppInfo:
+        def __init__(self, url):
+            self.url = url
+
     types_mod.CallbackQuery = CallbackQuery
     types_mod.InlineKeyboardButton = InlineKeyboardButton
     types_mod.InlineKeyboardMarkup = InlineKeyboardMarkup
     types_mod.KeyboardButton = KeyboardButton
     types_mod.ReplyKeyboardMarkup = ReplyKeyboardMarkup
+    types_mod.WebAppInfo = WebAppInfo
 
     sys.modules["pyrogram"] = pyrogram
     sys.modules["pyrogram.handlers"] = handlers

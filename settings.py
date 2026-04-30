@@ -28,10 +28,19 @@ class Settings:
     required_channel: str = ""          # @username или -100... id
     # Telegram user_id админов через запятую — для команды /admin
     admin_user_ids: str = ""
+    # База для ссылок Telegram WebApp веб-отчёта.
+    # Публичный HTTPS-URL aiohttp-сервера (вебхук-сервера), к которому
+    # будет прибавляться /report/{token}. Пусто = кнопка веб-отчёта
+    # не показывается.
+    report_base_url: str = ""
 
     @property
     def payments_enabled(self) -> bool:
         return bool(self.tochka_jwt and self.tochka_customer_code)
+
+    @property
+    def web_report_enabled(self) -> bool:
+        return bool(self.report_base_url)
 
     @staticmethod
     def from_env() -> "Settings":
@@ -63,4 +72,5 @@ class Settings:
             webhook_public_url=os.getenv("WEBHOOK_PUBLIC_URL", ""),
             required_channel=os.getenv("REQUIRED_CHANNEL", ""),
             admin_user_ids=os.getenv("ADMIN_USER_IDS", ""),
+            report_base_url=os.getenv("REPORT_BASE_URL", "").rstrip("/"),
         )

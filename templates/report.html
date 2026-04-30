@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ company_name }} — Отчёт MondayCompany</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body { background:#0F1115; color:#E5E7EB; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; }
+    .card { background:#1A1D24; border-radius:16px; }
+    .accent { color:#60A5FA; }
+    .accent-bg { background:#3B82F6; }
+    .pos { color:#10B981; }
+    .neg { color:#EF4444; }
+    .warn { color:#F59E0B; }
+    .founder-card { background:#1A1D24; border-left:3px solid #3B82F6; border-radius:8px; }
+    .factor-card { background:#1A1D24; border-radius:12px; }
+    .pill-pos { background:rgba(16,185,129,0.15); color:#10B981; }
+    .pill-neg { background:rgba(239,68,68,0.15); color:#EF4444; }
+    .pill-warn { background:rgba(245,158,11,0.15); color:#F59E0B; }
+    .pill-blue { background:rgba(59,130,246,0.15); color:#60A5FA; }
+    .year-btn { background:#1F232C; color:#9CA3AF; }
+    .year-btn.active { background:#3B82F6; color:white; }
+    .divider { border-color:#2A2E36; }
+    h1, h2, h3 { color:white; }
+    .section-title { color:#60A5FA; font-weight:600; font-size:1.125rem; }
+    .label { color:#9CA3AF; font-size:0.85rem; }
+    .value { color:white; font-weight:500; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div class="max-w-5xl mx-auto p-4 sm:p-6 space-y-6">
+
+    {# ════════ HERO / ШАПКА ════════ #}
+    <div class="card relative overflow-hidden p-6 sm:p-8" style="background:linear-gradient(135deg,#1E293B,#0F172A);">
+      <div class="absolute -top-10 -right-10 w-40 h-40 rounded-full" style="background:rgba(59,130,246,0.15);"></div>
+      <div class="absolute bottom-4 left-12 w-20 h-20 rounded-full" style="background:rgba(59,130,246,0.08);"></div>
+      <div class="relative flex items-start gap-5 sm:gap-8">
+        <div class="flex-shrink-0 w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-black/40 flex items-center justify-center text-3xl">
+          🏢
+        </div>
+        <div class="flex-1 min-w-0">
+          <h1 class="text-2xl sm:text-3xl font-bold leading-tight break-words">{{ company_name }}</h1>
+          <p class="text-sm text-gray-400 mt-1">Отчёт по организации</p>
+          <div class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-full
+            {% if status_active %}pill-pos{% else %}pill-warn{% endif %}">
+            <span>{% if status_active %}🟢{% else %}⚠️{% endif %}</span>
+            <span class="font-medium">Статус: {{ status }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# ════════ ОСНОВНАЯ ИНФОРМАЦИЯ ════════ #}
+    <div class="card p-6">
+      <h2 class="section-title flex items-center justify-center gap-2 mb-6">
+        <span class="w-6 h-6 rounded-full accent-bg flex items-center justify-center text-xs">ℹ</span>
+        Основная информация
+      </h2>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 pb-6 border-b divider">
+        <div>
+          <div class="label flex items-center gap-2"><span>👤</span>Руководитель</div>
+          <div class="value mt-2">{{ director_name or '—' }}</div>
+          {% if director_inn %}<div class="text-xs text-gray-500 mt-1">ИНН: {{ director_inn }}</div>{% endif %}
+        </div>
+        <div>
+          <div class="label flex items-center gap-2"><span>📋</span>ИНН</div>
+          <div class="value mt-2">{{ inn }}</div>
+        </div>
+        <div>
+          <div class="label flex items-center gap-2"><span>📋</span>ОГРН</div>
+          <div class="value mt-2">{{ ogrn or '—' }}</div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-6">
+        <div>
+          <div class="label flex items-center gap-2"><span>📍</span>Адрес</div>
+          <div class="value mt-2 text-sm leading-relaxed">{{ address or '—' }}</div>
+        </div>
+        <div class="sm:col-span-2">
+          <div class="label flex items-center gap-2"><span>👥</span>Учредители</div>
+          <div class="mt-2 space-y-2">
+            {% for f in founders %}
+              <div class="founder-card p-3">
+                <div class="value">{{ f.name }}</div>
+                {% if f.inn %}<div class="text-xs text-gray-500 mt-0.5">ИНН: {{ f.inn }}</div>{% endif %}
+                {% if f.share_pct %}<div class="text-sm text-gray-300 mt-1">(доля: {{ f.share_pct }}%)</div>{% endif %}
+              </div>
+            {% else %}
+              <div class="text-gray-500 text-sm">Не указаны</div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# ════════ ФИНАНСОВЫЙ ОТЧЁТ ════════ #}
+    {% if finance_years %}
+    <div class="card p-6">
+      <h2 class="section-title flex items-center justify-center gap-2 mb-6">
+        <span>📈</span>Финансовый отчёт
+      </h2>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-8 items-center">
+        <div class="flex justify-center">
+          <div class="relative w-56 h-56">
+            <canvas id="financeChart"></canvas>
+            <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <span id="chartYear" class="text-xl font-semibold">{{ finance_years[0].year }} год</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="space-y-4 text-center sm:text-left">
+          <div>
+            <div class="accent text-lg font-semibold">Выручка</div>
+            <div id="revText" class="text-2xl font-bold mt-1">—</div>
+          </div>
+          <div>
+            <div class="accent text-lg font-semibold">Прибыль</div>
+            <div id="profText" class="text-2xl font-bold mt-1">—</div>
+          </div>
+          {% if tax_violations_sum %}
+          <div>
+            <div class="warn text-lg font-semibold">Налоги (штрафы)</div>
+            <div class="text-2xl font-bold mt-1 warn">{{ fmt_money(tax_violations_sum) }}</div>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if capital %}
+      <div class="text-center mt-6">
+        <div class="accent text-lg font-semibold">Уставный капитал</div>
+        <div class="text-xl font-bold mt-1">{{ fmt_money(capital) }}</div>
+      </div>
+      {% endif %}
+
+      {% if finance_years|length > 1 %}
+      <div class="mt-6 pt-4 border-t divider">
+        <div class="text-center text-sm text-gray-400 mb-3">Расширенный финансовый отчёт по годам</div>
+        <div class="flex justify-center gap-2 flex-wrap">
+          {% for y in finance_years %}
+          <button class="year-btn px-4 py-2 rounded-lg text-sm font-medium {% if loop.first %}active{% endif %}"
+                  data-year="{{ y.year }}"
+                  data-revenue="{{ y.revenue }}"
+                  data-profit="{{ y.profit }}">{{ y.year }} год</button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {# ════════ АРБИТРАЖНЫЕ СУДЫ ════════ #}
+    <div class="card p-6">
+      <h2 class="section-title flex items-center justify-center gap-2 mb-6">
+        <span>⚖️</span>Арбитражные суды
+      </h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="card p-4">
+          <h3 class="accent text-center font-semibold mb-3">За все время</h3>
+          <div class="flex justify-between text-sm py-1">
+            <span class="text-gray-400">Истец:</span>
+            <span class="value">{{ fmt_money(arb_total_plaintiff) }}</span>
+          </div>
+          <div class="flex justify-between text-sm py-1">
+            <span class="text-gray-400">Ответчик:</span>
+            <span class="value">{{ fmt_money(arb_total_defendant) }}</span>
+          </div>
+        </div>
+        <div class="card p-4">
+          <h3 class="accent text-center font-semibold mb-3">Дел всего</h3>
+          <div class="flex justify-between text-sm py-1">
+            <span class="text-gray-400">Как истец:</span>
+            <span class="value">{{ arb_count_plaintiff }}</span>
+          </div>
+          <div class="flex justify-between text-sm py-1">
+            <span class="text-gray-400">Как ответчик:</span>
+            <span class="value">{{ arb_count_defendant }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# ════════ ЭКСПРЕСС-ОТЧЁТ ════════ #}
+    <div class="card p-6">
+      <div class="flex items-center justify-between mb-6 flex-wrap gap-2">
+        <h2 class="text-xl font-semibold">Экспресс-отчёт</h2>
+        <div class="flex gap-2">
+          <span class="px-3 py-1 rounded-full text-sm pill-neg">⚠ Отрицательные факторы: {{ neg_factors|length }}</span>
+          <span class="px-3 py-1 rounded-full text-sm pill-pos">✓ Положительные факторы: {{ pos_factors|length }}</span>
+        </div>
+      </div>
+
+      {% if neg_factors %}
+      <h3 class="text-lg font-semibold mb-3 neg">Отрицательные факторы</h3>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+        {% for f in neg_factors %}
+        <div class="factor-card p-4 flex items-start gap-3">
+          <div class="w-7 h-7 flex-shrink-0 rounded-full bg-red-500/20 flex items-center justify-center neg">⚠</div>
+          <div>
+            <div class="value text-sm leading-tight">{{ f.label }}</div>
+            <div class="text-xs neg mt-1">{{ f.detail }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <h3 class="text-lg font-semibold mb-3">Положительные факторы</h3>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {% for f in pos_factors %}
+        <div class="factor-card p-4 flex items-start gap-3">
+          <div class="w-7 h-7 flex-shrink-0 rounded-full bg-green-500/20 flex items-center justify-center pos">✓</div>
+          <div>
+            <div class="value text-sm leading-tight">{{ f.label }}</div>
+            <div class="text-xs text-gray-400 mt-1">{{ f.detail }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# ════════ ИТОГОВАЯ ОЦЕНКА ════════ #}
+    <div class="card p-8 text-center">
+      <h2 class="section-title mb-4">Итоговая оценка</h2>
+      <p class="text-gray-300 max-w-2xl mx-auto mb-6 text-sm sm:text-base leading-relaxed">
+        На основании проведённого анализа, организация <strong class="text-white">{{ company_name }}</strong>
+        имеет {{ risk_label_lower }} уровень риска.
+        Обнаружено <strong class="{% if neg_factors %}neg{% else %}pos{% endif %}">{{ neg_factors|length }}</strong>
+        отрицательных факторов и
+        <strong class="pos">{{ pos_factors|length }}</strong> положительных показателей.
+      </p>
+      <div class="inline-flex items-center gap-2 px-6 py-3 rounded-full font-semibold border-2
+        {% if risk_level == 'low' %}border-blue-500/40 text-blue-400 bg-blue-500/10
+        {% elif risk_level == 'medium' %}border-yellow-500/40 text-yellow-400 bg-yellow-500/10
+        {% elif risk_level == 'high' %}border-orange-500/40 text-orange-400 bg-orange-500/10
+        {% else %}border-red-500/40 text-red-400 bg-red-500/10{% endif %}">
+        <span>
+          {% if risk_level == 'low' %}🟢
+          {% elif risk_level == 'medium' %}🟡
+          {% elif risk_level == 'high' %}🟠
+          {% else %}🔴{% endif %}
+        </span>
+        <span>{{ risk_label }} уровень риска</span>
+      </div>
+    </div>
+
+    <div class="text-center text-xs text-gray-600 py-4">
+      MondayCompany · Отчёт сгенерирован {{ generated_at }}
+    </div>
+  </div>
+
+<script>
+  // Telegram WebApp init
+  if (window.Telegram && window.Telegram.WebApp) {
+    Telegram.WebApp.ready();
+    Telegram.WebApp.expand();
+  }
+
+  const fmtMoney = (v) => {
+    v = Number(v) || 0;
+    if (v >= 1e9) return (v/1e9).toFixed(1) + ' млрд ₽';
+    if (v >= 1e6) return (v/1e6).toFixed(1) + ' млн ₽';
+    if (v >= 1e3) return (v/1e3).toFixed(0) + ' тыс ₽';
+    return v.toFixed(0) + ' ₽';
+  };
+
+  const years = {{ finance_years_json|safe }};
+  const yearLabelEl = document.getElementById('chartYear');
+  const revEl = document.getElementById('revText');
+  const profEl = document.getElementById('profText');
+  let chart;
+
+  function renderYear(y) {
+    if (!y) return;
+    yearLabelEl.textContent = y.year + ' год';
+    revEl.textContent = fmtMoney(y.revenue);
+    profEl.textContent = fmtMoney(y.profit);
+    const expense = Math.max((y.revenue || 0) - (y.profit || 0), 0);
+    const data = {
+      labels: ['Прибыль', 'Прочие расходы'],
+      datasets: [{
+        data: [Math.max(y.profit || 0, 0), expense || 1],
+        backgroundColor: ['#FCD34D', '#60A5FA'],
+        borderWidth: 0,
+      }]
+    };
+    if (chart) {
+      chart.data = data;
+      chart.update();
+    } else {
+      const ctx = document.getElementById('financeChart');
+      if (ctx) {
+        chart = new Chart(ctx, {
+          type: 'doughnut',
+          data: data,
+          options: {
+            cutout: '70%',
+            plugins: { legend: { display: false }, tooltip: {
+              callbacks: { label: (t) => t.label + ': ' + fmtMoney(t.parsed) }
+            }},
+            animation: { duration: 600 }
+          }
+        });
+      }
+    }
+  }
+
+  if (years && years.length) renderYear(years[0]);
+
+  document.querySelectorAll('.year-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.year-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const y = {
+        year: btn.dataset.year,
+        revenue: Number(btn.dataset.revenue || 0),
+        profit: Number(btn.dataset.profit || 0)
+      };
+      renderYear(y);
+    });
+  });
+</script>
+</body>
+</html>

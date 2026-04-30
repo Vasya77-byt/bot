@@ -392,3 +392,114 @@ class TestAcquiringApproved:
             resp = await c.post("/tochka/webhook", data=body)
         assert resp.status == 200
         assert len(subscription.paid_calls) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /report/{token} — HTML-отчёт (Telegram WebApp)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class FakeCompanyService:
+    async def fetch(self, inn: str):
+        from schemas import CompanyData
+        return CompanyData(inn=inn, name="ТЕСТОВАЯ ООО",
+                           ogrn="1027700000001", status="Действующее",
+                           address="Москва")
+
+
+class FakeSecurityService:
+    async def check(self, *, inn, name=None, okved=None, ogrn=None):
+        from security_check import SecurityResult
+        return SecurityResult(enforcement_count=2)
+
+
+class FakeZchb:
+    enabled = True
+
+    async def get_card(self, inn: str):
+        from zchb_client import CardSummary
+        return CardSummary(name_short="ТЕСТОВАЯ ООО",
+                           ogrn="1027700000001", status="Действующее")
+
+
+class TestReportEndpoint:
+    @pytest.mark.asyncio
+    async def test_report_returns_html_for_valid_token(
+        self, tochka, subscription, tmp_path,
+    ):
+        from report_tokens import ReportTokenStore
+
+        store = ReportTokenStore(filepath=str(tmp_path / "tokens.json"))
+        token = store.create(user_id=1, inn="7707083893")
+        app = build_app(
+            tochka, subscription,
+            report_tokens=store,
+            company_service=FakeCompanyService(),
+            security_service=FakeSecurityService(),
+            zchb=FakeZchb(),
+        )
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get(f"/report/{token}")
+            assert resp.status == 200
+            assert resp.content_type == "text/html"
+            text = await resp.text()
+        assert "ТЕСТОВАЯ ООО" in text
+        assert "7707083893" in text
+
+    @pytest.mark.asyncio
+    async def test_report_returns_404_for_invalid_token(
+        self, tochka, subscription, tmp_path,
+    ):
+        from report_tokens import ReportTokenStore
+
+        store = ReportTokenStore(filepath=str(tmp_path / "tokens.json"))
+        app = build_app(
+            tochka, subscription,
+            report_tokens=store,
+            company_service=FakeCompanyService(),
+            security_service=FakeSecurityService(),
+            zchb=FakeZchb(),
+        )
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/report/" + "f" * 32)
+            assert resp.status == 404
+            text = await resp.text()
+        assert "ссылка" in text.lower() or "просрочен" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_report_returns_503_when_not_configured(
+        self, tochka, subscription,
+    ):
+        # Без report_tokens — отвечаем 503
+        app = build_app(tochka, subscription)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/report/anytoken")
+            assert resp.status == 503
+
+    @pytest.mark.asyncio
+    async def test_report_handles_zchb_failure_gracefully(
+        self, tochka, subscription, tmp_path,
+    ):
+        from report_tokens import ReportTokenStore
+
+        class FailingZchb:
+            enabled = True
+
+            async def get_card(self, inn):
+                raise RuntimeError("zchb down")
+
+        store = ReportTokenStore(filepath=str(tmp_path / "tokens.json"))
+        token = store.create(user_id=1, inn="7707083893")
+        app = build_app(
+            tochka, subscription,
+            report_tokens=store,
+            company_service=FakeCompanyService(),
+            security_service=FakeSecurityService(),
+            zchb=FailingZchb(),
+        )
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get(f"/report/{token}")
+            # Даже без zchb отчёт должен отрендериться — есть данные company
+            assert resp.status == 200
+            text = await resp.text()
+        assert "ТЕСТОВАЯ ООО" in text

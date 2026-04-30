@@ -136,6 +136,8 @@ class TestAnalyzeCompany:
             age_years=30, revenue=100_000_000_000.0, profit=10_000_000_000.0,
             employees=250000, region="Москва", status="Действующая",
         )
+        # Парсер не нашёл секций (тест-модель вернула «ИИ-анализ готов»),
+        # поэтому fallback — сырая строка
         assert result == "ИИ-анализ готов"
         prompt = captured_prompts[0]
         assert "Сбербанк" in prompt
@@ -145,10 +147,11 @@ class TestAnalyzeCompany:
         # Денежные суммы форматируются
         assert "100.0 млрд" in prompt
         assert "10.0 млрд" in prompt
-        # Шаблон вывода
-        assert "ИТОГОВАЯ ОЦЕНКА" in prompt
-        assert "ФИНАНСОВОЕ СОСТОЯНИЕ" in prompt
-        assert "ВЫЯВЛЕННЫЕ РИСКИ" in prompt
+        # Новый шаблон вывода: 4 секции
+        assert "ВЫВОД" in prompt
+        assert "ПЛЮСЫ" in prompt
+        assert "РИСКИ" in prompt
+        assert "РЕКОМЕНДАЦИЯ" in prompt
 
     @pytest.mark.asyncio
     async def test_prompt_handles_missing_fields(self, monkeypatch):
@@ -195,3 +198,80 @@ class TestAnalyzeCompany:
         monkeypatch.setattr(client, "_chat", lambda p: None)
         result = await client.analyze_company(name="X", inn="1")
         assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Парсер ответа модели и формат вывода
+# ──────────────────────────────────────────────────────────────────────
+
+from gigachat_client import _format_analysis, _parse_analysis, _verdict_emoji
+
+
+class TestVerdictEmoji:
+    def test_critical(self):
+        assert _verdict_emoji("критический") == "🔴"
+
+    def test_high(self):
+        assert _verdict_emoji("высокий риск") == "🟠"
+
+    def test_caution(self):
+        assert _verdict_emoji("осторожно") == "🟡"
+
+    def test_safe(self):
+        assert _verdict_emoji("безопасно") == "🟢"
+
+    def test_unknown(self):
+        assert _verdict_emoji("какая-то муть") == "⚪"
+
+
+class TestParseAnalysis:
+    def test_full_response(self):
+        text = (
+            "ВЫВОД: осторожно\n"
+            "ПЛЮСЫ: небольшой штат, отсутствие ФССП\n"
+            "РИСКИ: низкий рейтинг, есть задолженности\n"
+            "РЕКОМЕНДАЦИЯ: запросить отчётность, обсудить предоплату"
+        )
+        out = _parse_analysis(text)
+        assert out["verdict"] == "осторожно"
+        assert "штат" in out["pluses"]
+        assert "рейтинг" in out["risks"]
+        assert "предоплату" in out["recommendation"]
+
+    def test_handles_extra_whitespace(self):
+        text = "ВЫВОД  :  безопасно\n  ПЛЮСЫ :  крупная компания  "
+        out = _parse_analysis(text)
+        assert out["verdict"] == "безопасно"
+        assert out["pluses"] == "крупная компания"
+
+    def test_missing_section_empty_string(self):
+        text = "ВЫВОД: высокий риск"
+        out = _parse_analysis(text)
+        assert out["verdict"] == "высокий риск"
+        assert out["risks"] == ""
+        assert out["recommendation"] == ""
+
+
+class TestFormatAnalysis:
+    def test_complete_format(self):
+        raw = (
+            "ВЫВОД: осторожно\n"
+            "ПЛЮСЫ: небольшой штат\n"
+            "РИСКИ: низкий рейтинг\n"
+            "РЕКОМЕНДАЦИЯ: запросить отчётность"
+        )
+        result = _format_analysis(raw)
+        assert "🟡 ВЫВОД: осторожно" in result
+        assert "✅ Плюсы: небольшой штат" in result
+        assert "⚠️ Риски: низкий рейтинг" in result
+        assert "💡 РЕКОМЕНДАЦИЯ: запросить отчётность" in result
+
+    def test_emoji_for_high_risk(self):
+        raw = "ВЫВОД: высокий риск\nПЛЮСЫ: нет\nРИСКИ: всё плохо\nРЕКОМЕНДАЦИЯ: не работать"
+        result = _format_analysis(raw)
+        assert result.startswith("🟠 ВЫВОД: высокий риск")
+
+    def test_unparseable_returns_raw(self):
+        raw = "Какой-то непонятный ответ без структуры"
+        result = _format_analysis(raw)
+        assert result == raw

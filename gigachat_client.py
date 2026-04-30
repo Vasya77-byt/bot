@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -16,6 +17,25 @@ logger = logging.getLogger("financial-architect")
 
 AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 API_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+
+
+# Маппинг текстового вердикта → эмодзи. Используется при рендере итога.
+_VERDICT_EMOJI = [
+    ("критич", "🔴"),
+    ("высок",  "🟠"),
+    ("осторож", "🟡"),
+    ("безопас", "🟢"),
+    ("надёж",   "🟢"),
+    ("надеж",   "🟢"),
+]
+
+
+def _verdict_emoji(verdict: str) -> str:
+    v = (verdict or "").lower()
+    for needle, emoji in _VERDICT_EMOJI:
+        if needle in v:
+            return emoji
+    return "⚪"
 
 
 class GigaChatClient:
@@ -120,33 +140,64 @@ class GigaChatClient:
         company_info = "\n".join(parts)
 
         prompt = (
-            f"Ты — эксперт по оценке благонадёжности российских компаний. "
-            f"Твоя задача — помочь предпринимателю решить, безопасно ли начинать сотрудничество с этой компанией.\n\n"
-            f"Данные получены из реестров ФНС/DaData по конкретному ИНН:\n{company_info}\n\n"
-            f"ВАЖНО: Данные из реестров могут быть неполными — например, "
-            f"у крупных компаний ИНН может принадлежать одному юрлицу из группы, "
-            f"а не всей организации. Используй свои знания о компании, "
-            f"чтобы дополнить и проверить данные. Если реестровые данные расходятся "
-            f"с реальным масштабом компании — укажи это явно.\n\n"
-            f"Составь анализ строго по шаблону. Каждый пункт — конкретно, без общих фраз.\n\n"
-            f"ИТОГОВАЯ ОЦЕНКА: [Надёжный партнёр / Требует осторожности / Высокий риск]\n\n"
-            f"📊 ФИНАНСОВОЕ СОСТОЯНИЕ\n"
-            f"Оцени выручку, прибыль, рентабельность. Если данные из реестра неполные "
-            f"или очевидно не отражают реальный масштаб — скажи об этом и дай оценку "
-            f"на основе своих знаний о компании.\n\n"
-            f"⚠️ ВЫЯВЛЕННЫЕ РИСКИ\n"
-            f"Перечисли конкретные риски. Каждый риск — отдельная строка с пояснением. "
-            f"Не считай риском то, что противоречит реальным фактам о компании "
-            f"(например, не называй крупный банк «молодой компанией» только потому что "
-            f"в реестре стоит дата регистрации конкретного юрлица).\n\n"
-            f"✅ ПОЛОЖИТЕЛЬНЫЕ ФАКТОРЫ\n"
-            f"Перечисли конкретные сильные стороны — как из реестровых данных, "
-            f"так и из общеизвестных фактов о компании.\n\n"
-            f"📋 РЕКОМЕНДАЦИИ К РАБОТЕ\n"
-            f"Дай 2-3 конкретных совета: какие документы запросить, "
-            f"на что обратить внимание при заключении договора, "
-            f"какие условия прописать для снижения рисков.\n\n"
-            f"Пиши чётко и по делу."
+            "Ты эксперт по оценке надёжности российских контрагентов. "
+            "По данным компании дай краткий вердикт.\n\n"
+            f"Данные из реестров ФНС/DaData:\n{company_info}\n\n"
+            "Если реестровые данные не соответствуют реальному масштабу "
+            "компании (например, у крупного банка в выписке указано одно "
+            "юрлицо группы) — учти это в анализе.\n\n"
+            "Ответь СТРОГО в этом формате — одна строка на каждое поле, "
+            "без markdown, без нумерации, без пустых строк:\n\n"
+            "ВЫВОД: <одно из: безопасно | осторожно | высокий риск | критический>\n"
+            "ПЛЮСЫ: <2-4 факта через запятую>\n"
+            "РИСКИ: <2-4 факта через запятую>\n"
+            "РЕКОМЕНДАЦИЯ: <1-2 конкретных действия через запятую>"
         )
 
-        return await asyncio.to_thread(self._chat, prompt)
+        raw = await asyncio.to_thread(self._chat, prompt)
+        if raw is None:
+            return None
+        return _format_analysis(raw)
+
+
+def _parse_analysis(text: str) -> dict:
+    """Разбирает ответ модели на 4 секции. Возвращает dict с ключами
+    verdict, pluses, risks, recommendation. Отсутствующие — пустые строки."""
+    out = {"verdict": "", "pluses": "", "risks": "", "recommendation": ""}
+    labels = [
+        ("verdict",        "ВЫВОД"),
+        ("pluses",         "ПЛЮСЫ"),
+        ("risks",          "РИСКИ"),
+        ("recommendation", "РЕКОМЕНДАЦИЯ"),
+    ]
+    # Один проход: для каждой метки находим её значение до следующей метки.
+    for i, (key, label) in enumerate(labels):
+        # До следующей метки или конца строки
+        next_labels = [lbl for _, lbl in labels[i + 1:]]
+        stop = "|".join(next_labels) or r"\Z"
+        pattern = rf"{label}\s*:\s*(.+?)(?=\n\s*(?:{stop})\s*:|\Z)"
+        m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if m:
+            out[key] = m.group(1).strip().rstrip(".")
+    return out
+
+
+def _format_analysis(raw: str) -> str:
+    """Парсит и собирает блок в желаемом формате с эмодзи.
+    Если структура не распарсилась — возвращает сырой текст."""
+    parsed = _parse_analysis(raw)
+    if not (parsed["verdict"] or parsed["risks"] or parsed["pluses"]):
+        # Парсинг не удался — возвращаем как есть
+        return raw.strip()
+
+    emoji = _verdict_emoji(parsed["verdict"])
+    lines = [f"{emoji} ВЫВОД: {parsed['verdict'] or '—'}", ""]
+    if parsed["pluses"]:
+        lines.append(f"✅ Плюсы: {parsed['pluses']}")
+        lines.append("")
+    if parsed["risks"]:
+        lines.append(f"⚠️ Риски: {parsed['risks']}")
+        lines.append("")
+    if parsed["recommendation"]:
+        lines.append(f"💡 РЕКОМЕНДАЦИЯ: {parsed['recommendation']}")
+    return "\n".join(lines).rstrip()

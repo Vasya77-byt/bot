@@ -861,8 +861,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             if result:
                 company_name = company.name if company else inn_part
                 await callback_query.message.reply_text(
-                    f"🤖 ИИ-анализ: {company_name}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🤖 ИИ-анализ\n"
+                    f"Компания: {company_name}\n\n"
                     f"{result}"
                 )
             else:

@@ -2079,6 +2079,20 @@ async def handle_text_message(client: Client, message) -> None:
         await message.reply_text(reply, disable_web_page_preview=True)
         return
 
+    # Если запрос явно похож на вопрос — сразу ИИ-помощник, без DaData.
+    # Иначе юзер увидит «по запросу не найдено» вместо ответа на свой вопрос.
+    if _looks_like_question(text):
+        ai_reply = await gigachat.help_user(text.strip())
+        if ai_reply:
+            await message.reply_text(_format_help_reply(ai_reply))
+            return
+        # ИИ недоступен — даём минимальный fallback
+        await message.reply_text(
+            "👋 Я помогаю с проверкой компаний. Отправьте ИНН "
+            "или название, либо нажмите /menu."
+        )
+        return
+
     # Поиск по началу названия компании (DaData suggest)
     if _looks_like_company_query(text):
         suggestions = await company_service.suggest(text.strip(), count=5)
@@ -2089,14 +2103,11 @@ async def handle_text_message(client: Client, message) -> None:
                 reply_markup=_search_results_keyboard(suggestions),
             )
             return
-        # Поиск выполнен, но пусто — спросим ИИ-помощника, может это
-        # был вопрос а не название компании
+        # Suggest пуст — это либо очень редкое название, либо вопрос
+        # которого мы не распознали выше. ИИ-помощник как fallback.
         ai_reply = await gigachat.help_user(text.strip())
         if ai_reply:
-            await message.reply_text(
-                f"🔎 По запросу «{text.strip()}» компаний не найдено.\n\n"
-                f"🤖 {ai_reply}"
-            )
+            await message.reply_text(_format_help_reply(ai_reply))
             return
         await message.reply_text(
             f"🔎 По запросу «{text.strip()}» ничего не найдено.\n\n"
@@ -2104,16 +2115,25 @@ async def handle_text_message(client: Client, message) -> None:
         )
         return
 
-    # Ничего не подошло — это либо неизвестная slash-команда, либо
-    # короткий текст / приветствие. Зовём ИИ-помощника, он подскажет.
+    # Ничего не подошло — короткий текст или неизвестная slash-команда.
+    # ИИ подскажет.
     ai_reply = await gigachat.help_user(text.strip())
     if ai_reply:
-        await message.reply_text(f"🤖 {ai_reply}")
+        await message.reply_text(_format_help_reply(ai_reply))
         return
 
-    # Fallback если ИИ недоступен
     await message.reply_text(
         "👋 Отправьте ИНН или название компании, либо нажмите /menu."
+    )
+
+
+def _format_help_reply(ai_text: str) -> str:
+    """Форматирует ответ ИИ-помощника единым стилем."""
+    return (
+        "🤖 Помощник MondayCompany\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{ai_text.strip()}\n\n"
+        "💡 /menu — главное меню"
     )
 
 
@@ -2146,6 +2166,29 @@ def _looks_like_company_query(text: str) -> bool:
         return False
     # Должна быть хотя бы одна буква (кириллическая или латинская)
     return any(c.isalpha() for c in clean)
+
+
+# Слова которые почти наверняка означают вопрос/просьбу о помощи,
+# а не название компании. На таком запросе НЕ дёргаем DaData (иначе
+# юзер увидит «по запросу X не найдено» — это путает).
+_QUESTION_MARKERS = (
+    "как ", "что ", "что-", "где ", "когда ", "почему", "зачем",
+    "можно ли", "можно", "помоги", "помогите", "подскажи", "подскажите",
+    "не понимаю", "не работает", "не могу", "хочу ", "нужно ",
+    "что делать", "как сделать", "как получить", "как найти",
+    "как добавить", "как отменить", "как проверить",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """True если текст явно вопрос/просьба, а не название компании."""
+    clean = text.strip().lower()
+    if not clean:
+        return False
+    if "?" in clean:
+        return True
+    return any(clean.startswith(m) or f" {m}" in f" {clean}"
+               for m in _QUESTION_MARKERS)
 
 
 def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarkup:

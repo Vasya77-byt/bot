@@ -861,23 +861,74 @@ def _format_finance(card, security, company, inn: str) -> str:
         sections.append("\n".join(block))
 
     # ━━━ НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ━━━
+    # Дополнительные детекторы рисков из агрегированных данных
+    risk_index = (security.zchb_risk_level or "").lower() if security else ""
+    risk_taxes = ""
+    if security and security.zchb_details:
+        # zchb_details = "Налоговые риски: <уровень>"
+        d = security.zchb_details.lower()
+        if "высок" in d:
+            risk_taxes = "высокий"
+        elif "средн" in d:
+            risk_taxes = "средний"
+
+    if "низк" in risk_index:
+        findings.append("🔴 Низкий индекс надёжности ЗЧБ — повышенный риск работы")
+    elif "средн" in risk_index:
+        findings.append("🟡 Средний индекс ЗЧБ — требует дополнительной проверки")
+    if risk_taxes == "высокий":
+        findings.append("🔴 Высокие налоговые риски (по оценке ЗЧБ)")
+    elif risk_taxes == "средний":
+        findings.append("🟡 Средние налоговые риски (по оценке ЗЧБ)")
+
+    # Низкая рентабельность (только для НЕ-финансовых, у банков своя метрика)
+    if not is_financial and history:
+        last_with_data = next(
+            (f for f in history
+             if (f.revenue and f.revenue > 0) and f.profit is not None),
+            None,
+        )
+        if last_with_data:
+            margin = last_with_data.profit / last_with_data.revenue * 100
+            if 0 < margin < 5:
+                findings.append(
+                    f"🟡 Низкая рентабельность: {margin:.0f}% — на грани окупаемости"
+                )
+            elif margin < 0:
+                # уже было findings выше про убыточность
+                pass
+
+    # Малый штат + большая выручка (типичная схема технической компании)
+    if not is_financial and employees and employees <= 5 and history:
+        last_revenue = next(
+            (f.revenue or f.income or 0 for f in history
+             if (f.revenue or f.income or 0) > 0),
+            0,
+        )
+        if last_revenue > 20_000_000:  # > 20 млн с малым штатом
+            findings.append(
+                f"🟡 Высокая выручка ({_fmt_money_short(int(last_revenue))}) "
+                f"при штате {employees} — типично для торговых/технических компаний"
+            )
+
+    # Положительные сигналы — но не показываем противоречивые
+    has_negative_signals = bool(findings) or "низк" in risk_index
     positives = []
     if card is not None:
-        if not card.in_debt_registry and not card.in_no_reporting_registry:
+        if (not card.in_debt_registry and not card.in_no_reporting_registry
+                and not has_negative_signals):
             positives.append("✅ В реестрах ФНС нет негативных записей")
         if card.contracts_supplier_count > 0 and not card.is_unreliable_supplier:
             positives.append("✅ Работает с госконтрактами без претензий")
         if card.licenses_count > 0:
             positives.append(f"✅ Имеет лицензии ({card.licenses_count})")
-    if security and security.zchb_risk_level:
-        if "высок" in security.zchb_risk_level.lower():
-            positives.append("✅ Высокий индекс надёжности (ЗЧБ)")
+    if "высок" in risk_index:
+        positives.append("✅ Высокий индекс надёжности (ЗЧБ)")
     if fssp_count == 0:
         positives.append("✅ Нет исполнительных производств ФССП")
     if card and card.tax_debt_sum == 0:
         positives.append("✅ Нет задолженности перед бюджетом")
     if is_financial and not history:
-        # Для банков — отметим что финданные ограничены, чтобы клиент не обманывался
         positives.append(
             "ℹ️ Это банк/страховщик — расширенная отчётность на cbr.ru"
         )

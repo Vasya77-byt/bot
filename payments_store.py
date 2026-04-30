@@ -114,6 +114,10 @@ class PaymentsStore:
     def total_revenue(self) -> float:
         return sum(r.get("amount", 0) for r in self._data if r.get("status") == "paid")
 
+    def iter_all(self) -> list[PaymentRecord]:
+        """Все записи журнала. Используется для админ-отчёта."""
+        return [PaymentRecord(**r) for r in self._data]
+
     def iter_pending(
         self,
         older_than_seconds: int = 0,

@@ -32,6 +32,7 @@ from subscription import SubscriptionService
 from tochka_client import TochkaClient
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
+from admin_stats import build_admin_report, parse_admin_user_ids
 from zchb_client import ZchbClient
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -62,6 +63,9 @@ subscription_service: Optional[SubscriptionService] = None
 # Обязательная подписка на канал. Заполняется в main() из Settings.
 # Пусто = проверка канала отключена.
 required_channel: str = ""
+
+# Admin user IDs для команды /admin. Заполняется в main() из Settings.
+admin_user_ids: set[int] = set()
 
 # Хранение состояния пользователей (ожидание ИНН)
 # Значение: строка (action) или dict с данными многошагового флоу
@@ -2872,13 +2876,47 @@ async def handle_documents(client: Client, message) -> None:
     )
 
 
+async def handle_admin(client: Client, message) -> None:
+    """Команда /admin — реалтайм-отчёт для админов.
+    Доступ ограничен set'ом admin_user_ids (заполняется из ENV)."""
+    user_id = message.from_user.id
+    if not admin_user_ids:
+        # Если админы не настроены — команда вообще не работает.
+        # Не палим её существование тем кто случайно ввёл.
+        return
+    if user_id not in admin_user_ids:
+        # Тихо игнорируем — обычный юзер не увидит даже намёка на команду
+        logger.info("Admin: access denied for user_id=%s", user_id)
+        return
+
+    await message.reply_text("⏳ Собираю отчёт...")
+    try:
+        report = await build_admin_report(
+            users=user_store,
+            payments=payments_store,
+            monitoring=monitoring_store,
+            zchb=zchb,
+        )
+    except Exception as exc:
+        logger.exception("Admin report failed: %s", exc)
+        await message.reply_text(
+            "⚠️ Не удалось собрать отчёт. Подробности в логах:\n"
+            f"`{type(exc).__name__}: {exc}`"
+        )
+        return
+    await message.reply_text(report, disable_web_page_preview=True)
+
+
 def main() -> None:
-    global subscription_service, required_channel
+    global subscription_service, required_channel, admin_user_ids
 
     settings = Settings.from_env()
     required_channel = settings.required_channel
     if required_channel:
         logger.info("Required channel subscription: %s", required_channel)
+    admin_user_ids = parse_admin_user_ids(settings.admin_user_ids)
+    if admin_user_ids:
+        logger.info("Admins configured: %d user(s)", len(admin_user_ids))
     app = build_app(settings)
 
     # Инициализация платёжного сервиса
@@ -2925,6 +2963,7 @@ def main() -> None:
             MessageHandler(handle_tarifs, filters.command(["tarifs"])),
             MessageHandler(handle_cancel, filters.command(["cancel"])),
             MessageHandler(handle_documents, filters.command(["documents"])),
+            MessageHandler(handle_admin, filters.command(["admin"])),
             CallbackQueryHandler(handle_callback),
             MessageHandler(handle_contact, filters.contact),
             MessageHandler(
@@ -2934,6 +2973,7 @@ def main() -> None:
                     "my_subscription", "cancel_subscription", "enable_subscription",
                     "monitor", "unmonitor", "monitoring", "referral",
                     "offer", "disclaimer", "tarifs", "cancel", "documents",
+                    "admin",
                 ]),
             ),
         ]

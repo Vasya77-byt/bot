@@ -1556,3 +1556,31 @@ class ZchbClient:
         except ValueError as exc:
             logger.warning("ZCHB %s invalid JSON: %s", method, exc)
         return None
+
+    async def get_stats(self) -> Optional[Dict[str, Any]]:
+        """Возвращает статистику использования ключа: остаток запросов,
+        сумму использованных, дату окончания тарифа.
+        Используется для админ-отчёта.
+        Структура ответа: {stats, end_date, sum_request, rem_request}.
+        """
+        if not self.enabled:
+            return None
+        url = f"{self.base_url}/stats"
+        params = {"api_key": self.api_key, "_format": "json"}
+
+        def _call():
+            try:
+                resp = requests.get(url, params=params, timeout=self.timeout)
+                if resp.status_code != 200:
+                    logger.warning("ZCHB stats HTTP %s: %s",
+                                   resp.status_code, resp.text[:200])
+                    return None
+                data = resp.json()
+                if str(data.get("status", "")) != "200":
+                    return None
+                return data.get("body")
+            except (requests.RequestException, ValueError) as exc:
+                logger.warning("ZCHB stats failed: %s", exc)
+                return None
+
+        return await asyncio.to_thread(_call)

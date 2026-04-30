@@ -26,6 +26,8 @@ class Settings:
     # Обязательная подписка на канал. Пусто = проверка отключена.
     # Бот должен быть админом канала, иначе get_chat_member вернёт ошибку.
     required_channel: str = ""          # @username или -100... id
+    # Telegram user_id админов через запятую — для команды /admin
+    admin_user_ids: str = ""
 
     @property
     def payments_enabled(self) -> bool:
@@ -60,4 +62,5 @@ class Settings:
             webhook_port=int(os.getenv("WEBHOOK_PORT", "8080")),
             webhook_public_url=os.getenv("WEBHOOK_PUBLIC_URL", ""),
             required_channel=os.getenv("REQUIRED_CHANNEL", ""),
+            admin_user_ids=os.getenv("ADMIN_USER_IDS", ""),
         )

@@ -1,0 +1,20 @@
+[Unit]
+Description=Финансовый Архитектор — ежедневный бэкап в S3
+After=network-online.target
+Wants=network-online.target
+OnFailure=finarch-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/finarch-backup.sh
+# Защита: пускаем под отдельным пользователем при желании.
+# По умолчанию — root, потому что читаем .env (chmod 600).
+User=root
+Group=root
+
+# Уменьшаем шансы DoS — таймаут 10 минут на полный цикл.
+TimeoutStartSec=10min
+
+# Логи идут в journald через stdout/stderr
+StandardOutput=journal
+StandardError=journal

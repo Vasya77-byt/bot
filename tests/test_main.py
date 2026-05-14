@@ -1509,6 +1509,26 @@ class TestHandleStartReferral:
         assert "реферальной" not in msg.replies[0]["text"].lower()
 
     @pytest.mark.asyncio
+    async def test_utm_source_parsed_and_stored(self):
+        """Формат /start ref_<code>_<source> сохраняет UTM-источник."""
+        referrer = main.user_store.get(200)
+        ref_code = referrer.referral_code  # вида "ref_<8hex>"
+        msg = FakeMessage(text=f"/start {ref_code}_instagram", user_id=300)
+        await main.handle_start(client=None, message=msg)
+        p = main.user_store.get(300)
+        assert p.referrer_id == 200
+        assert p.referral_source == "instagram"
+
+    @pytest.mark.asyncio
+    async def test_no_utm_source_leaves_empty(self):
+        """Обычный /start ref_<code> без подчёркивания — source пустой."""
+        referrer = main.user_store.get(201)
+        ref_code = referrer.referral_code
+        msg = FakeMessage(text=f"/start {ref_code}", user_id=301)
+        await main.handle_start(client=None, message=msg)
+        assert main.user_store.get(301).referral_source == ""
+
+    @pytest.mark.asyncio
     async def test_non_ref_argument_ignored(self):
         # /start <что-то-не-ref> — не должно ломать
         msg = FakeMessage(text="/start payment_success", user_id=42)

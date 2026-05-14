@@ -149,11 +149,13 @@ class UserProfile:
     # Партнёрская программа
     referral_code: str = ""              # личный код вида "ref_<8 hex>"
     referrer_id: Optional[int] = None    # кто пригласил этого пользователя
+    referral_source: str = ""            # UTM-source из ref_<code>_<source>
     referral_bonus_granted: bool = False # бонус референту уже выдан (one-shot)
     invitee_bonus_granted: bool = False  # +15 дней приглашённому уже выданы (one-shot)
     referrals_count: int = 0             # сколько привлёк (включая Free)
     referrals_paid_count: int = 0        # сколько привлечённых оплатили
     referral_bonus_days_total: int = 0   # сколько дней получил суммарно
+    registered_at: str = ""              # ISO datetime первой регистрации
 
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
@@ -380,8 +382,12 @@ class UserStore:
                 return self._profile_from_raw(raw)
         return None
 
-    def set_referrer_by_code(self, invited_user_id: int, code: str) -> bool:
+    def set_referrer_by_code(
+        self, invited_user_id: int, code: str, source: str = "",
+    ) -> bool:
         """Привязывает приглашённого к референту по его коду.
+        Опционально сохраняет UTM-источник (instagram/email/telegram_chat/…).
+
         Возвращает True, если привязка прошла; False — если нельзя
         (само-реферал, нет такого кода, уже есть реферер)."""
         invited = self.get(invited_user_id)
@@ -394,12 +400,34 @@ class UserStore:
             return False  # само-реферал
 
         invited.referrer_id = referrer.user_id
+        if source:
+            # Ограничим длину/чарсет — защита от мусора в JSON
+            invited.referral_source = "".join(
+                c for c in source[:32] if c.isalnum() or c in "_-"
+            )
+        if not invited.registered_at:
+            from datetime import datetime, timezone
+            invited.registered_at = datetime.now(timezone.utc).isoformat()
         self.save_profile(invited)
 
         # Инкрементируем счётчик у референта
         referrer.referrals_count += 1
         self.save_profile(referrer)
         return True
+
+    def list_invitees(self, referrer_id: int) -> list[UserProfile]:
+        """Возвращает список профилей всех приглашённых данным юзером.
+        Не делает анонимизацию — это задача UI-слоя."""
+        result: list[UserProfile] = []
+        for raw in self._data.values():
+            if raw.get("referrer_id") == referrer_id:
+                result.append(self._profile_from_raw(raw))
+        # Сортируем по дате регистрации (новые наверху). Пустые даты — в конец.
+        result.sort(
+            key=lambda p: p.registered_at or "0",
+            reverse=True,
+        )
+        return result
 
     def award_referral_bonus(
         self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,

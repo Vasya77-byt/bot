@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from io import BytesIO
@@ -2867,9 +2868,21 @@ async def handle_start(client: Client, message) -> None:
 
     referral_message = ""
     if len(parts) >= 2 and parts[1].startswith("ref_"):
+        # Формат токена: ref_<8 hex> или ref_<8 hex>_<source>
+        # где source = utm-источник для аналитики (instagram/email/...)
+        token = parts[1]
+        # Разрезаем максимум на 3 части: ['ref', '<hex>', '<source>']
+        token_parts = token.split("_", 2)
+        if len(token_parts) >= 2:
+            ref_code = f"ref_{token_parts[1]}"
+            ref_source = token_parts[2] if len(token_parts) == 3 else ""
+        else:
+            ref_code = token
+            ref_source = ""
+
         # Создаём профиль приглашённого, если его ещё нет, и привязываем
         user_store.get(user_id)
-        if user_store.set_referrer_by_code(user_id, parts[1]):
+        if user_store.set_referrer_by_code(user_id, ref_code, source=ref_source):
             referral_message = (
                 f"🎁 Вы получили {REFERRAL_BONUS_DAYS} бесплатных дней, "
                 "для их получения приобретите подписку.\n\n"
@@ -2957,11 +2970,37 @@ def _bot_username(client: Client) -> str:
 
 
 async def handle_referral(client: Client, message) -> None:
-    """Команда /referral — показывает реф-код, ссылку и статистику."""
+    """Команда /referral — короткое summary + кнопка открыть Mini App.
+
+    Полный UI (шаблоны шеринга, прогресс, статус приглашённых,
+    UTM-генератор, tier-уровни) живёт в Mini App'е на
+    {webhook_public_url}/miniapp/referral. В чате — только статус.
+    """
     user_id = message.from_user.id
     profile = user_store.get(user_id)
-    text = _format_referral_message(profile, _bot_username(client))
-    await message.reply_text(text, disable_web_page_preview=True)
+    base_url = os.getenv("WEBHOOK_PUBLIC_URL", "").rstrip("/")
+    miniapp_url = f"{base_url}/miniapp/referral" if base_url else ""
+
+    summary = (
+        "🤝 Партнёрская программа\n\n"
+        f"Приглашено: {profile.referrals_count}\n"
+        f"Оплатили: {profile.referrals_paid_count}\n"
+        f"Получено дней: {profile.referral_bonus_days_total}\n\n"
+        "Откройте кабинет — там готовые шаблоны для шеринга, прогресс "
+        "к следующему уровню, статус приглашённых и UTM-генератор."
+    )
+    if miniapp_url.startswith("https://"):
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🚀 Открыть кабинет",
+                web_app=WebAppInfo(url=miniapp_url),
+            )],
+        ])
+        await message.reply_text(summary, reply_markup=keyboard)
+    else:
+        # Fallback: webhook_public_url не настроен — отдаём текстовый вариант
+        text = _format_referral_message(profile, _bot_username(client))
+        await message.reply_text(text, disable_web_page_preview=True)
 
 
 async def handle_offer(client: Client, message) -> None:
@@ -3186,6 +3225,9 @@ def main() -> None:
                 company_service=company_service,
                 security_service=security_service,
                 zchb=zchb,
+                users=user_store,
+                bot_token=settings.bot_token,
+                bot_username=_bot_username(app),
             )
             webhook_runner = await start_webhook_server(
                 web_app, host=settings.webhook_host, port=settings.webhook_port

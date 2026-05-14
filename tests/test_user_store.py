@@ -565,3 +565,84 @@ class TestAwardInviteeBonus:
         store.activate_subscription(2, "start", days=30)
         store.award_invitee_bonus(2)
         assert store.get(2).invitee_bonus_granted is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# UTM-источники и list_invitees для Mini App
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestReferralSourceAndInvitees:
+    def test_set_referrer_with_source_stores_it(self, store):
+        referrer = store.get(1)
+        ok = store.set_referrer_by_code(
+            2, referrer.referral_code, source="instagram",
+        )
+        assert ok is True
+        assert store.get(2).referral_source == "instagram"
+
+    def test_source_sanitized_to_allowed_chars(self, store):
+        """Мусор в source-полях должен фильтроваться."""
+        referrer = store.get(1)
+        store.set_referrer_by_code(
+            3, referrer.referral_code, source="bad/chars*and+space here",
+        )
+        # Остаются только латиница/цифры/_/-
+        src = store.get(3).referral_source
+        assert all(c.isalnum() or c in "_-" for c in src)
+        assert src == "badcharsandspacehere"
+
+    def test_source_truncated_to_32(self, store):
+        referrer = store.get(1)
+        long_src = "a" * 100
+        store.set_referrer_by_code(
+            4, referrer.referral_code, source=long_src,
+        )
+        assert len(store.get(4).referral_source) == 32
+
+    def test_set_referrer_without_source_leaves_empty(self, store):
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        assert store.get(2).referral_source == ""
+
+    def test_registered_at_set_on_first_referral_attach(self, store):
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        assert store.get(2).registered_at != ""
+
+    def test_list_invitees_returns_only_own_invitees(self, store):
+        ref1 = store.get(1)
+        ref2 = store.get(2)
+        store.set_referrer_by_code(10, ref1.referral_code)
+        store.set_referrer_by_code(11, ref1.referral_code)
+        store.set_referrer_by_code(20, ref2.referral_code)
+
+        invitees_of_1 = store.list_invitees(1)
+        invitees_of_2 = store.list_invitees(2)
+        ids_1 = {i.user_id for i in invitees_of_1}
+        ids_2 = {i.user_id for i in invitees_of_2}
+        assert ids_1 == {10, 11}
+        assert ids_2 == {20}
+
+    def test_list_invitees_empty_when_no_invitees(self, store):
+        store.get(99)  # обычный профиль без приглашённых
+        assert store.list_invitees(99) == []
+
+    def test_list_invitees_sorted_recent_first(self, store):
+        """Сортировка по registered_at DESC — новые сверху."""
+        ref = store.get(1)
+        store.set_referrer_by_code(10, ref.referral_code)
+        # Эмулируем что у 10 более раннее время регистрации
+        p10 = store.get(10)
+        p10.registered_at = "2020-01-01T00:00:00+00:00"
+        store.save_profile(p10)
+
+        store.set_referrer_by_code(11, ref.referral_code)
+        p11 = store.get(11)
+        p11.registered_at = "2024-06-01T00:00:00+00:00"
+        store.save_profile(p11)
+
+        invitees = store.list_invitees(1)
+        # 11 (2024) должен быть первым, 10 (2020) — вторым
+        assert invitees[0].user_id == 11
+        assert invitees[1].user_id == 10

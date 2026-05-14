@@ -57,6 +57,9 @@ def build_app(
     company_service: Optional[CompanyService] = None,
     security_service: Optional[SecurityService] = None,
     zchb: Optional[ZchbClient] = None,
+    users: Optional["UserStore"] = None,
+    bot_token: str = "",
+    bot_username: str = "",
 ) -> web.Application:
     app = web.Application()
 
@@ -297,10 +300,153 @@ def build_app(
             charset="utf-8",
         )
 
+    # ────────────────────────────────────────────────────────────
+    # Mini App: реферальный кабинет
+    # ────────────────────────────────────────────────────────────
+
+    async def miniapp_referral_page(request: web.Request) -> web.Response:
+        """Отдаёт HTML страницу Mini App'а. Auth тут не нужен —
+        проверка initData происходит при последующем POST на /data."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__), "miniapp", "referral.html",
+        )
+        if not os.path.exists(path):
+            return web.Response(text="Mini App not deployed", status=404)
+        with open(path, "rb") as f:
+            body = f.read()
+        return web.Response(body=body, content_type="text/html")
+
+    async def miniapp_referral_data(request: web.Request) -> web.Response:
+        """Возвращает JSON с данными реф-программы для текущего юзера.
+
+        Тело запроса: {"init_data": "<строка от Telegram WebApp>"}
+        Auth: проверка HMAC initData через bot_token.
+        """
+        if users is None or not bot_token:
+            return web.json_response(
+                {"error": "miniapp not configured"}, status=503,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+
+        init_data = payload.get("init_data", "")
+        from miniapp_auth import verify_init_data
+        user_id = verify_init_data(init_data, bot_token)
+        if user_id is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        from referral_tiers import (
+            current_tier, next_tier, progress_to_next, TIERS,
+        )
+        profile = users.get(user_id)
+        invitees = users.list_invitees(user_id)
+
+        paid_count = profile.referrals_paid_count
+        cur = current_tier(paid_count)
+        nxt = next_tier(paid_count)
+        from_base, target, ratio = progress_to_next(paid_count)
+
+        # Список приглашённых с анонимизацией
+        def _anon(uid: int) -> str:
+            s = str(uid)
+            if len(s) <= 4:
+                return s
+            return s[:2] + "***" + s[-2:]
+
+        invitees_view = []
+        for inv in invitees:
+            invitees_view.append({
+                "user_id_masked": _anon(inv.user_id),
+                "registered_at": inv.registered_at,
+                "paid": bool(inv.referral_bonus_granted or inv.tariff != "free"),
+                "tariff": inv.tariff,
+                "source": inv.referral_source,
+            })
+
+        def _ref_link(code: str, source: str = "") -> str:
+            base = f"https://t.me/{bot_username}" if bot_username else "https://t.me/"
+            token = code if not source else f"{code}_{source}"
+            return f"{base}?start={token}"
+
+        return web.json_response({
+            "user_id": user_id,
+            "referral_code": profile.referral_code,
+            "referral_link": _ref_link(profile.referral_code),
+            "stats": {
+                "referrals_count": profile.referrals_count,
+                "referrals_paid_count": paid_count,
+                "referral_bonus_days_total": profile.referral_bonus_days_total,
+            },
+            "tier": {
+                "current": {
+                    "key": cur.key,
+                    "label": cur.label,
+                    "emoji": cur.emoji,
+                    "threshold": cur.threshold,
+                    "reward": cur.reward_text,
+                },
+                "next": None if nxt is None else {
+                    "key": nxt.key,
+                    "label": nxt.label,
+                    "emoji": nxt.emoji,
+                    "threshold": nxt.threshold,
+                    "reward": nxt.reward_text,
+                },
+                "progress": {
+                    "from_base": from_base,
+                    "target": target,
+                    "ratio": round(ratio, 3),
+                },
+                "all_tiers": [
+                    {
+                        "key": t.key, "label": t.label, "emoji": t.emoji,
+                        "threshold": t.threshold, "reward": t.reward_text,
+                        "achieved": paid_count >= t.threshold,
+                    }
+                    for t in TIERS
+                ],
+            },
+            "invitees": invitees_view,
+        })
+
+    async def miniapp_utm_link(request: web.Request) -> web.Response:
+        """Генерирует UTM-вариант реф-ссылки. POST {init_data, source}."""
+        if users is None or not bot_token:
+            return web.json_response(
+                {"error": "miniapp not configured"}, status=503,
+            )
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+
+        init_data = payload.get("init_data", "")
+        source_raw = str(payload.get("source", "")).strip().lower()
+        from miniapp_auth import verify_init_data
+        user_id = verify_init_data(init_data, bot_token)
+        if user_id is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        # Sanitize source: только латиница, цифры, _ и -; max 32
+        source = "".join(c for c in source_raw if c.isalnum() or c in "_-")[:32]
+        if not source:
+            return web.json_response({"error": "empty source"}, status=400)
+
+        profile = users.get(user_id)
+        base = f"https://t.me/{bot_username}" if bot_username else "https://t.me/"
+        link = f"{base}?start={profile.referral_code}_{source}"
+        return web.json_response({"link": link, "source": source})
+
     app.router.add_get("/health", health)
     app.router.add_post("/tochka/webhook", tochka_webhook)
     app.router.add_post("/yookassa/webhook", yookassa_webhook)
     app.router.add_get("/report/{token}", report)
+    app.router.add_get("/miniapp/referral", miniapp_referral_page)
+    app.router.add_post("/api/miniapp/referral/data", miniapp_referral_data)
+    app.router.add_post("/api/miniapp/referral/utm", miniapp_utm_link)
 
     return app
 

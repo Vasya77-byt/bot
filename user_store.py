@@ -128,9 +128,12 @@ class UserProfile:
     tariff_expires_at: str = ""      # ISO datetime в UTC, пусто для free
     subscription_operation_id: str = ""  # operationId подписки в Точке
                                          # для charge_subscription / cancel
+    yookassa_payment_method_id: str = ""  # id сохранённой карты в ЮKassa
+                                          # для рекуррентных списаний
     card_token: str = ""             # legacy: остаётся для совместимости
                                      # с существующими users.json; новые
                                      # подписки используют subscription_operation_id
+                                     # или yookassa_payment_method_id
     auto_renew: bool = True          # автопродление
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
@@ -294,6 +297,7 @@ class UserStore:
         days: int = 30,
         card_token: str = "",
         subscription_operation_id: str = "",
+        yookassa_payment_method_id: str = "",
         payment_id: str = "",
     ) -> UserProfile:
         """Активирует (или продлевает) подписку на тариф на N дней.
@@ -323,6 +327,8 @@ class UserStore:
             profile.card_token = card_token
         if subscription_operation_id:
             profile.subscription_operation_id = subscription_operation_id
+        if yookassa_payment_method_id:
+            profile.yookassa_payment_method_id = yookassa_payment_method_id
         if payment_id:
             profile.last_payment_id = payment_id
         profile.renewal_failures = 0

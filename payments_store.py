@@ -30,6 +30,9 @@ class PaymentRecord:
     created_at: str
     paid_at: str = ""
     error: str = ""
+    # "tochka" | "yookassa". Default = "tochka" для обратной совместимости
+    # с существующим payments.json (записи до миграции на провайдеры).
+    provider: str = "tochka"
 
 
 class PaymentsStore:
@@ -63,6 +66,7 @@ class PaymentsStore:
         tariff: str,
         amount: float,
         kind: str = "initial",
+        provider: str = "tochka",
     ) -> PaymentRecord:
         rec = PaymentRecord(
             operation_id=operation_id,
@@ -73,6 +77,7 @@ class PaymentsStore:
             kind=kind,
             status="created",
             created_at=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
         )
         self._data.append(asdict(rec))
         self._save()

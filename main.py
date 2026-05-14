@@ -31,6 +31,7 @@ from schemas import CompanyData
 from security_check import SecurityService
 from subscription import SubscriptionService
 from tochka_client import TochkaClient
+from yookassa_client import YooKassaClient
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
 from admin_stats import build_admin_report, parse_admin_user_ids
@@ -2965,26 +2966,53 @@ def main() -> None:
         logger.info("Web report base URL: %s", report_base_url)
     app = build_app(settings)
 
-    # Инициализация платёжного сервиса
+    # Инициализация платёжного сервиса.
+    # Активный провайдер берётся из PAYMENT_PROVIDER (tochka|yookassa).
+    # Клиент второго провайдера тоже создаётся, если его credentials заданы —
+    # это нужно для обработки webhook'ов старых платежей при миграции.
     webhook_runner = None
     if settings.payments_enabled:
-        tochka = TochkaClient(
-            jwt_token=settings.tochka_jwt,
-            customer_code=settings.tochka_customer_code,
-            client_id=settings.tochka_client_id,
-            merchant_id=settings.tochka_merchant_id,
-            base_url=settings.tochka_base_url,
-        )
+        tochka_client_obj: Optional[TochkaClient] = None
+        yookassa_client_obj: Optional[YooKassaClient] = None
+
+        if settings.tochka_enabled:
+            tochka_client_obj = TochkaClient(
+                jwt_token=settings.tochka_jwt,
+                customer_code=settings.tochka_customer_code,
+                client_id=settings.tochka_client_id,
+                merchant_id=settings.tochka_merchant_id,
+                base_url=settings.tochka_base_url,
+            )
+        if settings.yookassa_enabled:
+            yookassa_client_obj = YooKassaClient(
+                shop_id=settings.yookassa_shop_id,
+                secret_key=settings.yookassa_secret_key,
+                base_url=settings.yookassa_base_url,
+                webhook_secret=settings.yookassa_webhook_secret,
+            )
+
         subscription_service = SubscriptionService(
-            tochka=tochka,
+            tochka=tochka_client_obj,
+            yookassa=yookassa_client_obj,
+            provider=settings.payment_provider,
             users=user_store,
             payments=payments_store,
             redirect_url=settings.payment_redirect_url,
             fail_redirect_url=settings.payment_fail_redirect_url,
             tax_system_code=settings.tochka_tax_system_code,
+            yookassa_tax_system_code=settings.yookassa_tax_system_code,
+            yookassa_vat_code=settings.yookassa_vat_code,
+        )
+        logger.info(
+            "Payments enabled: provider=%s tochka=%s yookassa=%s",
+            settings.payment_provider,
+            settings.tochka_enabled, settings.yookassa_enabled,
         )
     else:
-        logger.warning("Payments disabled: set TOCHKA_JWT and TOCHKA_CUSTOMER_CODE to enable")
+        logger.warning(
+            "Payments disabled: set credentials for %s to enable",
+            settings.payment_provider,
+        )
 
     async def menu_handler(client: Client, message) -> None:
         await message.reply_text(

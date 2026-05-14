@@ -1,5 +1,13 @@
-"""Логика подписок: создание подписки в Точке, обработка успеха,
-автопродление через Charge Subscription."""
+"""Логика подписок: создание платежа, обработка успеха, автопродление.
+
+Поддерживает двух провайдеров эквайринга:
+- Tochka Bank (legacy, через рекуррентные подписки)
+- YooKassa (через save_payment_method + autocharge)
+
+Активный провайдер выбирается через ``provider`` в конструкторе
+(значение из Settings.payment_provider). Webhook'и обоих провайдеров
+обрабатываются параллельно для миграционной совместимости.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ from typing import Optional
 from payments_store import PaymentsStore
 from tochka_client import TochkaClient, parse_payment_link_id
 from user_store import TARIFF_PRICES, UserProfile, UserStore
+from yookassa_client import YooKassaClient, YooKassaError
 
 logger = logging.getLogger("financial-architect")
 
@@ -20,32 +29,47 @@ RENEWAL_LEAD_DAYS = 1
 class SubscriptionService:
     def __init__(
         self,
-        tochka: TochkaClient,
-        users: UserStore,
-        payments: PaymentsStore,
+        tochka: Optional[TochkaClient] = None,
+        users: UserStore = None,
+        payments: PaymentsStore = None,
         *,
         redirect_url: str,
         fail_redirect_url: str,
         tax_system_code: str = "",
+        provider: str = "tochka",
+        yookassa: Optional[YooKassaClient] = None,
+        yookassa_tax_system_code: int = 2,
+        yookassa_vat_code: int = 1,
     ) -> None:
         self.tochka = tochka
+        self.yookassa = yookassa
+        self.provider = provider
         self.users = users
         self.payments = payments
         self.redirect_url = redirect_url
         self.fail_redirect_url = fail_redirect_url
         self.tax_system_code = tax_system_code
+        self.yookassa_tax_system_code = yookassa_tax_system_code
+        self.yookassa_vat_code = yookassa_vat_code
 
     async def create_initial_payment(
         self, user_id: int, tariff: str
     ) -> tuple[str, str]:
-        """Создаёт подписку (recurring=true) в Точке. Возвращает
-        (payment_link, subscription_operation_id).
-
-        Точка возвращает operationId подписки — он используется для
-        последующих списаний через charge_subscription и для отмены.
-        """
+        """Создаёт первичный платёж по активному провайдеру. Возвращает
+        (payment_url, operation_id_or_payment_id)."""
         if tariff not in TARIFF_PRICES:
             raise ValueError(f"Unknown tariff: {tariff}")
+        if self.provider == "yookassa":
+            return await self._create_yookassa_initial(user_id, tariff)
+        return await self._create_tochka_initial(user_id, tariff)
+
+    async def _create_tochka_initial(
+        self, user_id: int, tariff: str,
+    ) -> tuple[str, str]:
+        """Создаёт подписку (recurring=true) в Точке. operationId подписки
+        используется для последующих charge_subscription и для отмены."""
+        if self.tochka is None:
+            raise RuntimeError("TochkaClient is not configured")
         amount = float(TARIFF_PRICES[tariff])
         profile = self.users.get(user_id)
 
@@ -74,8 +98,49 @@ class SubscriptionService:
             tariff=tariff,
             amount=amount,
             kind="initial",
+            provider="tochka",
         )
         return result.payment_link, result.operation_id
+
+    async def _create_yookassa_initial(
+        self, user_id: int, tariff: str,
+    ) -> tuple[str, str]:
+        """Создаёт первичный платёж в ЮKassa с save_payment_method=True.
+        Возвращает (confirmation_url, payment_id). Email пользователя
+        обязателен — без него ЮKassa не примет чек 54-ФЗ.
+        """
+        if self.yookassa is None:
+            raise RuntimeError("YooKassaClient is not configured")
+        profile = self.users.get(user_id)
+        if not profile.email:
+            raise ValueError("email_required")
+
+        amount = float(TARIFF_PRICES[tariff])
+        result = await self.yookassa.create_payment(
+            amount=amount,
+            description=f"Подписка на тариф {tariff} (месяц)",
+            user_id=user_id,
+            tariff=tariff,
+            return_url=self.redirect_url,
+            customer_email=profile.email,
+            tax_system_code=self.yookassa_tax_system_code,
+            vat_code=self.yookassa_vat_code,
+            save_payment_method=True,
+            kind="initial",
+        )
+        # У ЮKassa первичный платёж имеет собственный payment_id (UUID).
+        # operation_id = payment_id; order_id = наш sub_<uid>_<tariff>_<rand>
+        # (приходит обратно в webhook'е через metadata.order_id).
+        self.payments.record_created(
+            operation_id=result.payment_id,
+            order_id=result.order_id,
+            user_id=user_id,
+            tariff=tariff,
+            amount=amount,
+            kind="initial",
+            provider="yookassa",
+        )
+        return result.confirmation_url, result.payment_id
 
     def handle_webhook_paid(
         self, *,
@@ -151,6 +216,79 @@ class SubscriptionService:
 
         return profile
 
+    def handle_yookassa_webhook_paid(
+        self,
+        *,
+        payment_id: str,
+        order_id: str,
+        user_id: int,
+        tariff: str,
+        amount: float,
+        payment_method_id: str = "",
+        kind: str = "initial",
+    ) -> Optional[UserProfile]:
+        """Обрабатывает ЮKassa webhook payment.succeeded.
+
+        ЮKassa возвращает в payment.payment_method.id токен для
+        последующих автоплатежей — сохраняем его в профиле.
+        Идемпотентно: повторное событие на тот же payment_id не
+        переактивирует подписку.
+        """
+        rec = self.payments.find_by_operation(payment_id)
+        if not rec:
+            rec = self.payments.find_by_order(order_id)
+        if not rec:
+            # Webhook пришёл раньше, чем запись сохранилась (или
+            # запись потеряна) — восстанавливаем из metadata.
+            if not user_id or not tariff:
+                logger.error(
+                    "YooKassa webhook: unknown payment id=%s order=%s",
+                    payment_id, order_id,
+                )
+                return None
+            rec = self.payments.record_created(
+                operation_id=payment_id,
+                order_id=order_id or payment_id,
+                user_id=user_id,
+                tariff=tariff,
+                amount=amount,
+                kind=kind,
+                provider="yookassa",
+            )
+
+        if rec.status == "paid":
+            logger.info("YooKassa payment %s already processed", payment_id)
+            return self.users.get(rec.user_id)
+
+        self.payments.mark_paid(payment_id)
+
+        # Сохраняем payment_method_id ТОЛЬКО при первом платеже —
+        # рекуррентные используют тот же токен.
+        save_method_id = ""
+        if rec.kind == "initial" and payment_method_id:
+            save_method_id = payment_method_id
+
+        profile = self.users.activate_subscription(
+            user_id=rec.user_id,
+            tariff=rec.tariff,
+            days=30,
+            yookassa_payment_method_id=save_method_id,
+            payment_id=payment_id,
+        )
+        logger.info(
+            "YooKassa subscription activated: user=%s tariff=%s expires=%s",
+            profile.user_id, profile.tariff, profile.tariff_expires_at,
+        )
+
+        referrer = self.users.award_referral_bonus(rec.user_id)
+        if referrer is not None:
+            logger.info(
+                "Referral bonus granted: referrer=%s days_total=%s",
+                referrer.user_id, referrer.referral_bonus_days_total,
+            )
+
+        return profile
+
     def handle_webhook_failed(
         self, *, operation_id: str, error: str = "",
     ) -> None:
@@ -162,13 +300,23 @@ class SubscriptionService:
         logger.info("Payment %s marked failed: %s", operation_id, error)
 
     async def try_renew(self, profile: UserProfile) -> tuple[bool, str]:
-        """Списывает с привязанной к подписке карты через Точку."""
+        """Автопродление по активному провайдеру."""
         if profile.tariff == "free" or not profile.auto_renew:
             return False, "auto_renew disabled"
-        if not profile.subscription_operation_id:
-            return False, "no subscription"
         if profile.tariff not in TARIFF_PRICES:
             return False, f"unknown tariff {profile.tariff}"
+
+        if self.provider == "yookassa":
+            return await self._try_renew_yookassa(profile)
+        return await self._try_renew_tochka(profile)
+
+    async def _try_renew_tochka(
+        self, profile: UserProfile,
+    ) -> tuple[bool, str]:
+        if self.tochka is None:
+            return False, "tochka not configured"
+        if not profile.subscription_operation_id:
+            return False, "no subscription"
 
         amount = float(TARIFF_PRICES[profile.tariff])
         result = await self.tochka.charge_subscription(
@@ -213,21 +361,83 @@ class SubscriptionService:
         self.users.record_renewal_failure(profile.user_id)
         return False, result.error_message or "declined"
 
+    async def _try_renew_yookassa(
+        self, profile: UserProfile,
+    ) -> tuple[bool, str]:
+        """Автосписание через ЮKassa по сохранённому payment_method_id."""
+        if self.yookassa is None:
+            return False, "yookassa not configured"
+        if not profile.yookassa_payment_method_id:
+            return False, "no saved payment method"
+        if not profile.email:
+            return False, "no email for receipt"
+
+        amount = float(TARIFF_PRICES[profile.tariff])
+        try:
+            result = await self.yookassa.charge_recurring(
+                payment_method_id=profile.yookassa_payment_method_id,
+                amount=amount,
+                description=f"Продление тарифа {profile.tariff} (месяц)",
+                user_id=profile.user_id,
+                tariff=profile.tariff,
+                customer_email=profile.email,
+                tax_system_code=self.yookassa_tax_system_code,
+                vat_code=self.yookassa_vat_code,
+            )
+        except YooKassaError as exc:
+            logger.warning("YooKassa recurring error: %s", exc)
+            self.users.record_renewal_failure(profile.user_id)
+            return False, str(exc)
+
+        # Регистрируем рекуррентный платёж в журнале.
+        self.payments.record_created(
+            operation_id=result.payment_id or "yk_unknown",
+            order_id=result.payment_id or "yk_unknown",
+            user_id=profile.user_id,
+            tariff=profile.tariff,
+            amount=amount,
+            kind="recurring",
+            provider="yookassa",
+        )
+
+        if result.status == "succeeded":
+            self.payments.mark_paid(result.payment_id)
+            self.users.activate_subscription(
+                user_id=profile.user_id,
+                tariff=profile.tariff,
+                days=30,
+                payment_id=result.payment_id,
+            )
+            return True, "renewed"
+
+        if result.status == "pending":
+            return True, "pending"
+
+        # canceled / failure
+        if result.payment_id:
+            self.payments.mark_failed(
+                result.payment_id, error=result.error_message,
+            )
+        self.users.record_renewal_failure(profile.user_id)
+        return False, result.error_message or "canceled"
+
     async def cancel_user_subscription(
         self, user_id: int,
     ) -> tuple[bool, str]:
-        """Отменяет подписку на стороне Точки и выключает auto_renew у нас.
-
-        После отмены вернуть подписку нельзя — клиент должен оформить
-        новую. Текущий период доходит до конца expires_at.
-        """
+        """Отменяет автопродление. Для Tochka — отменяет подписку на стороне
+        банка. Для YooKassa — API отзыва сохранённого payment_method нет,
+        просто выключаем auto_renew локально (карта остаётся привязанной,
+        но мы её не используем для списаний)."""
         profile = self.users.get(user_id)
-        # Локально выключаем auto_renew всегда — даже если в Точке нет
-        # активной подписки (например, истекла).
         self.users.disable_auto_renew(user_id)
+
+        if self.provider == "yookassa":
+            return True, "auto_renew disabled"
+
         if not profile.subscription_operation_id:
             return True, "auto_renew disabled (no subscription on Tochka side)"
-
+        if self.tochka is None:
+            return True, "auto_renew disabled (tochka not configured)"
         try:
             ok = await self.tochka.cancel_subscription(
                 profile.subscription_operation_id,

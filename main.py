@@ -2297,7 +2297,7 @@ def _tariffs_text() -> str:
         "• Стоп-листы и суды (сводка)\n"
         "\n"
         "─── ⭐️ Start ───\n"
-        "💰 490 ₽/мес\n"
+        "💰 500 ₽/мес\n"
         "📊 50 проверок/день\n"
         "  ✅ Полный отчёт\n"
         "  ✅ ЕГРЮЛ\n"
@@ -2305,7 +2305,7 @@ def _tariffs_text() -> str:
         "  ✅ Стоп-листы\n"
         "\n"
         "─── 💎 Pro ───\n"
-        "💰 1 290 ₽/мес\n"
+        "💰 990 ₽/мес\n"
         "📊 300 проверок/день\n"
         "  ✅ Всё из Start\n"
         "  ✅ ИИ-анализ\n"
@@ -2330,10 +2330,10 @@ def _tariffs_text() -> str:
 def _tariffs_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⭐️ Start — 490 ₽/мес", callback_data="tariff_start"),
+            InlineKeyboardButton("⭐️ Start — 500 ₽/мес", callback_data="tariff_start"),
         ],
         [
-            InlineKeyboardButton("💎 Pro — 1 290 ₽/мес", callback_data="tariff_pro"),
+            InlineKeyboardButton("💎 Pro — 990 ₽/мес", callback_data="tariff_pro"),
         ],
         [
             InlineKeyboardButton("🏆 Business — 2 490 ₽/мес", callback_data="tariff_business"),

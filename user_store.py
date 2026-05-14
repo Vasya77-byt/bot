@@ -58,8 +58,8 @@ TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
 
 # Цены тарифов в рублях (месячная подписка)
 TARIFF_PRICES: Dict[str, int] = {
-    "start": 490,
-    "pro": 1290,
+    "start": 500,
+    "pro": 990,
     "business": 2490,
 }
 

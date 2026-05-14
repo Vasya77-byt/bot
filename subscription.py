@@ -475,8 +475,10 @@ class SubscriptionService:
         older_than_seconds: int = 300,
         max_age_seconds: int = 24 * 60 * 60,
     ) -> list[tuple[str, str]]:
-        """Опрашивает Точку по всем платежам в статусе 'created' через
-        get_subscription_status. Это safety-net на случай пропущенного
+        """Опрашивает провайдер по всем pending-платежам в журнале.
+
+        Развилка по rec.provider: Tochka — через get_subscription_status,
+        ЮKassa — через get_payment. Это safety-net на случай пропущенного
         webhook'а.
 
         Возвращает список (operation_id, action), где action ∈
@@ -488,41 +490,83 @@ class SubscriptionService:
         )
         results: list[tuple[str, str]] = []
         for rec in pending:
-            try:
-                data = await self.tochka.get_subscription_status(
-                    rec.operation_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Poll status failed for %s: %s",
-                    rec.operation_id, exc,
-                )
-                results.append((rec.operation_id, "error"))
-                continue
-
-            status = (data.get("status") or "").upper()
-            amount = float(data.get("amount") or rec.amount)
-
-            if status in ("APPROVED", "AUTHORIZED"):
-                # Идемпотентно через handle_webhook_paid (не активирует
-                # повторно paid-запись)
-                self.handle_webhook_paid(
-                    operation_id=rec.operation_id,
-                    order_id=rec.order_id,
-                    amount=amount,
-                )
-                results.append((rec.operation_id, "activated"))
-                logger.info(
-                    "Poller: activated subscription for op=%s",
-                    rec.operation_id,
-                )
-            elif status in ("DECLINED", "CANCELLED", "REJECTED", "FAILED"):
-                self.handle_webhook_failed(
-                    operation_id=rec.operation_id,
-                    error=str(data.get("errorMessage", "")),
-                )
-                results.append((rec.operation_id, "failed"))
+            if rec.provider == "yookassa":
+                action = await self._poll_yookassa(rec)
             else:
-                # Точка ещё думает (CREATED / pending / etc) — оставляем
-                results.append((rec.operation_id, "still_pending"))
+                action = await self._poll_tochka(rec)
+            results.append((rec.operation_id, action))
         return results
+
+    async def _poll_tochka(self, rec) -> str:
+        if self.tochka is None:
+            return "error"
+        try:
+            data = await self.tochka.get_subscription_status(rec.operation_id)
+        except Exception as exc:
+            logger.warning(
+                "Poll Tochka failed for %s: %s", rec.operation_id, exc,
+            )
+            return "error"
+
+        status = (data.get("status") or "").upper()
+        amount = float(data.get("amount") or rec.amount)
+
+        if status in ("APPROVED", "AUTHORIZED"):
+            # Идемпотентно через handle_webhook_paid
+            self.handle_webhook_paid(
+                operation_id=rec.operation_id,
+                order_id=rec.order_id,
+                amount=amount,
+            )
+            logger.info(
+                "Poller (tochka): activated for op=%s", rec.operation_id,
+            )
+            return "activated"
+        if status in ("DECLINED", "CANCELLED", "REJECTED", "FAILED"):
+            self.handle_webhook_failed(
+                operation_id=rec.operation_id,
+                error=str(data.get("errorMessage", "")),
+            )
+            return "failed"
+        return "still_pending"
+
+    async def _poll_yookassa(self, rec) -> str:
+        if self.yookassa is None:
+            return "error"
+        try:
+            data = await self.yookassa.get_payment(rec.operation_id)
+        except Exception as exc:
+            logger.warning(
+                "Poll YooKassa failed for %s: %s", rec.operation_id, exc,
+            )
+            return "error"
+
+        status = data.get("status", "")
+        amount_block = data.get("amount") or {}
+        try:
+            amount = float(amount_block.get("value") or rec.amount)
+        except (TypeError, ValueError):
+            amount = rec.amount
+
+        if status == "succeeded":
+            method = (data.get("payment_method") or {}).get("id", "")
+            self.handle_yookassa_webhook_paid(
+                payment_id=rec.operation_id,
+                order_id=rec.order_id,
+                user_id=rec.user_id,
+                tariff=rec.tariff,
+                amount=amount,
+                payment_method_id=method,
+                kind=rec.kind,
+            )
+            logger.info(
+                "Poller (yookassa): activated for id=%s", rec.operation_id,
+            )
+            return "activated"
+        if status == "canceled":
+            self.payments.mark_failed(
+                rec.operation_id,
+                error=str(data.get("cancellation_details", "")),
+            )
+            return "failed"
+        return "still_pending"

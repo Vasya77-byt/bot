@@ -64,6 +64,19 @@ class FakeSubscription:
             "operation_id": operation_id, "error": error,
         })
 
+    def handle_yookassa_webhook_paid(
+        self,
+        *,
+        payment_id, order_id, user_id, tariff, amount,
+        payment_method_id="", kind="initial",
+    ):
+        self.paid_calls.append({
+            "payment_id": payment_id, "order_id": order_id,
+            "user_id": user_id, "tariff": tariff, "amount": amount,
+            "payment_method_id": payment_method_id, "kind": kind,
+        })
+        return self.paid_profile
+
 
 def make_notify():
     calls: list[tuple[int, str]] = []
@@ -503,3 +516,202 @@ class TestReportEndpoint:
             assert resp.status == 200
             text = await resp.text()
         assert "ТЕСТОВАЯ ООО" in text
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YooKassa webhook
+# ──────────────────────────────────────────────────────────────────────
+
+
+import hashlib as _hashlib
+import hmac as _hmac
+
+from yookassa_client import YooKassaClient
+
+
+def _yk_body(
+    *,
+    event: str = "payment.succeeded",
+    status: str = "succeeded",
+    payment_id: str = "yk-pay-1",
+    amount: str = "1290.00",
+    user_id: str = "42",
+    tariff: str = "pro",
+    kind: str = "initial",
+    payment_method_id: str = "pm-token-abc",
+    order_id: str = "sub_42_pro_xxx",
+) -> bytes:
+    return json.dumps({
+        "event": event,
+        "object": {
+            "id": payment_id,
+            "status": status,
+            "amount": {"value": amount, "currency": "RUB"},
+            "payment_method": {"id": payment_method_id, "saved": True},
+            "metadata": {
+                "order_id": order_id,
+                "user_id": user_id,
+                "tariff": tariff,
+                "kind": kind,
+            },
+        },
+    }).encode("utf-8")
+
+
+YK_GOOD_IP = "185.71.76.1"  # внутри 185.71.76.0/27
+
+
+class TestYooKassaWebhook:
+    @pytest.mark.asyncio
+    async def test_successful_payment_activates(self, tochka, subscription):
+        subscription.paid_profile = UserProfile(
+            user_id=42, tariff="pro",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+        )
+        yookassa = YooKassaClient("shop", "key")  # без HMAC
+        notify, calls = make_notify()
+        app = build_app(tochka, subscription, yookassa=yookassa, notify=notify)
+
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(),
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+
+        assert resp.status == 200
+        assert len(subscription.paid_calls) == 1
+        call = subscription.paid_calls[0]
+        assert call["payment_id"] == "yk-pay-1"
+        assert call["user_id"] == 42
+        assert call["tariff"] == "pro"
+        assert call["payment_method_id"] == "pm-token-abc"
+        assert len(calls) == 1
+        assert "✅" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_non_whitelisted_ip_returns_403(self, tochka, subscription):
+        yookassa = YooKassaClient("shop", "key")
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(),
+                headers={"X-Forwarded-For": "8.8.8.8"},
+            )
+        assert resp.status == 403
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_valid_hmac_signature_accepted(self, tochka, subscription):
+        secret = "my_hmac_secret"
+        yookassa = YooKassaClient("shop", "key", webhook_secret=secret)
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        body = _yk_body()
+        signature = _hmac.new(
+            secret.encode("utf-8"), body, _hashlib.sha256,
+        ).hexdigest()
+
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=body,
+                headers={
+                    "X-Forwarded-For": YK_GOOD_IP,
+                    "Y-Signature": signature,
+                },
+            )
+        assert resp.status == 200
+        assert len(subscription.paid_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_invalid_hmac_signature_rejected(self, tochka, subscription):
+        yookassa = YooKassaClient("shop", "key", webhook_secret="secret")
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(),
+                headers={
+                    "X-Forwarded-For": YK_GOOD_IP,
+                    "Y-Signature": "wrong_signature",
+                },
+            )
+        assert resp.status == 403
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_bad_json_returns_400(self, tochka, subscription):
+        yookassa = YooKassaClient("shop", "key")
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=b"not json",
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+        assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_payment_canceled_event_no_activation(self, tochka, subscription):
+        yookassa = YooKassaClient("shop", "key")
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(event="payment.canceled", status="canceled"),
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+        # ЮKassa должен получить 200, чтобы не ретраить
+        assert resp.status == 200
+        # Но активация не должна происходить
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_refund_event_no_activation(self, tochka, subscription):
+        yookassa = YooKassaClient("shop", "key")
+        app = build_app(tochka, subscription, yookassa=yookassa)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(event="refund.succeeded"),
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+        assert resp.status == 200
+        assert subscription.paid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_yookassa_not_configured_returns_503(
+        self, tochka, subscription,
+    ):
+        # yookassa=None — роут должен вернуть 503
+        app = build_app(tochka, subscription, yookassa=None)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(),
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+        assert resp.status == 503
+
+    @pytest.mark.asyncio
+    async def test_recurring_payment_passes_kind(self, tochka, subscription):
+        subscription.paid_profile = UserProfile(
+            user_id=7, tariff="start",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+        )
+        yookassa = YooKassaClient("shop", "key")
+        notify, _ = make_notify()
+        app = build_app(tochka, subscription, yookassa=yookassa, notify=notify)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(
+                "/yookassa/webhook",
+                data=_yk_body(
+                    user_id="7", tariff="start",
+                    kind="recurring", payment_id="yk-recur-1",
+                ),
+                headers={"X-Forwarded-For": YK_GOOD_IP},
+            )
+        assert resp.status == 200
+        assert subscription.paid_calls[0]["kind"] == "recurring"
+

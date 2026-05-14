@@ -3081,6 +3081,7 @@ def main() -> None:
         if subscription_service is not None:
             web_app = build_webhook_app(
                 tochka=subscription_service.tochka,
+                yookassa=subscription_service.yookassa,
                 subscription=subscription_service,
                 notify=notify,
                 report_tokens=report_tokens,

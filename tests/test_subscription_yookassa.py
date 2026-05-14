@@ -116,6 +116,79 @@ async def test_initial_payment_save_method_true_by_default(
     assert yookassa.create_payment_calls[0]["save_payment_method"] is True
 
 
+@pytest.mark.parametrize("method,expected_yk_type", [
+    ("sbp", "sbp"),
+    ("tpay", "tinkoff_bank"),
+    ("sberpay", "sberbank"),
+])
+@pytest.mark.asyncio
+async def test_initial_payment_method_routes_to_yookassa_with_type(
+    service, yookassa, users, method, expected_yk_type,
+):
+    """Каждый UI-метод → ЮKassa с правильным payment_method_data.type."""
+    users.set_email(1, "a@b.ru")
+    yookassa.next_payment_result = PaymentResult(
+        payment_id="yk_x", confirmation_url="https://example.com/pay",
+        order_id="sub_1_start_xx", status="pending",
+    )
+    await service.create_initial_payment(1, "start", method=method)
+    call = yookassa.create_payment_calls[0]
+    assert call["payment_method_type"] == expected_yk_type
+
+
+@pytest.mark.asyncio
+async def test_initial_payment_method_card_routes_to_tochka(
+    yookassa, users, payments,
+):
+    """method=card должен идти в Tochka, даже если provider=yookassa."""
+
+    class FakeTochka:
+        def __init__(self):
+            self.calls: list = []
+
+        async def create_subscription(self, **kwargs):
+            self.calls.append(kwargs)
+
+            class R:
+                payment_link = "https://tochka.example/pay/abc"
+                operation_id = "op-abc"
+            return R()
+
+    tochka = FakeTochka()
+    svc = SubscriptionService(
+        tochka=tochka, yookassa=yookassa, provider="yookassa",
+        users=users, payments=payments,
+        redirect_url="https://t.me/x", fail_redirect_url="https://t.me/x",
+    )
+    link, op_id = await svc.create_initial_payment(1, "start", method="card")
+    assert link == "https://tochka.example/pay/abc"
+    assert op_id == "op-abc"
+    assert len(tochka.calls) == 1
+    assert yookassa.create_payment_calls == []
+
+
+@pytest.mark.asyncio
+async def test_initial_payment_unknown_method_raises(service, users):
+    """Неизвестный method → ValueError."""
+    users.set_email(1, "a@b.ru")
+    with pytest.raises(ValueError, match="Unknown payment method"):
+        await service.create_initial_payment(1, "start", method="bitcoin")
+
+
+@pytest.mark.asyncio
+async def test_initial_payment_no_method_falls_back_to_provider(
+    service, yookassa, users,
+):
+    """Пустой method (legacy) → fallback на self.provider=yookassa."""
+    users.set_email(1, "a@b.ru")
+    yookassa.next_payment_result = PaymentResult(
+        payment_id="yk_x", confirmation_url="https://example.com/pay",
+        order_id="sub_1_start_xx", status="pending",
+    )
+    await service.create_initial_payment(1, "start")
+    assert yookassa.create_payment_calls[0]["payment_method_type"] == ""
+
+
 @pytest.mark.asyncio
 async def test_initial_payment_creates_yookassa_payment(
     service, yookassa, users, payments,

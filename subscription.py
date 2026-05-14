@@ -54,13 +54,36 @@ class SubscriptionService:
         self.yookassa_vat_code = yookassa_vat_code
         self.yookassa_save_payment_method = yookassa_save_payment_method
 
+    # Маппинг method (из UI) → конкретный payment_method_data.type у ЮKassa
+    YOOKASSA_METHOD_TYPES = {
+        "sbp": "sbp",
+        "tpay": "tinkoff_bank",
+        "sberpay": "sberbank",
+    }
+
     async def create_initial_payment(
-        self, user_id: int, tariff: str
+        self, user_id: int, tariff: str, method: str = "",
     ) -> tuple[str, str]:
-        """Создаёт первичный платёж по активному провайдеру. Возвращает
-        (payment_url, operation_id_or_payment_id)."""
+        """Создаёт первичный платёж. Возвращает (payment_url, op/payment_id).
+
+        method:
+            ""        — fallback на self.provider (для совместимости)
+            "card"    — Точка (форма ввода карты)
+            "sbp"     — ЮKassa, СБП
+            "tpay"    — ЮKassa, T-Pay (Тинькофф)
+            "sberpay" — ЮKassa, SberPay
+        """
         if tariff not in TARIFF_PRICES:
             raise ValueError(f"Unknown tariff: {tariff}")
+        if method == "card":
+            return await self._create_tochka_initial(user_id, tariff)
+        if method in self.YOOKASSA_METHOD_TYPES:
+            return await self._create_yookassa_initial(
+                user_id, tariff,
+                payment_method_type=self.YOOKASSA_METHOD_TYPES[method],
+            )
+        if method:
+            raise ValueError(f"Unknown payment method: {method}")
         if self.provider == "yookassa":
             return await self._create_yookassa_initial(user_id, tariff)
         return await self._create_tochka_initial(user_id, tariff)
@@ -106,6 +129,7 @@ class SubscriptionService:
 
     async def _create_yookassa_initial(
         self, user_id: int, tariff: str,
+        payment_method_type: str = "",
     ) -> tuple[str, str]:
         """Создаёт первичный платёж в ЮKassa с save_payment_method=True.
         Возвращает (confirmation_url, payment_id). Email пользователя
@@ -129,6 +153,7 @@ class SubscriptionService:
             vat_code=self.yookassa_vat_code,
             save_payment_method=self.yookassa_save_payment_method,
             kind="initial",
+            payment_method_type=payment_method_type,
         )
         # У ЮKassa первичный платёж имеет собственный payment_id (UUID).
         # operation_id = payment_id; order_id = наш sub_<uid>_<tariff>_<rand>

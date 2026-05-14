@@ -203,6 +203,48 @@ async def test_create_payment_truncates_long_description(patched_httpx, client):
 
 
 @pytest.mark.asyncio
+async def test_create_payment_no_method_data_by_default(patched_httpx, client):
+    """Без payment_method_type → нет ключа payment_method_data в payload."""
+    captured = {}
+
+    def handler(method, url, headers, body):
+        captured["body"] = body
+        return FakeResponse(payload={
+            "id": "x", "status": "pending",
+            "confirmation": {"confirmation_url": "https://example.com/pay"},
+        })
+
+    FakeAsyncClient.handler = handler
+    await client.create_payment(
+        amount=100.0, description="x", user_id=1, tariff="start",
+        return_url="https://t.me/", customer_email="a@b.ru",
+    )
+    assert "payment_method_data" not in captured["body"]
+
+
+@pytest.mark.parametrize("yk_type", ["sbp", "tinkoff_bank", "sberbank"])
+@pytest.mark.asyncio
+async def test_create_payment_method_data_passed(patched_httpx, client, yk_type):
+    """payment_method_type → payload.payment_method_data.type."""
+    captured = {}
+
+    def handler(method, url, headers, body):
+        captured["body"] = body
+        return FakeResponse(payload={
+            "id": "x", "status": "pending",
+            "confirmation": {"confirmation_url": "https://example.com/pay"},
+        })
+
+    FakeAsyncClient.handler = handler
+    await client.create_payment(
+        amount=100.0, description="x", user_id=1, tariff="start",
+        return_url="https://t.me/", customer_email="a@b.ru",
+        payment_method_type=yk_type,
+    )
+    assert captured["body"]["payment_method_data"] == {"type": yk_type}
+
+
+@pytest.mark.asyncio
 async def test_create_payment_tax_codes_passed(patched_httpx, client):
     captured = {}
 

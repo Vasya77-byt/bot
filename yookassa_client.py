@@ -161,6 +161,7 @@ class YooKassaClient:
         vat_code: int = 1,
         save_payment_method: bool = True,
         kind: str = "initial",
+        payment_method_type: str = "",
     ) -> PaymentResult:
         """Создаёт платёж с фискализацией чека.
 
@@ -170,6 +171,10 @@ class YooKassaClient:
         vat_code   — ставка НДС: 1 без НДС, 2 0%, 3 10%, 4 20%.
         save_payment_method=True — сохраняет карту для автоплатежей;
             payment_method.id придёт в webhook payment.succeeded.
+        payment_method_type — конкретный метод оплаты:
+            "" (пусто) → стандартная страница ЮKassa с выбором;
+            "sbp" → СБП; "tinkoff_bank" → T-Pay; "sberbank" → SberPay;
+            "bank_card" → ввод карты.
         """
         order_id = f"sub_{user_id}_{tariff}_{uuid.uuid4().hex[:8]}"
         idempotence_key = f"create-{order_id}-{uuid.uuid4().hex[:8]}"
@@ -198,11 +203,13 @@ class YooKassaClient:
                 vat_code=vat_code,
             ),
         }
+        if payment_method_type:
+            payload["payment_method_data"] = {"type": payment_method_type}
 
         url = f"{self.base_url}/payments"
         logger.info(
-            "YooKassa: creating payment order=%s amount=%s",
-            order_id, amount_str,
+            "YooKassa: creating payment order=%s amount=%s method=%s",
+            order_id, amount_str, payment_method_type or "any",
         )
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:

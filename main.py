@@ -31,7 +31,7 @@ from schemas import CompanyData
 from security_check import SecurityService
 from subscription import SubscriptionService
 from tochka_client import TochkaClient
-from yookassa_client import YooKassaClient
+from yookassa_client import YooKassaClient, YooKassaError
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
 from admin_stats import build_admin_report, parse_admin_user_ids
@@ -1830,7 +1830,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         )
         return
 
-    # Кнопки выбора тарифа — создаём платёж
+    # Кнопки выбора тарифа — показываем меню методов оплаты
     if data.startswith("tariff_"):
         await callback_query.answer()
         tariff = data.replace("tariff_", "")
@@ -1846,7 +1846,23 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 "Введите адрес одной строкой:"
             )
             return
-        await _handle_buy_tariff(callback_query.message, user_id, tariff)
+        await _show_payment_methods(callback_query.message, tariff)
+        return
+
+    # Кнопки выбора метода оплаты: pay_<method>_<tariff>
+    if data.startswith("pay_"):
+        parts = data.split("_", 2)
+        if len(parts) != 3 or parts[1] not in PAYMENT_METHODS:
+            await callback_query.answer("Неизвестный метод оплаты", show_alert=True)
+            return
+        _, method, tariff = parts
+        if tariff not in TARIFF_PRICES:
+            await callback_query.answer("Тариф не найден", show_alert=True)
+            return
+        await callback_query.answer()
+        await _handle_buy_tariff(
+            callback_query.message, user_id, tariff, method=method,
+        )
         return
 
     if data == "mode_mass_check":
@@ -1939,7 +1955,7 @@ async def handle_text_message(client: Client, message) -> None:
         tariff = pending_email_tariff["tariff"]
         _user_state.pop(user_id, None)
         await message.reply_text(f"✅ Email сохранён: {clean}")
-        await _handle_buy_tariff(message, user_id, tariff)
+        await _show_payment_methods(message, tariff)
         return
 
     parsed: ParseResult = parse_message(text)
@@ -2324,8 +2340,31 @@ def _tariffs_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
-    """Создаёт платёжную ссылку в Точке и отправляет пользователю кнопку оплаты."""
+PAYMENT_METHODS = ("card", "sbp", "tpay", "sberpay")
+
+
+def _payment_methods_keyboard(tariff: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Номер карты", callback_data=f"pay_card_{tariff}")],
+        [InlineKeyboardButton("🟢 СБП", callback_data=f"pay_sbp_{tariff}")],
+        [InlineKeyboardButton("🟡 T-Pay", callback_data=f"pay_tpay_{tariff}")],
+        [InlineKeyboardButton("🟩 SberPay", callback_data=f"pay_sberpay_{tariff}")],
+    ])
+
+
+async def _show_payment_methods(message, tariff: str) -> None:
+    price = TARIFF_PRICES[tariff]
+    await message.reply_text(
+        f"Тариф *{tariff.upper()}* — {price} ₽/мес.\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=_payment_methods_keyboard(tariff),
+    )
+
+
+async def _handle_buy_tariff(
+    message, user_id: int, tariff: str, method: str = "",
+) -> None:
+    """Создаёт платёжную ссылку выбранным методом и отправляет кнопку оплаты."""
     if subscription_service is None:
         await message.reply_text(
             "⚠️ Приём платежей пока не настроен. Обратитесь к администратору."
@@ -2334,7 +2373,20 @@ async def _handle_buy_tariff(message, user_id: int, tariff: str) -> None:
 
     await message.reply_text("💳 Создаю платёжную ссылку...")
     try:
-        link, op_id = await subscription_service.create_initial_payment(user_id, tariff)
+        link, op_id = await subscription_service.create_initial_payment(
+            user_id, tariff, method=method,
+        )
+    except YooKassaError as exc:
+        # Метод оплаты не подключён в магазине ЮKassa, либо временная ошибка.
+        logger.warning(
+            "YooKassa payment creation failed for method=%s: %s", method, exc,
+        )
+        await message.reply_text(
+            "❌ Этот способ оплаты временно недоступен.\n"
+            "Попробуйте другой способ из меню.",
+            reply_markup=_payment_methods_keyboard(tariff),
+        )
+        return
     except Exception as exc:
         logger.exception("Payment creation failed: %s", exc)
         await message.reply_text(

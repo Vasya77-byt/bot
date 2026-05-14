@@ -528,16 +528,6 @@ class TestHandleCallback:
         assert "не найден" in cb.message.replies[0]["text"].lower()
 
     @pytest.mark.asyncio
-    async def test_tariff_callback_without_subscription_service(self):
-        # subscription_service=None из autouse fixture
-        p = main.user_store.get(1)
-        p.email = "buyer@example.com"
-        main.user_store.save_profile(p)
-        cb = FakeCallbackQuery("tariff_pro", user_id=1)
-        await main.handle_callback(client=None, callback_query=cb)
-        assert "не настроен" in cb.message.replies[0]["text"]
-
-    @pytest.mark.asyncio
     async def test_mass_check_blocks_non_business_users(self):
         cb = FakeCallbackQuery("mode_mass_check", user_id=1)
         await main.handle_callback(client=None, callback_query=cb)
@@ -998,8 +988,8 @@ class FakeSubscriptionService:
         self.exception = exception
         self.calls: List[dict] = []
 
-    async def create_initial_payment(self, user_id, tariff):
-        self.calls.append({"user_id": user_id, "tariff": tariff})
+    async def create_initial_payment(self, user_id, tariff, method=""):
+        self.calls.append({"user_id": user_id, "tariff": tariff, "method": method})
         if self.exception:
             raise self.exception
         return self.link, self.op_id
@@ -1007,7 +997,7 @@ class FakeSubscriptionService:
 
 class TestHandleBuyTariff:
     @pytest.mark.asyncio
-    async def test_buy_pro_creates_payment_link(self, monkeypatch):
+    async def test_tariff_callback_shows_payment_methods(self, monkeypatch):
         sub = FakeSubscriptionService()
         monkeypatch.setattr(main, "subscription_service", sub)
         p = main.user_store.get(42)
@@ -1016,28 +1006,81 @@ class TestHandleBuyTariff:
         cb = FakeCallbackQuery("tariff_pro", user_id=42)
         await main.handle_callback(client=None, callback_query=cb)
 
-        assert sub.calls == [{"user_id": 42, "tariff": "pro"}]
-        # Сообщения: "Создаю ссылку..." + сообщение с inline-кнопкой
+        # На этом шаге платёж ещё НЕ создан — только показано меню методов.
+        assert sub.calls == []
+        last = cb.message.replies[-1]
+        assert "способ оплаты" in last["text"].lower()
+        kb = last["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert callbacks == [
+            "pay_card_pro", "pay_sbp_pro", "pay_tpay_pro", "pay_sberpay_pro",
+        ]
+
+    @pytest.mark.parametrize("method", ["card", "sbp", "tpay", "sberpay"])
+    @pytest.mark.asyncio
+    async def test_pay_method_creates_payment_link(self, monkeypatch, method):
+        sub = FakeSubscriptionService()
+        monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(42)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
+        cb = FakeCallbackQuery(f"pay_{method}_pro", user_id=42)
+        await main.handle_callback(client=None, callback_query=cb)
+
+        assert sub.calls == [{"user_id": 42, "tariff": "pro", "method": method}]
         assert any("ссылку" in r["text"] for r in cb.message.replies)
-        # Последний ответ содержит сумму pro и оферту
         last = cb.message.replies[-1]
         assert "1290" in last["text"] or "1 290" in last["text"]
         assert "/offer" in last["text"]
-        # Кнопка "Оплатить" с URL ссылки
         kb = last["reply_markup"]
         url_buttons = [b for row in kb.inline_keyboard for b in row]
         assert any(b.url == "https://pay.tochka/op-1" for b in url_buttons)
 
     @pytest.mark.asyncio
-    async def test_buy_payment_failure_friendly_message(self, monkeypatch):
+    async def test_pay_callback_without_subscription_service(self):
+        # subscription_service=None из autouse fixture
+        p = main.user_store.get(1)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
+        cb = FakeCallbackQuery("pay_card_pro", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        assert "не настроен" in cb.message.replies[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_pay_unknown_method_callback(self):
+        cb = FakeCallbackQuery("pay_bitcoin_pro", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # answer с show_alert — текст не попал в replies, но и платёж не создан
+        assert cb.message.replies == []
+
+    @pytest.mark.asyncio
+    async def test_pay_yookassa_error_offers_other_methods(self, monkeypatch):
+        from yookassa_client import YooKassaError
+        sub = FakeSubscriptionService(
+            exception=YooKassaError("400: method not enabled"),
+        )
+        monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(1)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
+        cb = FakeCallbackQuery("pay_sbp_pro", user_id=1)
+        await main.handle_callback(client=None, callback_query=cb)
+        # Friendly-сообщение + клавиатура с другими методами
+        last = cb.message.replies[-1]
+        assert "временно недоступен" in last["text"]
+        kb = last["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "pay_card_pro" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_pay_generic_failure_friendly_message(self, monkeypatch):
         sub = FakeSubscriptionService(exception=RuntimeError("Tochka 500"))
         monkeypatch.setattr(main, "subscription_service", sub)
         p = main.user_store.get(1)
         p.email = "buyer@example.com"
         main.user_store.save_profile(p)
-        cb = FakeCallbackQuery("tariff_pro", user_id=1)
+        cb = FakeCallbackQuery("pay_card_pro", user_id=1)
         await main.handle_callback(client=None, callback_query=cb)
-        # Не падает, шлёт friendly-сообщение
         assert any("Не удалось" in r["text"] for r in cb.message.replies)
 
 

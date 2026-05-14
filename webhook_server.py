@@ -73,9 +73,7 @@ def build_app(
         text = (
             "✅ Оплата прошла!\n\n"
             f"Тариф: {profile.tariff.upper()}\n"
-            f"Подписка действует до: {expires_short}\n\n"
-            "Автопродление включено. "
-            "Отключить: /cancel_subscription"
+            f"Подписка действует до: {expires_short}"
         )
         try:
             await notify(profile.user_id, text)

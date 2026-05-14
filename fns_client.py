@@ -1,4 +1,9 @@
-"""Клиент API-FNS.ru — официальные данные из ЕГРЮЛ/ЕГРИП по ИНН."""
+"""Клиент API-FNS.ru — официальные данные из ЕГРЮЛ/ЕГРИП по ИНН.
+
+Cross-user persistent cache (FileTTLCache): fetch_company по ИНН
+кэшируется на 12ч (FNS_FETCH_CACHE_TTL). ЕГРЮЛ обновляется не чаще
+суток, но 12ч — баланс между свежестью и экономией платных запросов.
+"""
 
 import asyncio
 import logging
@@ -7,6 +12,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from cache import FileTTLCache
 from schemas import CompanyData
 
 logger = logging.getLogger("financial-architect")
@@ -18,12 +24,24 @@ class FnsClient:
     def __init__(self) -> None:
         self.api_key = os.getenv("FNS_API_KEY", "")
         self.timeout = float(os.getenv("FNS_TIMEOUT", "15"))
+        self._cache_fetch = FileTTLCache(
+            "fns_fetch",
+            ttl=float(os.getenv("FNS_FETCH_CACHE_TTL", str(12 * 3600))),
+        )
 
     async def fetch_company(self, inn: str) -> Optional[CompanyData]:
-        """Получить данные о компании по ИНН из ЕГРЮЛ через API-FNS."""
+        """Получить данные о компании по ИНН из ЕГРЮЛ через API-FNS.
+
+        Кэшируется на 12ч (FNS_FETCH_CACHE_TTL). Cross-user: один и
+        тот же ИНН для разных юзеров — один платный запрос за окно.
+        """
         if not self.api_key:
             logger.warning("FNS_API_KEY not set, skipping FNS")
             return None
+
+        cached_raw = self._cache_fetch.get(inn)
+        if cached_raw is not None:
+            return self._parse(cached_raw, inn)
 
         def _call() -> Optional[Dict[str, Any]]:
             try:
@@ -48,6 +66,8 @@ class FnsClient:
         if not raw:
             return None
 
+        # Кэшируем raw-ответ (даже если items пуст — это валидный ответ).
+        self._cache_fetch.set(inn, raw)
         return self._parse(raw, inn)
 
     @staticmethod

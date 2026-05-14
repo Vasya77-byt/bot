@@ -12,14 +12,29 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 # Сколько дней даём референту за каждую первую оплату приглашённого
+# (используется ТОЛЬКО когда оплата не пересекает порог тира — иначе
+# вместо +15 выдаётся tier reward, см. award_referral_bonus)
 REFERRAL_BONUS_DAYS = 15
 # Тариф, который активируется референту-Free при первой оплате его приглашённого
 REFERRAL_BONUS_TARIFF_FOR_FREE = "start"
+
+# Ранг тарифов для сравнения lifetime vs monthly.
+# effective_tariff() выбирает максимальный из активного monthly и lifetime.
+TARIFF_RANK: Dict[str, int] = {"free": 0, "start": 1, "pro": 2, "business": 3}
+
+# Сколько дней даёт каждый tier-бонус (для tier'ов с временной наградой).
+# Gold/Diamond выдают lifetime — для них значение здесь не используется.
+TIER_BONUS_DAYS: Dict[str, int] = {"bronze": 30, "silver": 90}
+# Тариф, на который активируется free-референт при tier-награде с днями.
+# (Gold/Diamond сами по себе апгрейдят до Pro/Business lifetime.)
+TIER_BONUS_TARIFF_FOR_FREE: Dict[str, str] = {"bronze": "pro", "silver": "pro"}
+# Lifetime-тариф, выдаваемый при достижении tier'а.
+TIER_LIFETIME: Dict[str, str] = {"gold": "pro", "diamond": "business"}
 
 logger = logging.getLogger("financial-architect")
 
@@ -156,6 +171,14 @@ class UserProfile:
     referrals_paid_count: int = 0        # сколько привлечённых оплатили
     referral_bonus_days_total: int = 0   # сколько дней получил суммарно
     registered_at: str = ""              # ISO datetime первой регистрации
+    # Фаза 2 партнёрской программы: tier-награды и lifetime
+    lifetime_tariff: str = ""            # "pro"/"business"/"" — если выдан
+                                         # tier'ом Gold/Diamond, тариф навсегда
+    tier_rewards_granted: List[str] = field(default_factory=list)
+                                         # ключи tier'ов с уже выданной
+                                         # наградой ("bronze","silver","gold",
+                                         # "diamond") — для идемпотентности
+    revshare_enabled: bool = False       # Diamond-флаг (механика выплат — TODO)
 
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
@@ -163,8 +186,10 @@ class UserProfile:
             self.checks_today = 0
             self.checks_date = today
 
-    def is_subscription_active(self) -> bool:
-        """Активна ли платная подписка прямо сейчас."""
+    def _monthly_active(self) -> bool:
+        """Активна ли месячная (платная) подписка прямо сейчас (без учёта
+        lifetime). Внутренний метод; внешние коды должны использовать
+        is_subscription_active()."""
         if self.tariff == "free":
             return False
         if not self.tariff_expires_at:
@@ -175,14 +200,18 @@ class UserProfile:
             return False
         return expires > datetime.now(timezone.utc)
 
+    def is_subscription_active(self) -> bool:
+        """Активна ли любая подписка (monthly или lifetime)."""
+        if self.lifetime_tariff:
+            return True
+        return self._monthly_active()
+
     def effective_tariff(self) -> str:
-        """Тариф с учётом истечения подписки.
-        Если подписка на платный тариф истекла — возвращаем free."""
-        if self.tariff == "free":
-            return "free"
-        if self.is_subscription_active():
-            return self.tariff
-        return "free"
+        """Тариф с учётом истечения подписки и lifetime.
+        Возвращает максимальный из активного monthly и lifetime."""
+        monthly = self.tariff if self._monthly_active() else "free"
+        lifetime = self.lifetime_tariff or "free"
+        return monthly if TARIFF_RANK.get(monthly, 0) >= TARIFF_RANK.get(lifetime, 0) else lifetime
 
     def can_check(self) -> bool:
         self.reset_if_new_day()
@@ -432,21 +461,29 @@ class UserStore:
     def award_referral_bonus(
         self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
     ) -> Optional[UserProfile]:
-        """Выдаёт референту бонусные дни тарифа за первую оплату
-        приглашённого. Идемпотентно: если бонус уже выдан для этого
-        приглашённого, повторно не начислит.
+        """Выдаёт референту награду за первую оплату приглашённого.
+        Идемпотентно: повторный вызов на том же invited не начислит.
+
+        Логика:
+        - Считаем, какой tier станет текущим ПОСЛЕ инкремента
+          referrals_paid_count и не было ли он уже награждён.
+        - Если новый tier есть → выдаём ТОЛЬКО tier-награду (+15 не идёт):
+            * bronze/silver → +30/+90 дней (free-референту → Pro)
+            * gold/diamond  → lifetime Pro/Business
+            * diamond также включает revshare_enabled
+          tier помечается в tier_rewards_granted.
+        - Иначе → +days дней текущего тарифа (free → start, как раньше).
+
+        В обоих ветках на референте обновляется referrals_paid_count и
+        referral_bonus_days_total (для lifetime — символический +days,
+        чтобы статистика «дней получил» осталась монотонной).
 
         Возвращает обновлённый профиль референта, либо None, если
         бонуса не положено (нет реферера / уже выдан / приглашённый
         неизвестен).
-
-        Логика дней:
-        - Если у референта free и подписка не активна — активируем
-          start на N дней без auto_renew (карты у него нет).
-        - Если у референта активна платная подписка — продлеваем на
-          тот же тариф на N дней. activate_subscription знает, что
-          add'ить к текущему expires.
         """
+        from referral_tiers import TIERS
+
         invited = self.get(invited_user_id)
         if invited.referrer_id is None:
             return None
@@ -457,27 +494,64 @@ class UserStore:
         if referrer is None:
             return None
 
-        if referrer.tariff == "free" or not referrer.is_subscription_active():
-            # Free-референт получает start на 15 дней. activate_subscription
-            # выставит auto_renew=True; тут же гасим, т.к. карты нет.
-            self.activate_subscription(
-                referrer.user_id,
-                REFERRAL_BONUS_TARIFF_FOR_FREE,
-                days=days,
-            )
-            self.disable_auto_renew(referrer.user_id)
-        else:
-            # Активный платник — продлеваем текущий тариф
-            self.activate_subscription(referrer.user_id, referrer.tariff, days=days)
+        paid_before = referrer.referrals_paid_count
+        paid_after = paid_before + 1
 
-        # Финальные обновления статистики. После activate_subscription
-        # запись референта точно есть, но проверяем явно для устойчивости
-        # к гипотетическому race с удалением профиля.
-        refreshed = self._raw_profile(referrer.user_id)
-        if refreshed is None:
-            return None
-        refreshed.referrals_paid_count += 1
-        refreshed.referral_bonus_days_total += days
+        # Самый высокий tier, чей порог пересечён ЭТОЙ оплатой и который
+        # ещё не награждали. Защита от перепрыгивания (если по какой-то
+        # причине paid_count подскочил сразу на несколько — берём только
+        # верхний; промежуточные считаются уже неактуальными).
+        new_tier = None
+        for tier in TIERS:
+            if tier.key == "none":
+                continue
+            if tier.key in referrer.tier_rewards_granted:
+                continue
+            if paid_before < tier.threshold <= paid_after:
+                new_tier = tier  # пересечён в этой оплате
+        if new_tier is None:
+            # Запасной вариант: tier уже пройден ранее, но не выдавался
+            # (например, миграция со старых users.json). Выдаём
+            # максимальный незаявленный tier до текущего уровня.
+            for tier in TIERS:
+                if tier.key == "none":
+                    continue
+                if tier.key in referrer.tier_rewards_granted:
+                    continue
+                if paid_after >= tier.threshold:
+                    new_tier = tier
+
+        bonus_days_for_stats = days  # сколько прибавим в referral_bonus_days_total
+
+        if new_tier is not None:
+            # Tier перекрывает +15: выдаём только tier-награду.
+            self._grant_tier_reward(referrer.user_id, new_tier)
+            # Обновим в памяти, т.к. _grant_tier_reward уже сохранил.
+            refreshed = self._raw_profile(referrer.user_id)
+            if refreshed is None:
+                return None
+            # Для bronze/silver учтём фактические дни tier'а в статистике;
+            # для lifetime просто +days как «весомый» вклад в счётчик.
+            bonus_days_for_stats = TIER_BONUS_DAYS.get(new_tier.key, days)
+        else:
+            # Tier не пересечён — обычный +days бонус (как Фаза 1).
+            if referrer.tariff == "free" or not referrer.is_subscription_active():
+                self.activate_subscription(
+                    referrer.user_id,
+                    REFERRAL_BONUS_TARIFF_FOR_FREE,
+                    days=days,
+                )
+                self.disable_auto_renew(referrer.user_id)
+            else:
+                self.activate_subscription(
+                    referrer.user_id, referrer.tariff, days=days,
+                )
+            refreshed = self._raw_profile(referrer.user_id)
+            if refreshed is None:
+                return None
+
+        refreshed.referrals_paid_count = paid_after
+        refreshed.referral_bonus_days_total += bonus_days_for_stats
         self.save_profile(refreshed)
 
         # Помечаем приглашённого, чтобы не выдать повторно
@@ -486,6 +560,60 @@ class UserStore:
         self.save_profile(invited)
 
         return refreshed
+
+    def _grant_tier_reward(self, user_id: int, tier) -> None:
+        """Применяет конкретную tier-награду к профилю и помечает её
+        выданной. Не возвращает ничего — вызывающий код потом перечитает
+        профиль через _raw_profile.
+
+        Для bronze/silver: целевой тариф = max(текущий, Pro по рангу).
+        То есть Free/Start → апгрейд до Pro на N дней; Pro/Business —
+        продление своего же тарифа. Так выполняется обещание
+        «+30/+90 дней Pro» из спецификации, но юзеры на Business не
+        деградируют.
+        """
+        key = tier.key
+        if key in ("bronze", "silver"):
+            days = TIER_BONUS_DAYS[key]
+            min_tariff = TIER_BONUS_TARIFF_FOR_FREE[key]  # "pro"
+            profile = self._raw_profile(user_id)
+            if profile is None:
+                return
+            current = profile.tariff if profile.is_subscription_active() else "free"
+            cur_rank = TARIFF_RANK.get(current, 0)
+            min_rank = TARIFF_RANK.get(min_tariff, 0)
+            target = current if cur_rank >= min_rank else min_tariff
+            self.activate_subscription(user_id, target, days=days)
+            # Если у Free-юзера нет карты — отключаем auto_renew (как и
+            # в обычной фазе-1 ветке).
+            if not profile.is_subscription_active() and not profile.card_token \
+                    and not profile.subscription_operation_id \
+                    and not profile.yookassa_payment_method_id:
+                self.disable_auto_renew(user_id)
+        elif key in ("gold", "diamond"):
+            lifetime_tariff = TIER_LIFETIME[key]
+            profile = self._raw_profile(user_id)
+            if profile is None:
+                return
+            # Lifetime повышаем только вверх (Diamond > Gold > free).
+            new_rank = TARIFF_RANK.get(lifetime_tariff, 0)
+            cur_rank = TARIFF_RANK.get(profile.lifetime_tariff or "free", 0)
+            if new_rank > cur_rank:
+                profile.lifetime_tariff = lifetime_tariff
+            if key == "diamond":
+                profile.revshare_enabled = True
+            self.save_profile(profile)
+        else:
+            return  # неизвестный tier — игнорируем
+
+        # Помечаем выдачу, перечитав свежий профиль (activate_subscription
+        # мог перезаписать).
+        refreshed = self._raw_profile(user_id)
+        if refreshed is None:
+            return
+        if key not in refreshed.tier_rewards_granted:
+            refreshed.tier_rewards_granted.append(key)
+        self.save_profile(refreshed)
 
     def award_invitee_bonus(
         self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
@@ -523,3 +651,67 @@ class UserStore:
         """Возвращает профиль, не создавая его если нет."""
         raw = self._data.get(str(user_id))
         return self._profile_from_raw(raw) if raw else None
+
+    # ── Откат бонусов при возврате платежа (chargeback / refund) ─────
+
+    def revoke_referral_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Откатывает реф-бонус у реферера при возврате платежа
+        приглашённого. Идемпотентен — если бонус не был выдан,
+        возвращает None.
+
+        Что делает:
+        - декремент `referrals_paid_count` (не ниже 0)
+        - уменьшение `referral_bonus_days_total` на days (не ниже 0)
+        - сброс `referral_bonus_granted = False` на приглашённом
+          (повторная оплата того же юзера снова даст бонус)
+
+        Что НЕ делает (намеренно, sticky):
+        - не отнимает уже-выданный срок подписки (нет истории
+          по конкретным начислениям, точный rollback невозможен)
+        - не отзывает lifetime_tariff и не вычищает
+          tier_rewards_granted: gold/diamond — навсегда, иначе
+          подорвём доверие к программе
+
+        Возвращает обновлённый профиль реферера, либо None если
+        бонус не был выдан / нет реферера / нет такого приглашённого.
+        """
+        invited = self._raw_profile(invited_user_id)
+        if invited is None:
+            return None
+        if not invited.referral_bonus_granted:
+            return None
+        if invited.referrer_id is None:
+            return None
+
+        referrer = self._raw_profile(invited.referrer_id)
+        if referrer is None:
+            return None
+
+        referrer.referrals_paid_count = max(0, referrer.referrals_paid_count - 1)
+        referrer.referral_bonus_days_total = max(
+            0, referrer.referral_bonus_days_total - days,
+        )
+        self.save_profile(referrer)
+
+        invited.referral_bonus_granted = False
+        self.save_profile(invited)
+        return referrer
+
+    def revoke_invitee_bonus(
+        self, invited_user_id: int,
+    ) -> Optional[UserProfile]:
+        """Откатывает бонус приглашённого (бесплатные дни, которые ему
+        зачисляли за оплату по реф-ссылке). Идемпотентен.
+
+        Сбрасывает `invitee_bonus_granted = False` — при повторной
+        оплате (после refund'а) бонус снова можно выдать.
+        Срок подписки не уменьшаем (см. revoke_referral_bonus).
+        """
+        invited = self._raw_profile(invited_user_id)
+        if invited is None or not invited.invitee_bonus_granted:
+            return None
+        invited.invitee_bonus_granted = False
+        self.save_profile(invited)
+        return invited

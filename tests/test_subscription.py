@@ -623,3 +623,136 @@ class TestPollPendingPayments:
         assert result == []
         assert tochka.subscription_status_calls == []
         assert users.get(42).tariff_expires_at == first_expires
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tier-награды: события tier_unlocked в очереди реф-уведомлений
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTierUnlockedEvents:
+    def _pay_n_referrals(self, service, payments, users, referrer_id, n):
+        ref = users.get(referrer_id)
+        for i in range(n):
+            invited_id = 5000 + i
+            users.set_referrer_by_code(invited_id, ref.referral_code)
+            op_id = f"op-{i}"
+            order = f"sub_{invited_id}_pro_x"
+            payments.record_created(
+                operation_id=op_id, order_id=order,
+                user_id=invited_id, tariff="pro", amount=1290.0,
+            )
+            service.handle_webhook_paid(
+                operation_id=op_id, order_id=order, amount=1290.0,
+            )
+
+    def test_bronze_payment_emits_tier_unlocked_not_referrer_paid(
+        self, service, users, payments,
+    ):
+        self._pay_n_referrals(service, payments, users, 1, 3)
+        events = service.consume_referral_events()
+        # 3 invitee_received + 2 referrer_paid + 1 tier_unlocked (на 3-ей оплате)
+        tier_events = [e for e in events if e["kind"] == "tier_unlocked"]
+        referrer_paid = [e for e in events if e["kind"] == "referrer_paid"]
+        assert len(tier_events) == 1
+        assert tier_events[0]["tier_key"] == "bronze"
+        assert tier_events[0]["user_id"] == 1
+        # На пересекающей tier оплате referrer_paid НЕ дублируется
+        assert len(referrer_paid) == 2  # за 1-ую и 2-ую оплату
+
+    def test_non_threshold_payment_emits_referrer_paid(
+        self, service, users, payments,
+    ):
+        # 1 оплата — не достигает bronze (=3), идёт обычный referrer_paid
+        self._pay_n_referrals(service, payments, users, 1, 1)
+        events = service.consume_referral_events()
+        tier_events = [e for e in events if e["kind"] == "tier_unlocked"]
+        referrer_paid = [e for e in events if e["kind"] == "referrer_paid"]
+        assert tier_events == []
+        assert len(referrer_paid) == 1
+
+    def test_consume_clears_queue(self, service, users, payments):
+        self._pay_n_referrals(service, payments, users, 1, 1)
+        first = service.consume_referral_events()
+        second = service.consume_referral_events()
+        assert len(first) >= 1
+        assert second == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Refund: handle_refund откатывает реф-бонусы и помечает платёж
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHandleRefund:
+    def _create_paid_referral(self, service, users, payments, op_id="op-r1"):
+        """Готовит ситуацию: юзер 1 пригласил юзера 42, 42 оплатил Pro,
+        бонус начислен."""
+        ref = users.get(1)
+        users.set_referrer_by_code(42, ref.referral_code)
+        payments.record_created(
+            operation_id=op_id, order_id=f"sub_42_pro_{op_id}",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id=op_id, order_id=f"sub_42_pro_{op_id}", amount=1290.0,
+        )
+
+    def test_refund_marks_payment_and_revokes_bonus(
+        self, service, users, payments,
+    ):
+        self._create_paid_referral(service, users, payments)
+        # До рефанда
+        assert users.get(1).referrals_paid_count == 1
+        assert users.get(42).referral_bonus_granted is True
+
+        result = service.handle_refund(operation_id="op-r1", reason="chargeback")
+        assert result is not None
+        assert result["referrer_user_id"] == 1
+        assert result["invitee_revoked"] is True
+
+        # Платёж refunded
+        rec = payments.find_by_operation("op-r1")
+        assert rec.status == "refunded"
+        assert rec.error == "chargeback"
+        # Реферер откатан
+        assert users.get(1).referrals_paid_count == 0
+        # Флаг снят
+        assert users.get(42).referral_bonus_granted is False
+        assert users.get(42).invitee_bonus_granted is False
+
+    def test_refund_idempotent(self, service, users, payments):
+        self._create_paid_referral(service, users, payments)
+        first = service.handle_refund(operation_id="op-r1")
+        second = service.handle_refund(operation_id="op-r1")
+        assert first is not None
+        assert second is None
+        # Двойной откат не сполз paid_count в минус
+        assert users.get(1).referrals_paid_count == 0
+
+    def test_refund_unknown_payment_returns_none(self, service, users, payments):
+        result = service.handle_refund(operation_id="op-unknown")
+        assert result is None
+
+    def test_refund_by_order_id(self, service, users, payments):
+        self._create_paid_referral(service, users, payments)
+        result = service.handle_refund(order_id="sub_42_pro_op-r1")
+        assert result is not None
+        assert payments.find_by_operation("op-r1").status == "refunded"
+
+    def test_refund_without_referrer_does_not_crash(
+        self, service, users, payments,
+    ):
+        # Платёж юзера без реферера — refund должен пройти без revoke
+        payments.record_created(
+            operation_id="op-nr", order_id="sub_100_pro_x",
+            user_id=100, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-nr", order_id="sub_100_pro_x", amount=1290.0,
+        )
+        result = service.handle_refund(operation_id="op-nr")
+        assert result is not None
+        assert result["referrer_user_id"] is None
+        assert result["invitee_revoked"] is False
+

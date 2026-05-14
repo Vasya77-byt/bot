@@ -101,6 +101,23 @@ class PaymentsStore:
                 return PaymentRecord(**rec)
         return None
 
+    def mark_refunded(
+        self, operation_id: str, reason: str = "",
+    ) -> Optional[PaymentRecord]:
+        """Отмечает платёж как возвращённый. Использует поле error для
+        свободной причины (chargeback / manual_refund / etc.).
+        Идемпотентно: если запись уже refunded — просто возвращает её."""
+        for rec in self._data:
+            if rec.get("operation_id") == operation_id:
+                if rec.get("status") == "refunded":
+                    return PaymentRecord(**rec)
+                rec["status"] = "refunded"
+                if reason:
+                    rec["error"] = reason
+                self._save()
+                return PaymentRecord(**rec)
+        return None
+
     def find_by_operation(self, operation_id: str) -> Optional[PaymentRecord]:
         for rec in self._data:
             if rec.get("operation_id") == operation_id:

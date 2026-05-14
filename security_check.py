@@ -11,9 +11,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import requests
+
+if TYPE_CHECKING:
+    from zchb_client import ArbitrationSummary, CardSummary
 
 logger = logging.getLogger("financial-architect")
 
@@ -27,9 +30,16 @@ class SecurityResult:
     enforcement_total_sum: float = 0.0
     enforcement_details: List[str] = field(default_factory=list)
 
-    # ЗаЧестныйБизнес (TODO)
+    # Регуляторные проверки (Реестр проверок и аналоги).
+    # Заполняется при интеграции ЗЧБ; до того остаётся 0.
+    inspections_count: int = 0              # сколько проверок было всего
+    inspections_violations_count: int = 0   # из них с нарушениями
+
+    # ЗаЧестныйБизнес
     zchb_risk_level: Optional[str] = None
     zchb_details: Optional[str] = None
+    zchb_card: Optional["CardSummary"] = None
+    zchb_arbitration: Optional["ArbitrationSummary"] = None
 
     # Контур.Фокус (TODO)
     focus_risk_level: Optional[str] = None
@@ -179,6 +189,15 @@ class SecurityService:
 
     def __init__(self) -> None:
         self.fssp = FsspChecker()
+        # ZchbClient импортируется лениво, чтобы тестам не надо было мокать
+        # его на уровне импорта security_check.
+        self._zchb = None
+
+    def _get_zchb(self):
+        if self._zchb is None:
+            from zchb_client import ZchbClient
+            self._zchb = ZchbClient()
+        return self._zchb
 
     async def check(
         self,
@@ -186,23 +205,76 @@ class SecurityService:
         name: Optional[str] = None,
         okved: Optional[str] = None,
         region: Optional[str] = None,
+        ogrn: Optional[str] = None,
     ) -> SecurityResult:
-        """Полная проверка безопасности компании."""
+        """Полная проверка безопасности компании.
+
+        Запросы ФССП и ЗЧБ-rating пускаются параллельно, чтобы не
+        задерживать ответ. ЗЧБ-rating требует ОГРН (по ИНН возвращает
+        ошибку 230), card работает и по ИНН.
+        """
         result = SecurityResult()
 
-        # ФССП
-        try:
-            fssp_result = await self.fssp.check(inn, name, region)
-            if isinstance(fssp_result, dict):
-                result.has_enforcement = fssp_result.get("has_enforcement", False)
-                result.enforcement_count = fssp_result.get("count", 0)
-                result.enforcement_total_sum = fssp_result.get("total_sum", 0.0)
-                result.enforcement_details = fssp_result.get("details", [])
-        except Exception as exc:
-            logger.warning("FSSP check error: %s", exc)
+        zchb = self._get_zchb()
+        fssp_task = asyncio.create_task(self._safe_fssp(inn, name, region))
+        rating_task = (
+            asyncio.create_task(zchb.get_rating(ogrn))
+            if zchb.enabled and ogrn else None
+        )
+        card_task = (
+            asyncio.create_task(zchb.get_card(inn))
+            if zchb.enabled else None
+        )
+        arbitration_task = (
+            asyncio.create_task(zchb.get_arbitration(inn))
+            if zchb.enabled else None
+        )
 
-        # TODO: ЗаЧестныйБизнес
-        # TODO: Контур.Фокус
+        fssp_result = await fssp_task
+        if isinstance(fssp_result, dict):
+            result.has_enforcement = fssp_result.get("has_enforcement", False)
+            result.enforcement_count = fssp_result.get("count", 0)
+            result.enforcement_total_sum = fssp_result.get("total_sum", 0.0)
+            result.enforcement_details = fssp_result.get("details", [])
+
+        if rating_task is not None:
+            try:
+                rating = await rating_task
+            except Exception as exc:
+                logger.warning("ZCHB rating error: %s", exc)
+                rating = None
+            if rating is not None:
+                if rating.rating_category:
+                    result.zchb_risk_level = rating.rating_category
+                if rating.risk_level:
+                    result.zchb_details = (
+                        f"Налоговые риски: {rating.risk_level}"
+                    )
+
+        if card_task is not None:
+            try:
+                card = await card_task
+            except Exception as exc:
+                logger.warning("ZCHB card error: %s", exc)
+                card = None
+            if card is not None:
+                result.zchb_card = card
+
+        if arbitration_task is not None:
+            try:
+                arb = await arbitration_task
+            except Exception as exc:
+                logger.warning("ZCHB arbitration error: %s", exc)
+                arb = None
+            if arb is not None:
+                result.zchb_arbitration = arb
 
         result.calculate_risk()
         return result
+
+    async def _safe_fssp(self, inn, name, region):
+        try:
+            return await self.fssp.check(inn, name, region)
+        except Exception as exc:
+            logger.warning("FSSP check error: %s", exc)
+            return None

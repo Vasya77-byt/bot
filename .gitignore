@@ -13,6 +13,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Test artifacts
+.coverage
+.pytest_cache/
+htmlcov/
+
 # Runtime data
 users.json
 payments.json

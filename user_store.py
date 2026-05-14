@@ -11,9 +11,15 @@
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+import uuid
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
+
+# Сколько дней даём референту за каждую первую оплату приглашённого
+REFERRAL_BONUS_DAYS = 15
+# Тариф, который активируется референту-Free при первой оплате его приглашённого
+REFERRAL_BONUS_TARIFF_FOR_FREE = "start"
 
 logger = logging.getLogger("financial-architect")
 
@@ -24,6 +30,14 @@ TARIFF_LIMITS: Dict[str, Optional[int]] = {
     "free": 3,
     "start": 50,
     "pro": 300,
+    "business": None,  # безлимит
+}
+
+# Лимиты подписок на мониторинг ИНН (одновременно отслеживаемых)
+TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
+    "free": 0,         # на free мониторинг недоступен
+    "start": 5,
+    "pro": 50,
     "business": None,  # безлимит
 }
 
@@ -112,11 +126,36 @@ class UserProfile:
     checks_total: int = 0
     # Подписка
     tariff_expires_at: str = ""      # ISO datetime в UTC, пусто для free
-    card_token: str = ""             # токен сохранённой карты от Точки
+    subscription_operation_id: str = ""  # operationId подписки в Точке
+                                         # для charge_subscription / cancel
+    yookassa_payment_method_id: str = ""  # id сохранённой карты в ЮKassa
+                                          # для рекуррентных списаний
+    card_token: str = ""             # legacy: остаётся для совместимости
+                                     # с существующими users.json; новые
+                                     # подписки используют subscription_operation_id
+                                     # или yookassa_payment_method_id
     auto_renew: bool = True          # автопродление
     renewal_failures: int = 0        # счётчик подряд неудачных списаний
     last_payment_id: str = ""        # id последней операции
+    # Напоминания об истечении подписки — чтобы не отправлять одно и то же
+    # уведомление дважды за день. Хранит ISO-дату последней отправки.
+    last_expiry_reminder_date: str = ""
+    # Флаг, что юзер уже получил уведомление о переходе на Free (один раз)
+    expired_notice_sent: bool = False
     email: str = ""                  # email для чека
+    phone: str = ""                  # телефон в формате +79991234567
+    full_name: str = ""              # ФИО клиента (опц., из профиля)
+    accepted_offer_at: str = ""      # ISO datetime принятия оферты
+    # Партнёрская программа
+    referral_code: str = ""              # личный код вида "ref_<8 hex>"
+    referrer_id: Optional[int] = None    # кто пригласил этого пользователя
+    referral_source: str = ""            # UTM-source из ref_<code>_<source>
+    referral_bonus_granted: bool = False # бонус референту уже выдан (one-shot)
+    invitee_bonus_granted: bool = False  # +15 дней приглашённому уже выданы (one-shot)
+    referrals_count: int = 0             # сколько привлёк (включая Free)
+    referrals_paid_count: int = 0        # сколько привлечённых оплатили
+    referral_bonus_days_total: int = 0   # сколько дней получил суммарно
+    registered_at: str = ""              # ISO datetime первой регистрации
 
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
@@ -151,6 +190,10 @@ class UserProfile:
         if limit is None:
             return True  # безлимит
         return self.checks_today < limit
+
+    def has_completed_onboarding(self) -> bool:
+        """Прошёл ли клиент обязательные шаги: оферта принята + телефон."""
+        return bool(self.accepted_offer_at) and bool(self.phone)
 
     def remaining_checks(self) -> Optional[int]:
         self.reset_if_new_day()
@@ -202,11 +245,37 @@ class UserStore:
     def get(self, user_id: int) -> UserProfile:
         key = str(user_id)
         if key not in self._data:
-            profile = UserProfile(user_id=user_id)
+            profile = UserProfile(
+                user_id=user_id,
+                referral_code=self._generate_referral_code(),
+            )
             self._data[key] = asdict(profile)
             self._save()
             return profile
-        return self._profile_from_raw(self._data[key])
+
+        profile = self._profile_from_raw(self._data[key])
+        # Бэкфилл: у старых пользователей без кода — генерируем при первом get
+        if not profile.referral_code:
+            profile.referral_code = self._generate_referral_code()
+            self._data[key] = asdict(profile)
+            self._save()
+        return profile
+
+    def _generate_referral_code(self) -> str:
+        """Генерирует уникальный реферальный код. Защита от коллизий —
+        проверка по уже выданным."""
+        existing = {
+            raw.get("referral_code")
+            for raw in self._data.values()
+            if raw.get("referral_code")
+        }
+        for _ in range(20):
+            code = f"ref_{uuid.uuid4().hex[:8]}"
+            if code not in existing:
+                return code
+        # На практике 20 итераций uuid4 дают вероятность коллизии ~10^-50.
+        # Если попали сюда — что-то сломано, кидаем явно.
+        raise RuntimeError("Failed to generate unique referral code")
 
     def save_profile(self, profile: UserProfile) -> None:
         self._data[str(profile.user_id)] = asdict(profile)
@@ -230,10 +299,20 @@ class UserStore:
         tariff: str,
         days: int = 30,
         card_token: str = "",
+        subscription_operation_id: str = "",
+        yookassa_payment_method_id: str = "",
         payment_id: str = "",
     ) -> UserProfile:
         """Активирует (или продлевает) подписку на тариф на N дней.
         Если подписка ещё активна — срок прибавляется к текущему, иначе от now().
+
+        - card_token: legacy-поле, заполняется только если приходит явно
+          (старый код или внешний клиент). Новый Tochka-flow его не
+          использует — для списаний нужен subscription_operation_id.
+        - subscription_operation_id: id подписки в Точке для последующих
+          charge_subscription. Не перезаписывается пустой строкой —
+          можно безопасно вызывать activate_subscription без аргумента
+          при продлении.
         """
         profile = self.get(user_id)
         now = datetime.now(timezone.utc)
@@ -249,6 +328,10 @@ class UserStore:
         profile.tariff_expires_at = new_expires.isoformat()
         if card_token:
             profile.card_token = card_token
+        if subscription_operation_id:
+            profile.subscription_operation_id = subscription_operation_id
+        if yookassa_payment_method_id:
+            profile.yookassa_payment_method_id = yookassa_payment_method_id
         if payment_id:
             profile.last_payment_id = payment_id
         profile.renewal_failures = 0
@@ -287,3 +370,156 @@ class UserStore:
         """Итератор по всем профилям (для планировщика)."""
         for raw in self._data.values():
             yield self._profile_from_raw(raw)
+
+    # ── Партнёрская программа ─────────────────────────────────────────
+
+    def find_by_referral_code(self, code: str) -> Optional[UserProfile]:
+        """Поиск пользователя по его реферальному коду."""
+        if not code:
+            return None
+        for raw in self._data.values():
+            if raw.get("referral_code") == code:
+                return self._profile_from_raw(raw)
+        return None
+
+    def set_referrer_by_code(
+        self, invited_user_id: int, code: str, source: str = "",
+    ) -> bool:
+        """Привязывает приглашённого к референту по его коду.
+        Опционально сохраняет UTM-источник (instagram/email/telegram_chat/…).
+
+        Возвращает True, если привязка прошла; False — если нельзя
+        (само-реферал, нет такого кода, уже есть реферер)."""
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is not None:
+            return False  # уже привязан
+        referrer = self.find_by_referral_code(code)
+        if referrer is None:
+            return False  # неизвестный код
+        if referrer.user_id == invited_user_id:
+            return False  # само-реферал
+
+        invited.referrer_id = referrer.user_id
+        if source:
+            # Ограничим длину/чарсет — защита от мусора в JSON
+            invited.referral_source = "".join(
+                c for c in source[:32] if c.isalnum() or c in "_-"
+            )
+        if not invited.registered_at:
+            from datetime import datetime, timezone
+            invited.registered_at = datetime.now(timezone.utc).isoformat()
+        self.save_profile(invited)
+
+        # Инкрементируем счётчик у референта
+        referrer.referrals_count += 1
+        self.save_profile(referrer)
+        return True
+
+    def list_invitees(self, referrer_id: int) -> list[UserProfile]:
+        """Возвращает список профилей всех приглашённых данным юзером.
+        Не делает анонимизацию — это задача UI-слоя."""
+        result: list[UserProfile] = []
+        for raw in self._data.values():
+            if raw.get("referrer_id") == referrer_id:
+                result.append(self._profile_from_raw(raw))
+        # Сортируем по дате регистрации (новые наверху). Пустые даты — в конец.
+        result.sort(
+            key=lambda p: p.registered_at or "0",
+            reverse=True,
+        )
+        return result
+
+    def award_referral_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Выдаёт референту бонусные дни тарифа за первую оплату
+        приглашённого. Идемпотентно: если бонус уже выдан для этого
+        приглашённого, повторно не начислит.
+
+        Возвращает обновлённый профиль референта, либо None, если
+        бонуса не положено (нет реферера / уже выдан / приглашённый
+        неизвестен).
+
+        Логика дней:
+        - Если у референта free и подписка не активна — активируем
+          start на N дней без auto_renew (карты у него нет).
+        - Если у референта активна платная подписка — продлеваем на
+          тот же тариф на N дней. activate_subscription знает, что
+          add'ить к текущему expires.
+        """
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is None:
+            return None
+        if invited.referral_bonus_granted:
+            return None
+
+        referrer = self._raw_profile(invited.referrer_id)
+        if referrer is None:
+            return None
+
+        if referrer.tariff == "free" or not referrer.is_subscription_active():
+            # Free-референт получает start на 15 дней. activate_subscription
+            # выставит auto_renew=True; тут же гасим, т.к. карты нет.
+            self.activate_subscription(
+                referrer.user_id,
+                REFERRAL_BONUS_TARIFF_FOR_FREE,
+                days=days,
+            )
+            self.disable_auto_renew(referrer.user_id)
+        else:
+            # Активный платник — продлеваем текущий тариф
+            self.activate_subscription(referrer.user_id, referrer.tariff, days=days)
+
+        # Финальные обновления статистики. После activate_subscription
+        # запись референта точно есть, но проверяем явно для устойчивости
+        # к гипотетическому race с удалением профиля.
+        refreshed = self._raw_profile(referrer.user_id)
+        if refreshed is None:
+            return None
+        refreshed.referrals_paid_count += 1
+        refreshed.referral_bonus_days_total += days
+        self.save_profile(refreshed)
+
+        # Помечаем приглашённого, чтобы не выдать повторно
+        invited = self.get(invited_user_id)
+        invited.referral_bonus_granted = True
+        self.save_profile(invited)
+
+        return refreshed
+
+    def award_invitee_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Выдаёт +N бонусных дней САМОМУ приглашённому за его первую
+        оплату (это и есть «15 бесплатных дней» из приветственного
+        сообщения). Идемпотентно через invitee_bonus_granted.
+
+        Возвращает обновлённый профиль приглашённого, либо None, если:
+        - у пользователя нет referrer_id (он не приходил по реф.ссылке);
+        - бонус уже выдан этому пользователю;
+        - тариф free (на free не имеет смысла продлевать).
+
+        Логика: продлеваем текущий тариф приглашённого на N дней.
+        activate_subscription сам прибавит к текущему expires.
+        """
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is None or invited.invitee_bonus_granted:
+            return None
+        # Если приглашённый ещё на free — нечего продлевать. Этот случай
+        # маловероятен: метод вызывается из webhook'а успешной оплаты,
+        # тариф к этому моменту уже активирован. Но защита не повредит.
+        if invited.tariff == "free":
+            return None
+
+        self.activate_subscription(invited_user_id, invited.tariff, days=days)
+        refreshed = self._raw_profile(invited_user_id)
+        if refreshed is None:
+            return None
+        refreshed.invitee_bonus_granted = True
+        self.save_profile(refreshed)
+        return refreshed
+
+    def _raw_profile(self, user_id: int) -> Optional[UserProfile]:
+        """Возвращает профиль, не создавая его если нет."""
+        raw = self._data.get(str(user_id))
+        return self._profile_from_raw(raw) if raw else None

@@ -2,6 +2,7 @@ from typing import Optional, Set
 
 from compliance import legal_note
 from parsers import ParseResult
+from reputation_score import calculate_reputation, format_reputation_block
 from schemas import CompanyData, empty_company
 from security_check import SecurityResult
 from user_store import TARIFF_FEATURES, TARIFF_LABELS, UserProfile
@@ -64,15 +65,48 @@ def render_comparison(
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     lines = []
 
+    # ── Reputation Score (заголовок отчёта) ──
+    reputation = calculate_reputation(company, security)
+    lines.append(format_reputation_block(reputation))
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
     # ── Стоп-листы ──
     lines.append("—— Стоп-листы / 115-ФЗ / 550-П ——")
+    card = getattr(security, "zchb_card", None) if security else None
     if security:
         fssp_ok = not security.has_enforcement
         lines.append(f"{'✅' if fssp_ok else '⚠️'} ФССП: {'чисто' if fssp_ok else f'{security.enforcement_count} производств'}")
-    lines.append("✅ Росфинмониторинг: подключается...")
-    lines.append("✅ Реестр недобросов. поставщиков: подключается...")
+
+    # Реестры ФНС — из ZCHB card (если есть)
+    if card is not None:
+        lines.append(
+            f"{'⚠️' if card.in_debt_registry else '✅'} "
+            "Реестр ФНС (взыскиваемая задолженность): "
+            f"{'есть запись' if card.in_debt_registry else 'чисто'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.in_no_reporting_registry else '✅'} "
+            "Сдача отчётности ФНС: "
+            f"{'не сдаёт >1 года' if card.in_no_reporting_registry else 'в порядке'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.address_invalid else '✅'} "
+            "Адрес ЕГРЮЛ: "
+            f"{'недостоверен' if card.address_invalid else 'достоверен'}"
+        )
+        lines.append(
+            f"{'⚠️' if card.is_unreliable_supplier else '✅'} "
+            "Реестр недобросов. поставщиков (ФАС): "
+            f"{'есть запись' if card.is_unreliable_supplier else 'чисто'}"
+        )
+    else:
+        lines.append("✅ Росфинмониторинг: подключается...")
+        lines.append("✅ Реестр недобросов. поставщиков: подключается...")
+
     lines.append("✅ Санкционные списки: подключается...")
-    lines.append("✅ Реестр предупреждений ЦБ: подключается...")
+    lines.append("✅ Реестр участников ЦБ: подключается...")
     lines.append("")
 
     # ── Карточка компании ──
@@ -100,7 +134,29 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
         lines.append(f"💰 Уст. капитал: {_fmt_money(company.capital)}")
     if company.employees_count:
         lines.append(f"👥 Штат: {company.employees_count} чел.")
+    # Категория МСП — короткая строка под штатом
+    if card is not None and card.msp_category:
+        lines.append(f"🏭 МСП: {card.msp_category}")
     lines.append("")
+
+    # ── Учредители ──
+    if card is not None and card.founders:
+        lines.append("—— Учредители ——")
+        # Показываем до 5 учредителей; если больше — добавим «и ещё N»
+        shown = card.founders[:5]
+        for f in shown:
+            mark = "⚠️ " if f.is_mass else ""
+            share_part = ""
+            if f.share_pct > 0:
+                share_part = f" — {f.share_pct:g}%"
+            elif f.share_abs > 0:
+                share_part = f" — {_fmt_money(f.share_abs)}"
+            type_emoji = "🧑" if f.type == "fl" else "🏢"
+            name = f.name or "—"
+            lines.append(f"{type_emoji} {mark}{name}{share_part}")
+        if len(card.founders) > 5:
+            lines.append(f"   … и ещё {len(card.founders) - 5}")
+        lines.append("")
 
     # ── Финансы ──
     if company.revenue_last_year or company.profit_last_year:
@@ -110,6 +166,32 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
         lines.append(f"💹 Выручка: {rev}, прибыль: {prof}")
         if company.source:
             lines.append(f"📡 Источник: {company.source}")
+        lines.append("")
+
+    # ── Сводка арбитражных судов (ZCHB) ──
+    arb = getattr(security, "zchb_arbitration", None) if security else None
+    if arb is not None and arb.has_cases:
+        lines.append("—— Арбитражные дела ——")
+        lines.append(f"⚖️ Точных дел по ИНН: {arb.total_exact}")
+        if arb.total_exact > 0:
+            lines.append(
+                f"   • Истец: {arb.as_plaintiff_count} "
+                f"({_fmt_money(arb.plaintiff_claim_sum)})"
+            )
+            lines.append(
+                f"   • Ответчик: {arb.as_defendant_count} "
+                f"({_fmt_money(arb.defendant_claim_sum)})"
+            )
+            lines.append(
+                f"   • Общая сумма исков: "
+                f"{_fmt_money(arb.total_claim_sum)}"
+            )
+        if arb.total_fuzzy:
+            lines.append(
+                f"   Похожих по названию: {arb.total_fuzzy} "
+                "(могут быть чужие)"
+            )
+        lines.append("Подробнее — кнопка «⚖️ Суды»")
         lines.append("")
 
     # ── Проверки (ФССП) ──
@@ -123,11 +205,54 @@ def render_internal_analysis(company: CompanyData, risk: Set[str], security: Opt
             lines.append("⚖️ ФССП: нет ✅")
         lines.append("")
 
-    # ── Причины рисков ──
-    reasons = _risk_reasons(company, security)
-    if reasons:
-        lines.append("—— 📋 Причины ——")
-        lines.extend(reasons)
+    # ── ЗаЧестныйБизнес: Индекс + расширенные данные ──
+    if security and (security.zchb_risk_level or security.zchb_details
+                     or card is not None):
+        lines.append("—— ЗаЧестныйБизнес ——")
+        if security.zchb_risk_level:
+            lines.append(f"📊 Индекс компании: {security.zchb_risk_level}")
+        if security.zchb_details:
+            lines.append(f"💼 {security.zchb_details}")
+        if card is not None:
+            # Массовость и тёзки — отдельные сигналы
+            if card.director_is_mass_leader:
+                lines.append("⚠️ Директор — массовый руководитель")
+            if card.founder_is_mass:
+                lines.append("⚠️ Учредитель — массовый")
+            if card.director_namesake_count >= 50:
+                lines.append(
+                    f"⚠️ У директора {card.director_namesake_count} "
+                    "тёзок-руководителей"
+                )
+            # Цифры
+            if card.courts_total:
+                lines.append(f"⚖️ Судов всего: {card.courts_total}")
+            if card.tax_debt_sum > 0:
+                lines.append(
+                    f"💰 Налоговая задолженность: "
+                    f"{_fmt_money(card.tax_debt_sum)}"
+                )
+            if card.contracts_supplier_count or card.contracts_customer_count:
+                lines.append(
+                    f"📦 Госконтракты: поставщик "
+                    f"{card.contracts_supplier_count} "
+                    f"({_fmt_money(card.contracts_supplier_sum)}), "
+                    f"заказчик {card.contracts_customer_count} "
+                    f"({_fmt_money(card.contracts_customer_sum)})"
+                )
+            if card.tax_violations_sum > 0:
+                lines.append(
+                    f"💸 Налоговые штрафы: "
+                    f"{_fmt_money(card.tax_violations_sum)}"
+                )
+            if card.inspections_count:
+                lines.append(f"🔎 Проверок проводилось: {card.inspections_count}")
+            if card.licenses_count:
+                lines.append(f"📜 Лицензий: {card.licenses_count}")
+        lines.append("")
+
+    # Блок «Причины» убран: факторы риска уже показаны в верхнем
+    # риск-скоре и дублирование запутывает клиента.
 
     return "\n".join(lines)
 
@@ -318,11 +443,55 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     else:
         lines.append("   ✅ Исполнительных производств не найдено")
 
-    # ЗЧБ (когда подключим)
-    if result.zchb_details:
+    # ЗЧБ — Индекс компании + налоговые риски + расширенные данные из card
+    card = getattr(result, "zchb_card", None)
+    if result.zchb_risk_level or result.zchb_details or card is not None:
         lines.append("")
         lines.append("📋 ЗаЧестныйБизнес:")
-        lines.append(f"   {result.zchb_details}")
+        if result.zchb_risk_level:
+            lines.append(f"   Индекс компании: {result.zchb_risk_level}")
+        if result.zchb_details:
+            lines.append(f"   {result.zchb_details}")
+
+        if card is not None:
+            # Красные флаги — выводим явно с эмодзи
+            if card.in_no_reporting_registry:
+                lines.append("   ⚠️ Не сдаёт налоговую отчётность >1 года")
+            if card.in_debt_registry:
+                lines.append("   ⚠️ В реестре ФНС: взыскиваемая задолженность")
+            if card.address_invalid:
+                lines.append("   ⚠️ Адрес признан недостоверным (ФНС)")
+            if card.is_unreliable_supplier:
+                lines.append("   ⚠️ В реестре недобросовестных поставщиков (ФАС)")
+            if card.director_is_mass_leader:
+                lines.append("   ⚠️ Директор — массовый руководитель")
+            if card.founder_is_mass:
+                lines.append("   ⚠️ Учредитель — массовый")
+            if card.director_namesake_count >= 50:
+                lines.append(
+                    f"   ⚠️ У директора {card.director_namesake_count} "
+                    "тёзок-руководителей"
+                )
+
+            # Цифры — без эмодзи, общая статистика
+            if card.courts_total:
+                lines.append(f"   ⚖️ Судов всего: {card.courts_total}")
+            if card.tax_debt_sum > 0:
+                lines.append(
+                    f"   💰 Налоговая задолженность: "
+                    f"{_fmt_money(card.tax_debt_sum)}"
+                )
+            if (card.contracts_supplier_count
+                    or card.contracts_customer_count):
+                lines.append(
+                    f"   📦 Госконтракты: поставщик "
+                    f"{card.contracts_supplier_count} шт. "
+                    f"({_fmt_money(card.contracts_supplier_sum)}), "
+                    f"заказчик {card.contracts_customer_count} шт. "
+                    f"({_fmt_money(card.contracts_customer_sum)})"
+                )
+            if card.licenses_count:
+                lines.append(f"   📜 Лицензий: {card.licenses_count}")
 
     # Контур.Фокус (когда подключим)
     if result.focus_details:
@@ -333,8 +502,16 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     return "\n".join(lines)
 
 
-def render_profile(profile: UserProfile) -> str:
-    """Рендер профиля пользователя."""
+def render_profile(
+    profile: UserProfile,
+    monitoring_count: Optional[int] = None,
+    monitoring_limit: Optional[int] = None,
+) -> str:
+    """Рендер профиля пользователя.
+
+    monitoring_count/monitoring_limit — состояние списка отслеживаемых
+    компаний. monitoring_limit=None при заданном count означает ∞.
+    """
     tariff_label = TARIFF_LABELS.get(profile.tariff, profile.tariff)
     limit = profile.daily_limit()
     remaining = profile.remaining_checks()
@@ -350,9 +527,13 @@ def render_profile(profile: UserProfile) -> str:
         f"Проверок сегодня: {profile.checks_today}/{limit_str}",
         f"Осталось: {remaining_str}",
         f"Всего проверок: {profile.checks_total}",
-        "",
-        "─── Возможности ───",
     ]
+
+    if monitoring_count is not None:
+        mon_limit_str = "∞" if monitoring_limit is None else str(monitoring_limit)
+        lines.append(f"Отслеживается компаний: {monitoring_count}/{mon_limit_str}")
+
+    lines.extend(["", "─── Возможности ───"])
 
     features = TARIFF_FEATURES.get(profile.tariff, {})
     for feature, enabled in features.items():

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Реферальная программа</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  /* Telegram-нативные цвета: автоматически адаптируются под light/dark */
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #000000);
+    --hint: var(--tg-theme-hint-color, #999999);
+    --link: var(--tg-theme-link-color, #2481cc);
+    --button: var(--tg-theme-button-color, #2481cc);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --secondary-bg: var(--tg-theme-secondary-bg-color, #f4f4f5);
+    --section-bg: var(--tg-theme-section-bg-color, #ffffff);
+    --separator: rgba(127, 127, 127, 0.2);
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 0 16px 32px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    font-size: 15px; line-height: 1.4;
+  }
+
+  h1 { font-size: 22px; margin: 20px 0 4px; font-weight: 700; }
+  h2 { font-size: 16px; margin: 24px 0 10px; font-weight: 600; }
+  p.hint { color: var(--hint); margin: 0 0 16px; font-size: 14px; }
+
+  .card {
+    background: var(--secondary-bg);
+    border-radius: 14px;
+    padding: 16px;
+    margin: 12px 0;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    text-align: center;
+  }
+  .stat-num { font-size: 22px; font-weight: 700; }
+  .stat-label { font-size: 12px; color: var(--hint); margin-top: 2px; }
+
+  .progress {
+    margin-top: 6px;
+    height: 10px;
+    background: var(--separator);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--button);
+    transition: width 0.4s ease;
+  }
+  .progress-label {
+    display: flex; justify-content: space-between;
+    font-size: 13px; color: var(--hint); margin-top: 6px;
+  }
+
+  .tier-list { display: flex; flex-direction: column; gap: 8px; }
+  .tier {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--separator);
+  }
+  .tier.achieved { background: rgba(36, 129, 204, 0.08); border-color: var(--button); }
+  .tier-emoji { font-size: 22px; }
+  .tier-text { flex: 1; }
+  .tier-name { font-weight: 600; font-size: 14px; }
+  .tier-reward { color: var(--hint); font-size: 13px; margin-top: 1px; }
+  .tier-check { color: var(--button); font-size: 18px; }
+
+  .btn {
+    display: block; width: 100%;
+    background: var(--button); color: var(--button-text);
+    border: none; padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 15px; font-weight: 600;
+    cursor: pointer;
+    margin: 8px 0;
+  }
+  .btn-secondary {
+    background: transparent; color: var(--button);
+    border: 1px solid var(--button);
+  }
+
+  .share-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  .share-btn {
+    padding: 10px; border-radius: 10px;
+    border: 1px solid var(--separator);
+    background: var(--bg); color: var(--text);
+    font-size: 14px; cursor: pointer;
+    text-align: center;
+  }
+
+  .link-box {
+    background: var(--bg);
+    border: 1px dashed var(--separator);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    word-break: break-all;
+    color: var(--link);
+    margin: 8px 0;
+  }
+
+  .invitee {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--separator);
+    font-size: 14px;
+  }
+  .invitee:last-child { border-bottom: none; }
+  .invitee-status { font-size: 12px; color: var(--hint); }
+  .invitee-status.paid { color: #2cb05c; font-weight: 600; }
+
+  input[type="text"] {
+    width: 100%; padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--separator);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    margin: 6px 0;
+  }
+  input[type="text"]:focus { outline: 2px solid var(--button); outline-offset: -1px; }
+
+  .loading { text-align: center; padding: 40px; color: var(--hint); }
+  .error { color: #d22; padding: 16px; text-align: center; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--text); color: var(--bg);
+    padding: 10px 18px; border-radius: 24px;
+    font-size: 14px; opacity: 0; transition: opacity 0.3s;
+    pointer-events: none; z-index: 100;
+  }
+  .toast.show { opacity: 0.9; }
+</style>
+</head>
+<body>
+<div id="app" class="loading">Загрузка…</div>
+<div id="toast" class="toast"></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  tg.ready();
+  tg.expand();
+}
+
+const app = document.getElementById('app');
+const toastEl = document.getElementById('toast');
+
+function showToast(text) {
+  toastEl.textContent = text;
+  toastEl.classList.add('show');
+  setTimeout(() => toastEl.classList.remove('show'), 1800);
+  tg?.HapticFeedback?.notificationOccurred?.('success');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+async function loadData() {
+  const initData = tg?.initData || "";
+  if (!initData) {
+    app.innerHTML = '<div class="error">Откройте Mini App через бота, ' +
+      'прямой URL не работает.</div>';
+    return;
+  }
+  try {
+    const resp = await fetch('/api/miniapp/referral/data', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({init_data: initData}),
+    });
+    if (resp.status === 401) {
+      app.innerHTML = '<div class="error">Авторизация не удалась. ' +
+        'Закройте и откройте Mini App заново.</div>';
+      return;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    render(data);
+  } catch (e) {
+    app.innerHTML = `<div class="error">Ошибка загрузки: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function render(d) {
+  const s = d.stats;
+  const t = d.tier;
+  const link = d.referral_link;
+  const sharePost = `Я тут нашёл бота для проверки контрагентов по ИНН — ` +
+    `быстро, удобно, в Telegram. Регистрируйся по моей ссылке — получишь ` +
+    `15 бесплатных дней при первой оплате:\n${link}`;
+
+  let invHtml = '';
+  if (d.invitees.length === 0) {
+    invHtml = `<p class="hint">Пока никого. Поделитесь ссылкой выше 👆</p>`;
+  } else {
+    invHtml = d.invitees.map(inv => {
+      const dt = inv.registered_at ? inv.registered_at.slice(0, 10) : '—';
+      const statusCls = inv.paid ? 'paid' : '';
+      const statusTxt = inv.paid
+        ? `🟢 оплатил ${escapeHtml(inv.tariff.toUpperCase())}`
+        : `⚪️ зарегистрирован ${dt}`;
+      const srcChip = inv.source ? ` · ${escapeHtml(inv.source)}` : '';
+      return `<div class="invitee">
+        <div>@${escapeHtml(inv.user_id_masked)}<span class="invitee-status ${statusCls}">${srcChip}</span></div>
+        <div class="invitee-status ${statusCls}">${statusTxt}</div>
+      </div>`;
+    }).join('');
+  }
+
+  const tiersHtml = t.all_tiers.map(tier => `
+    <div class="tier ${tier.achieved ? 'achieved' : ''}">
+      <div class="tier-emoji">${tier.emoji}</div>
+      <div class="tier-text">
+        <div class="tier-name">${escapeHtml(tier.label)} — ${tier.threshold} оплативших</div>
+        <div class="tier-reward">${escapeHtml(tier.reward)}</div>
+      </div>
+      ${tier.achieved ? '<div class="tier-check">✓</div>' : ''}
+    </div>
+  `).join('');
+
+  let progressHtml = '';
+  if (t.next) {
+    const pct = Math.round(t.progress.ratio * 100);
+    progressHtml = `
+      <div class="progress"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="progress-label">
+        <span>${t.progress.from_base} / ${t.progress.target}</span>
+        <span>До ${escapeHtml(t.next.label)} (${t.next.emoji})</span>
+      </div>`;
+  } else {
+    progressHtml = `<p class="hint" style="margin-top:6px">🎉 Максимальный уровень достигнут!</p>`;
+  }
+
+  app.classList.remove('loading');
+  app.innerHTML = `
+    <h1>${t.current.emoji} ${escapeHtml(t.current.label)}</h1>
+    <p class="hint">Приглашайте друзей — получайте бонусные дни.</p>
+
+    <div class="card">
+      <div class="stats">
+        <div><div class="stat-num">${s.referrals_count}</div><div class="stat-label">Приглашено</div></div>
+        <div><div class="stat-num">${s.referrals_paid_count}</div><div class="stat-label">Оплатили</div></div>
+        <div><div class="stat-num">${s.referral_bonus_days_total}</div><div class="stat-label">Дней получено</div></div>
+      </div>
+      ${progressHtml}
+    </div>
+
+    <h2>Ваша ссылка</h2>
+    <div class="card">
+      <div class="link-box" id="link-box">${escapeHtml(link)}</div>
+      <button class="btn" id="btn-share-telegram">📤 Поделиться в Telegram</button>
+      <button class="btn btn-secondary" id="btn-copy">📋 Скопировать пост</button>
+    </div>
+
+    <h2>UTM-источник для аналитики</h2>
+    <div class="card">
+      <p class="hint" style="margin:0 0 8px">
+        Создайте отдельную ссылку под канал (instagram, email, чат). Узнаете
+        откуда приходят лучшие лиды.
+      </p>
+      <input type="text" id="utm-input" placeholder="instagram, email, telegram_chat..." maxlength="32">
+      <button class="btn" id="btn-utm">🔗 Создать ссылку</button>
+      <div id="utm-result"></div>
+    </div>
+
+    <h2>Уровни</h2>
+    <div class="card"><div class="tier-list">${tiersHtml}</div></div>
+
+    <h2>Приглашённые (${d.invitees.length})</h2>
+    <div class="card">${invHtml}</div>
+  `;
+
+  // Handlers
+  document.getElementById('btn-share-telegram').onclick = () => {
+    const url = `https://t.me/share/url?` +
+      `url=${encodeURIComponent(link)}` +
+      `&text=${encodeURIComponent(sharePost)}`;
+    tg?.openTelegramLink?.(url) || window.open(url, '_blank');
+    tg?.HapticFeedback?.impactOccurred?.('light');
+  };
+  document.getElementById('btn-copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(sharePost);
+      showToast('Скопировано');
+    } catch (e) {
+      showToast('Не получилось 😕');
+    }
+  };
+  document.getElementById('btn-utm').onclick = async () => {
+    const src = document.getElementById('utm-input').value.trim();
+    if (!src) { showToast('Введите название источника'); return; }
+    try {
+      const resp = await fetch('/api/miniapp/referral/utm', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({init_data: tg.initData, source: src}),
+      });
+      const r = await resp.json();
+      if (r.link) {
+        document.getElementById('utm-result').innerHTML =
+          `<div class="link-box">${escapeHtml(r.link)}</div>
+           <button class="btn btn-secondary" id="btn-copy-utm">📋 Скопировать</button>`;
+        document.getElementById('btn-copy-utm').onclick = async () => {
+          await navigator.clipboard.writeText(r.link);
+          showToast('Скопировано');
+        };
+      } else {
+        showToast(r.error || 'Ошибка');
+      }
+    } catch (e) {
+      showToast('Сетевая ошибка');
+    }
+  };
+}
+
+loadData();
+</script>
+</body>
+</html>

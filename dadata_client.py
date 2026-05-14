@@ -1,9 +1,9 @@
-"""Клиент DaData.ru — базовые данные о компании по ИНН."""
+"""Клиент DaData.ru — базовые данные о компании по ИНН и поиск по названию."""
 
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -12,6 +12,7 @@ from schemas import CompanyData
 logger = logging.getLogger("financial-architect")
 
 DADATA_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party"
+DADATA_SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/party"
 
 
 class DaDataClient:
@@ -51,6 +52,51 @@ class DaDataClient:
             return None
 
         return self._parse(raw, inn)
+
+    async def suggest_by_name(self, query: str, count: int = 10) -> List[CompanyData]:
+        """Поиск компаний по началу названия. Возвращает до `count`
+        результатов, в порядке релевантности DaData. Пустой результат
+        — если ключ не настроен или запрос пустой."""
+        if not self.api_key or not query.strip():
+            return []
+
+        # DaData ограничивает count: max 20 для suggest
+        count = max(1, min(count, 20))
+
+        def _call() -> Optional[Dict[str, Any]]:
+            try:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Authorization": f"Token {self.api_key}",
+                }
+                resp = requests.post(
+                    DADATA_SUGGEST_URL,
+                    json={"query": query.strip(), "count": count},
+                    headers=headers,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                logger.warning("DaData suggest status %s: %s",
+                               resp.status_code, resp.text[:200])
+            except Exception as exc:
+                logger.warning("DaData suggest failed: %s", exc)
+            return None
+
+        raw = await asyncio.to_thread(_call)
+        if not raw:
+            return []
+
+        suggestions = raw.get("suggestions", [])
+        results: List[CompanyData] = []
+        for item in suggestions:
+            inn = (item.get("data") or {}).get("inn") or ""
+            # Переиспользуем _parse, обернув один suggestion в формат findById
+            company = self._parse({"suggestions": [item]}, inn)
+            if company is not None:
+                results.append(company)
+        return results
 
     @staticmethod
     def _parse(data: Dict[str, Any], inn: str) -> Optional[CompanyData]:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Финансовый Архитектор — таймер ежедневного бэкапа
+
+[Timer]
+# Каждый день в 03:00 по локальному времени сервера
+OnCalendar=*-*-* 03:00:00
+
+# Если сервер был выключен в 03:00 — запустить бэкап при следующем старте
+Persistent=true
+
+# Случайная задержка до 30 минут — снижает нагрузку на S3
+RandomizedDelaySec=30min
+
+# Имя сервиса
+Unit=finarch-backup.service
+
+[Install]
+WantedBy=timers.target

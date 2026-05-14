@@ -1,4 +1,5 @@
 import os
+import re
 from io import BytesIO
 from textwrap import wrap
 from typing import Optional
@@ -8,11 +9,118 @@ from PIL import Image, ImageDraw, ImageFont
 
 from schemas import CompanyData
 
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 _FONT_SEARCH_PATHS = [
+    # Локально в проекте — самый надёжный путь, не зависит от ОС
+    os.path.join(_PROJECT_DIR, "assets", "DejaVuSans.ttf"),
+    os.path.join(_PROJECT_DIR, "DejaVuSans.ttf"),
+    # Системные пути (Linux / Ubuntu / Debian)
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/DejaVuSans.ttf",
+    # macOS
+    "/Library/Fonts/DejaVuSans.ttf",
+    # Windows (fallback)
     "C:/Windows/Fonts/arial.ttf",
 ]
+
+
+class FontNotFoundError(RuntimeError):
+    """Не найден TrueType-шрифт, поддерживающий кириллицу."""
+
+
+# Эмодзи, которые мы используем в текстовых отчётах. DejaVu/Helvetica их
+# почти все не поддерживают — заменяем на текстовые маркеры, чтобы fpdf
+# не падал.
+_EMOJI_REPLACEMENTS = {
+    "🟢": "[LOW]",
+    "🟡": "[MED]",
+    "🟠": "[HIGH]",
+    "🔴": "[CRIT]",
+    "⚪": "[?]",
+    "✅": "[+]",
+    "⚠️": "[!]",
+    "❌": "[-]",
+    "🚨": "[!!]",
+    "❗️": "!",
+    "🤖": "",
+    "📊": "",
+    "📋": "",
+    "📜": "",
+    "📦": "",
+    "📥": "",
+    "📄": "",
+    "📈": "",
+    "📍": "",
+    "📅": "",
+    "📡": "",
+    "📞": "",
+    "🏢": "",
+    "🏛": "",
+    "🏭": "",
+    "🏦": "",
+    "🎯": "",
+    "👤": "",
+    "👥": "",
+    "💼": "",
+    "💰": "",
+    "💸": "",
+    "💹": "",
+    "💡": "",
+    "🔒": "",
+    "🔎": "",
+    "🔗": "",
+    "🔄": "",
+    "🛑": "",
+    "🧑": "",
+    "🆘": "",
+    "⚖️": "",
+    "🤝": "",
+    "📲": "",
+    "🟫": "",
+    "🟪": "",
+    "🟦": "",
+    "🟨": "",
+    # ── разделители/типографика ──
+    "—": "-",
+    "–": "-",
+    "•": "*",
+    "↳": "->",
+    "→": "->",
+    "│": "|",
+    "━": "-",
+    "┌": "+",
+    "┐": "+",
+    "└": "+",
+    "┘": "+",
+    "─": "-",
+    "…": "...",
+}
+
+
+# Префикс — символы вне Basic Multilingual Plane (U+10000+) — обычно эмодзи
+# (квадратные плитки, скрепки и т.п.). DejaVu их не имеет. Сжимаем в один
+# regex, чтобы убрать всё что не вошло в _EMOJI_REPLACEMENTS.
+_NON_BMP_RE = re.compile(r"[\U00010000-\U0010ffff]")
+# Variation Selector-16 (U+FE0F) — невидимый символ, делает «emoji»-вид
+# у текстового знака (⚠️ = ⚠ + U+FE0F). DejaVu его не имеет.
+_VS16_RE = re.compile(r"️")
+
+
+def _pdf_safe(text: str) -> str:
+    """Готовит текст к PDF: заменяет эмодзи на текстовые маркеры,
+    срезает символы вне BMP (которых нет в DejaVu/Helvetica)."""
+    if not text:
+        return ""
+    for emoji, replacement in _EMOJI_REPLACEMENTS.items():
+        text = text.replace(emoji, replacement)
+    text = _VS16_RE.sub("", text)
+    text = _NON_BMP_RE.sub("", text)
+    # Может остаться двойной пробел после удалений — схлопываем
+    text = re.sub(r"  +", " ", text)
+    return text
 
 
 def _find_truetype_font() -> Optional[str]:
@@ -23,28 +131,30 @@ def _find_truetype_font() -> Optional[str]:
 
 
 def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -> bytes:
+    font_path = _find_truetype_font()
+    if not font_path:
+        # Helvetica не поддерживает кириллицу — без TTF не получим
+        # читаемый PDF. Бросаем явное исключение, обработчик ловит и
+        # показывает осмысленное сообщение.
+        raise FontNotFoundError(
+            "TrueType-шрифт не найден. Установите fonts-dejavu-core "
+            "(apt-get install fonts-dejavu-core) или положите "
+            "DejaVuSans.ttf в каталог проекта."
+        )
+
     pdf = FPDF()
     pdf.add_page()
+    pdf.add_font("CustomFont", "", font_path)
+    pdf.set_font("CustomFont", size=14)
+    pdf.cell(0, 10, text=_pdf_safe(title), new_x="LMARGIN", new_y="NEXT")
 
-    font_path = _find_truetype_font()
-    if font_path:
-        pdf.add_font("CustomFont", "", font_path)
-        pdf.set_font("CustomFont", size=14)
-    else:
-        pdf.set_font("Helvetica", size=14)
-
-    pdf.cell(0, 10, text=title, new_x="LMARGIN", new_y="NEXT")
-
-    if font_path:
-        pdf.set_font("CustomFont", size=11)
-    else:
-        pdf.set_font("Helvetica", size=11)
+    pdf.set_font("CustomFont", size=11)
 
     if company:
-        pdf.multi_cell(0, 8, text=_company_block(company))
+        pdf.multi_cell(0, 8, text=_pdf_safe(_company_block(company)))
         pdf.ln(4)
 
-    pdf.multi_cell(0, 8, text=body)
+    pdf.multi_cell(0, 8, text=_pdf_safe(body))
 
     output = BytesIO()
     pdf.output(output)

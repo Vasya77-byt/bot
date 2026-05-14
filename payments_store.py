@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -30,6 +30,9 @@ class PaymentRecord:
     created_at: str
     paid_at: str = ""
     error: str = ""
+    # "tochka" | "yookassa". Default = "tochka" для обратной совместимости
+    # с существующим payments.json (записи до миграции на провайдеры).
+    provider: str = "tochka"
 
 
 class PaymentsStore:
@@ -63,6 +66,7 @@ class PaymentsStore:
         tariff: str,
         amount: float,
         kind: str = "initial",
+        provider: str = "tochka",
     ) -> PaymentRecord:
         rec = PaymentRecord(
             operation_id=operation_id,
@@ -73,6 +77,7 @@ class PaymentsStore:
             kind=kind,
             status="created",
             created_at=datetime.now(timezone.utc).isoformat(),
+            provider=provider,
         )
         self._data.append(asdict(rec))
         self._save()
@@ -113,3 +118,38 @@ class PaymentsStore:
 
     def total_revenue(self) -> float:
         return sum(r.get("amount", 0) for r in self._data if r.get("status") == "paid")
+
+    def iter_all(self) -> list[PaymentRecord]:
+        """Все записи журнала. Используется для админ-отчёта."""
+        return [PaymentRecord(**r) for r in self._data]
+
+    def iter_pending(
+        self,
+        older_than_seconds: int = 0,
+        max_age_seconds: Optional[int] = None,
+    ) -> list[PaymentRecord]:
+        """Возвращает записи в статусе 'created', которым больше N секунд
+        и моложе max_age_seconds (если указано). Используется поллером
+        для проверки статуса в Точке, когда webhook не пришёл.
+
+        - older_than_seconds: минимальный возраст. Защита от обращения
+          к API сразу после создания записи (Точка ещё не обработала).
+        - max_age_seconds: верхняя граница. Записи старше — считаем
+          протухшими, не опрашиваем (клиент уже не ждёт).
+        """
+        now = datetime.now(timezone.utc)
+        result = []
+        for rec in self._data:
+            if rec.get("status") != "created":
+                continue
+            try:
+                created = datetime.fromisoformat(rec.get("created_at", ""))
+            except ValueError:
+                continue
+            age = (now - created).total_seconds()
+            if age < older_than_seconds:
+                continue
+            if max_age_seconds is not None and age > max_age_seconds:
+                continue
+            result.append(PaymentRecord(**rec))
+        return result

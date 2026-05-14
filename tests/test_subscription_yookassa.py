@@ -519,3 +519,117 @@ async def test_cancel_disables_auto_renew(service, users):
     assert ok is True
     assert "disabled" in msg
     assert users.get(10).auto_renew is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Реферальные события: очередь для async-рассылки уведомлений
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_referral_events_empty_by_default(service):
+    assert service.consume_referral_events() == []
+
+
+def test_referral_events_emitted_on_first_payment(
+    service, users, payments,
+):
+    """При первой оплате приглашённого:
+    1) Реферер получает +15 дней → событие 'referrer_paid'
+    2) Приглашённый получает +15 дней → событие 'invitee_received'
+    """
+    referrer = users.get(1)
+    users.set_referrer_by_code(2, referrer.referral_code)
+    users.set_email(2, "a@b.ru")
+    # Подготовка: создаём запись initial-платежа и обрабатываем webhook
+    payments.record_created(
+        operation_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        kind="initial", provider="yookassa",
+    )
+    service.handle_yookassa_webhook_paid(
+        payment_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        payment_method_id="pm-x", kind="initial",
+    )
+
+    events = service.consume_referral_events()
+    kinds = sorted(e["kind"] for e in events)
+    assert kinds == ["invitee_received", "referrer_paid"]
+    # referrer_paid → реферер user_id=1
+    referrer_evt = next(e for e in events if e["kind"] == "referrer_paid")
+    assert referrer_evt["user_id"] == 1
+    assert referrer_evt["days"] == 15
+    # invitee_received → приглашённый user_id=2
+    invitee_evt = next(e for e in events if e["kind"] == "invitee_received")
+    assert invitee_evt["user_id"] == 2
+    assert invitee_evt["days"] == 15
+
+
+def test_referral_events_consume_clears_queue(service, users, payments):
+    """consume_referral_events очищает очередь — повторный вызов = []."""
+    referrer = users.get(1)
+    users.set_referrer_by_code(2, referrer.referral_code)
+    users.set_email(2, "a@b.ru")
+    payments.record_created(
+        operation_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        kind="initial", provider="yookassa",
+    )
+    service.handle_yookassa_webhook_paid(
+        payment_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        payment_method_id="pm-x", kind="initial",
+    )
+
+    first = service.consume_referral_events()
+    second = service.consume_referral_events()
+    assert len(first) >= 1
+    assert second == []
+
+
+def test_referral_events_idempotent_on_duplicate_webhook(
+    service, users, payments,
+):
+    """Повторный webhook не должен повторно класть события в очередь."""
+    referrer = users.get(1)
+    users.set_referrer_by_code(2, referrer.referral_code)
+    users.set_email(2, "a@b.ru")
+    payments.record_created(
+        operation_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        kind="initial", provider="yookassa",
+    )
+
+    service.handle_yookassa_webhook_paid(
+        payment_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        payment_method_id="pm-x", kind="initial",
+    )
+    service.consume_referral_events()  # забрали первую партию
+
+    # Повторный webhook (ЮKassa at-least-once)
+    service.handle_yookassa_webhook_paid(
+        payment_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        payment_method_id="pm-x", kind="initial",
+    )
+    # Никаких новых событий — флаги в профилях уже выставлены
+    assert service.consume_referral_events() == []
+
+
+def test_referral_events_empty_when_no_referrer(
+    service, users, payments,
+):
+    """Если у платящего нет реферера — никаких реф-событий."""
+    users.set_email(2, "a@b.ru")
+    payments.record_created(
+        operation_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        kind="initial", provider="yookassa",
+    )
+    service.handle_yookassa_webhook_paid(
+        payment_id="op-x", order_id="sub_2_pro_xx",
+        user_id=2, tariff="pro", amount=1290.0,
+        payment_method_id="pm-x", kind="initial",
+    )
+    assert service.consume_referral_events() == []

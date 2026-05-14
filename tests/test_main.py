@@ -1485,9 +1485,10 @@ class TestHandleStartReferral:
 
         # Приглашённый привязан
         assert main.user_store.get(42).referrer_id == 100
-        # Welcome содержит сообщение о реферале
-        assert "реферальной" in msg.replies[0]["text"].lower()
-        assert "15" in msg.replies[0]["text"]
+        # Welcome содержит сообщение про 15 бесплатных дней
+        first_reply = msg.replies[0]["text"]
+        assert "15" in first_reply
+        assert "бесплатных дней" in first_reply
 
     @pytest.mark.asyncio
     async def test_self_referral_silently_ignored(self):

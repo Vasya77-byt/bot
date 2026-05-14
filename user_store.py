@@ -150,6 +150,7 @@ class UserProfile:
     referral_code: str = ""              # личный код вида "ref_<8 hex>"
     referrer_id: Optional[int] = None    # кто пригласил этого пользователя
     referral_bonus_granted: bool = False # бонус референту уже выдан (one-shot)
+    invitee_bonus_granted: bool = False  # +15 дней приглашённому уже выданы (one-shot)
     referrals_count: int = 0             # сколько привлёк (включая Free)
     referrals_paid_count: int = 0        # сколько привлечённых оплатили
     referral_bonus_days_total: int = 0   # сколько дней получил суммарно
@@ -456,6 +457,38 @@ class UserStore:
         invited.referral_bonus_granted = True
         self.save_profile(invited)
 
+        return refreshed
+
+    def award_invitee_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Выдаёт +N бонусных дней САМОМУ приглашённому за его первую
+        оплату (это и есть «15 бесплатных дней» из приветственного
+        сообщения). Идемпотентно через invitee_bonus_granted.
+
+        Возвращает обновлённый профиль приглашённого, либо None, если:
+        - у пользователя нет referrer_id (он не приходил по реф.ссылке);
+        - бонус уже выдан этому пользователю;
+        - тариф free (на free не имеет смысла продлевать).
+
+        Логика: продлеваем текущий тариф приглашённого на N дней.
+        activate_subscription сам прибавит к текущему expires.
+        """
+        invited = self.get(invited_user_id)
+        if invited.referrer_id is None or invited.invitee_bonus_granted:
+            return None
+        # Если приглашённый ещё на free — нечего продлевать. Этот случай
+        # маловероятен: метод вызывается из webhook'а успешной оплаты,
+        # тариф к этому моменту уже активирован. Но защита не повредит.
+        if invited.tariff == "free":
+            return None
+
+        self.activate_subscription(invited_user_id, invited.tariff, days=days)
+        refreshed = self._raw_profile(invited_user_id)
+        if refreshed is None:
+            return None
+        refreshed.invitee_bonus_granted = True
+        self.save_profile(refreshed)
         return refreshed
 
     def _raw_profile(self, user_id: int) -> Optional[UserProfile]:

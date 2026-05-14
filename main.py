@@ -2871,10 +2871,25 @@ async def handle_start(client: Client, message) -> None:
         user_store.get(user_id)
         if user_store.set_referrer_by_code(user_id, parts[1]):
             referral_message = (
-                "🎁 Вы пришли по реферальной ссылке. "
-                "Когда оформите подписку — пригласившему начислится "
-                f"+{REFERRAL_BONUS_DAYS} дней тарифа.\n\n"
+                f"🎁 Вы получили {REFERRAL_BONUS_DAYS} бесплатных дней, "
+                "для их получения приобретите подписку.\n\n"
             )
+            # Уведомить пригласившего — set_referrer_by_code one-shot,
+            # сюда мы попадаем только при первой успешной привязке.
+            invited = user_store.get(user_id)
+            if invited.referrer_id:
+                try:
+                    await client.send_message(
+                        invited.referrer_id,
+                        "👤 По вашей реферальной ссылке зарегистрировался "
+                        "новый пользователь!\n\n"
+                        "Когда он оплатит подписку — вы получите "
+                        f"+{REFERRAL_BONUS_DAYS} дней.",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Referrer-on-register notify failed: %s", exc,
+                    )
 
     profile = user_store.get(user_id)
     step = await _onboarding_step_async(client, profile)

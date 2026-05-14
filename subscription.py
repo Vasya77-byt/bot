@@ -17,7 +17,7 @@ from typing import Optional
 
 from payments_store import PaymentsStore
 from tochka_client import TochkaClient, parse_payment_link_id
-from user_store import TARIFF_PRICES, UserProfile, UserStore
+from user_store import REFERRAL_BONUS_DAYS, TARIFF_PRICES, UserProfile, UserStore
 from yookassa_client import YooKassaClient, YooKassaError
 
 logger = logging.getLogger("financial-architect")
@@ -53,6 +53,11 @@ class SubscriptionService:
         self.yookassa_tax_system_code = yookassa_tax_system_code
         self.yookassa_vat_code = yookassa_vat_code
         self.yookassa_save_payment_method = yookassa_save_payment_method
+        # Очередь реф-уведомлений: handle_*_paid (sync) кладёт сюда,
+        # webhook_server (async) забирает через consume_referral_events()
+        # и шлёт через notify(). Так sync-логика подписок не зависит
+        # от async-инфраструктуры Telegram.
+        self._referral_events: list[dict] = []
 
     # Маппинг method (из UI) → конкретный payment_method_data.type у ЮKassa
     YOOKASSA_METHOD_TYPES = {
@@ -243,12 +248,7 @@ class SubscriptionService:
 
         # Если у пользователя есть реферер и это первая оплата —
         # выдаём референту бонусные дни. Метод идемпотентен.
-        referrer = self.users.award_referral_bonus(rec.user_id)
-        if referrer is not None:
-            logger.info(
-                "Referral bonus granted: referrer=%s days_total=%s",
-                referrer.user_id, referrer.referral_bonus_days_total,
-            )
+        self._process_referral_bonuses(rec.user_id)
 
         return profile
 
@@ -316,14 +316,50 @@ class SubscriptionService:
             profile.user_id, profile.tariff, profile.tariff_expires_at,
         )
 
-        referrer = self.users.award_referral_bonus(rec.user_id)
+        self._process_referral_bonuses(rec.user_id)
+
+        return profile
+
+    # ────────────────────────────────────────────────────────────
+    # Реферальные бонусы и события
+    # ────────────────────────────────────────────────────────────
+
+    def _process_referral_bonuses(self, paid_user_id: int) -> None:
+        """Начисляет бонусы реферальной программы при первой оплате
+        приглашённого. Все начисления идемпотентны (one-shot через
+        флаги в профилях). События для уведомлений складываются в
+        очередь — webhook_server заберёт и разошлёт notify."""
+        referrer = self.users.award_referral_bonus(paid_user_id)
         if referrer is not None:
             logger.info(
                 "Referral bonus granted: referrer=%s days_total=%s",
                 referrer.user_id, referrer.referral_bonus_days_total,
             )
+            self._referral_events.append({
+                "kind": "referrer_paid",
+                "user_id": referrer.user_id,
+                "days": REFERRAL_BONUS_DAYS,
+            })
 
-        return profile
+        invitee = self.users.award_invitee_bonus(paid_user_id)
+        if invitee is not None:
+            logger.info(
+                "Invitee bonus granted: user=%s tariff=%s expires=%s",
+                invitee.user_id, invitee.tariff, invitee.tariff_expires_at,
+            )
+            self._referral_events.append({
+                "kind": "invitee_received",
+                "user_id": invitee.user_id,
+                "days": REFERRAL_BONUS_DAYS,
+            })
+
+    def consume_referral_events(self) -> list[dict]:
+        """Забирает накопленные события (referrer_paid / invitee_received)
+        и очищает очередь. Вызывается webhook_server'ом после
+        handle_*_paid для рассылки уведомлений."""
+        events = self._referral_events
+        self._referral_events = []
+        return events
 
     def handle_webhook_failed(
         self, *, operation_id: str, error: str = "",

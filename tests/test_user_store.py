@@ -509,3 +509,59 @@ class TestAwardReferralBonus:
         assert ref.referrals_count == 2
         assert ref.referrals_paid_count == 2
         assert ref.referral_bonus_days_total == 30  # 15 + 15
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Бонус самому приглашённому: award_invitee_bonus
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAwardInviteeBonus:
+    def test_no_referrer_returns_none(self, store):
+        """Если пользователь пришёл без реф.ссылки — бонус не начисляется."""
+        store.get(42)  # обычный профиль без referrer_id
+        store.activate_subscription(42, "start", days=30)
+        result = store.award_invitee_bonus(42)
+        assert result is None
+
+    def test_free_invitee_returns_none(self, store):
+        """На Free нечего продлевать — бонус не выдаётся."""
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        # 2 на free
+        result = store.award_invitee_bonus(2)
+        assert result is None
+
+    def test_invitee_with_paid_tariff_extends_subscription(self, store):
+        """Приглашённый со start-тарифом получает +15 дней."""
+        from user_store import REFERRAL_BONUS_DAYS
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        store.activate_subscription(2, "start", days=30)
+        before_expires = store.get(2).tariff_expires_at
+
+        result = store.award_invitee_bonus(2)
+        assert result is not None
+        assert result.invitee_bonus_granted is True
+        assert result.tariff == "start"  # тариф не меняется
+        # Срок продлился (точное значение зависит от parsing, проверяем что
+        # подписка действительно продлилась — флаг granted это гарантирует)
+        assert result.tariff_expires_at != before_expires
+
+    def test_idempotent_second_call_returns_none(self, store):
+        """Повторный вызов не должен начислить повторно."""
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        store.activate_subscription(2, "start", days=30)
+
+        first = store.award_invitee_bonus(2)
+        second = store.award_invitee_bonus(2)
+        assert first is not None
+        assert second is None
+
+    def test_granted_flag_persists(self, store):
+        referrer = store.get(1)
+        store.set_referrer_by_code(2, referrer.referral_code)
+        store.activate_subscription(2, "start", days=30)
+        store.award_invitee_bonus(2)
+        assert store.get(2).invitee_bonus_granted is True

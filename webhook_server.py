@@ -63,6 +63,46 @@ def build_app(
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    async def _flush_referral_events() -> None:
+        """Рассылает накопившиеся реф-уведомления.
+
+        Вызывается после handle_*_paid: subscription положил в очередь
+        события (referrer_paid / invitee_received), мы их шлём notify'ем.
+        Тихо проглатывает ошибки — реф-уведомления не должны мешать
+        ответу webhook'а (200 OK для ЮKassa/Точки)."""
+        if notify is None:
+            return
+        try:
+            events = subscription.consume_referral_events()
+        except Exception as exc:
+            logger.warning("consume_referral_events failed: %s", exc)
+            return
+        for evt in events:
+            kind = evt.get("kind")
+            uid = evt.get("user_id")
+            days = evt.get("days", 0)
+            if uid is None:
+                continue
+            if kind == "referrer_paid":
+                text = (
+                    "💰 Ваш приглашённый оплатил подписку!\n\n"
+                    f"+{days} дней начислено к вашему тарифу.\n"
+                    "Приглашайте ещё друзей: /referral"
+                )
+            elif kind == "invitee_received":
+                text = (
+                    f"🎁 Вам начислено {days} бонусных дней за переход "
+                    "по реферальной ссылке!"
+                )
+            else:
+                continue
+            try:
+                await notify(uid, text)
+            except Exception as exc:
+                logger.error(
+                    "Referral notify failed user=%s kind=%s: %s", uid, kind, exc,
+                )
+
     async def _notify_payment_success(profile) -> None:
         if not (profile and notify):
             return
@@ -133,6 +173,7 @@ def build_app(
                 amount=parsed["amount"],
             )
             await _notify_payment_success(profile)
+            await _flush_referral_events()
 
         # Точка ожидает 200 OK, иначе будет ретраить (30 раз × 10 сек)
         return web.json_response({"status": "ok"})
@@ -185,6 +226,7 @@ def build_app(
                 kind=event.kind,
             )
             await _notify_payment_success(profile)
+            await _flush_referral_events()
 
         # ЮKassa ждёт 200 OK для подтверждения — иначе будет ретраить
         return web.json_response({"status": "ok"})

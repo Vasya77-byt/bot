@@ -81,6 +81,30 @@ def service(yookassa, users, payments):
 # ──────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("method", ["sbp", "tpay", "sberpay"])
+@pytest.mark.asyncio
+async def test_yookassa_methods_force_save_payment_method_false(
+    yookassa, users, payments, method,
+):
+    """СБП/T-Pay/SberPay у ЮKassa не поддерживают save_payment_method.
+    Передача true даёт 403. Поэтому даже когда глобальный флаг True —
+    для этих методов мы принудительно передаём False."""
+    svc = SubscriptionService(
+        tochka=None, yookassa=yookassa, provider="yookassa",
+        users=users, payments=payments,
+        redirect_url="https://t.me/x", fail_redirect_url="https://t.me/x",
+        yookassa_save_payment_method=True,  # глобально true
+    )
+    users.set_email(1, "a@b.ru")
+    yookassa.next_payment_result = PaymentResult(
+        payment_id="yk_x", confirmation_url="https://example.com/pay",
+        order_id="sub_1_start_xx", status="pending",
+    )
+    await svc.create_initial_payment(1, "start", method=method)
+    # Глобальный true → но из-за метода передаётся false
+    assert yookassa.create_payment_calls[0]["save_payment_method"] is False
+
+
 @pytest.mark.asyncio
 async def test_initial_payment_save_method_disabled_via_flag(
     yookassa, users, payments,

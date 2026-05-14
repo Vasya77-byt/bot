@@ -1037,6 +1037,34 @@ class TestHandleBuyTariff:
         assert any(b.url == "https://pay.tochka/op-1" for b in url_buttons)
 
     @pytest.mark.asyncio
+    async def test_pay_card_mentions_autorenew(self, monkeypatch):
+        """method=card (Точка) → текст обещает автопродление."""
+        sub = FakeSubscriptionService()
+        monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(42)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
+        cb = FakeCallbackQuery("pay_card_pro", user_id=42)
+        await main.handle_callback(client=None, callback_query=cb)
+        assert "автопродления" in cb.message.replies[-1]["text"]
+
+    @pytest.mark.parametrize("method", ["sbp", "tpay", "sberpay"])
+    @pytest.mark.asyncio
+    async def test_pay_yookassa_methods_dont_mention_autorenew(
+        self, monkeypatch, method,
+    ):
+        """СБП/T-Pay/SberPay через ЮKassa не сохраняют recurring-токен —
+        текст не должен обещать автопродление."""
+        sub = FakeSubscriptionService()
+        monkeypatch.setattr(main, "subscription_service", sub)
+        p = main.user_store.get(42)
+        p.email = "buyer@example.com"
+        main.user_store.save_profile(p)
+        cb = FakeCallbackQuery(f"pay_{method}_pro", user_id=42)
+        await main.handle_callback(client=None, callback_query=cb)
+        assert "автопродления" not in cb.message.replies[-1]["text"]
+
+    @pytest.mark.asyncio
     async def test_pay_callback_without_subscription_service(self):
         # subscription_service=None из autouse fixture
         p = main.user_store.get(1)

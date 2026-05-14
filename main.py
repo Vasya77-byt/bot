@@ -2398,11 +2398,19 @@ async def _handle_buy_tariff(
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"💳 Оплатить {price} ₽", url=link)],
     ])
+    # Автопродление сейчас работает только для метода "Номер карты" (Точка с
+    # рекуррентной подпиской). Для СБП/T-Pay/SberPay у ЮKassa save_payment_method
+    # не поддерживается — продлевать придётся вручную.
+    autorenew_line = (
+        "Способ оплаты сохранится для автопродления — "
+        "отключить: /cancel_subscription\n"
+        if method == "card" else ""
+    )
     await message.reply_text(
         f"Счёт на оплату тарифа *{tariff.upper()}* — {price} ₽/мес.\n\n"
         "После успешной оплаты тариф активируется автоматически.\n"
-        "Способ оплаты сохранится для автопродления — "
-        "отключить: /cancel_subscription\n\n"
+        f"{autorenew_line}"
+        "\n"
         "Нажимая «Оплатить», вы принимаете условия /offer",
         reply_markup=keyboard,
     )

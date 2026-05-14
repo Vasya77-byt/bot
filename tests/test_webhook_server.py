@@ -307,6 +307,46 @@ class TestAcquiringApproved:
         assert "PRO" in text
 
     @pytest.mark.asyncio
+    async def test_success_notify_with_recurring_token_mentions_autorenew(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        """Если в профиле есть recurring-токен (Tochka subscription_op_id
+        или YK payment_method_id) — текст должен упомянуть автопродление."""
+        private_pem, _ = rsa_keypair
+        subscription.paid_profile = UserProfile(
+            user_id=42, tariff="pro",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+            subscription_operation_id="sub-op-42",
+        )
+        notify, notify_calls = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(_acquiring_payload(status="APPROVED"), private_pem)
+        async with TestClient(TestServer(app)) as c:
+            await c.post("/tochka/webhook", data=body)
+        _, text = notify_calls[0]
+        assert "Автопродление включено" in text
+
+    @pytest.mark.asyncio
+    async def test_success_notify_without_recurring_token_no_autorenew(
+        self, tochka, subscription, rsa_keypair,
+    ):
+        """Если recurring-токена нет (СБП/T-Pay/SberPay через ЮKassa) —
+        текст НЕ должен врать про автопродление."""
+        private_pem, _ = rsa_keypair
+        subscription.paid_profile = UserProfile(
+            user_id=42, tariff="pro",
+            tariff_expires_at="2099-01-01T00:00:00+00:00",
+            # ни subscription_operation_id, ни yookassa_payment_method_id
+        )
+        notify, notify_calls = make_notify()
+        app = build_app(tochka, subscription, notify=notify)
+        body = _sign_jwt(_acquiring_payload(status="APPROVED"), private_pem)
+        async with TestClient(TestServer(app)) as c:
+            await c.post("/tochka/webhook", data=body)
+        _, text = notify_calls[0]
+        assert "Автопродление" not in text
+
+    @pytest.mark.asyncio
     async def test_authorized_also_treated_as_success(
         self, tochka, subscription, rsa_keypair,
     ):

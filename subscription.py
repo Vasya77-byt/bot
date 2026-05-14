@@ -60,6 +60,11 @@ class SubscriptionService:
         "tpay": "tinkoff_bank",
         "sberpay": "sberbank",
     }
+    # Типы payment_method_data, для которых ЮKassa разрешает save_payment_method.
+    # СБП/T-Pay/SberPay в принципе не отдают токен рекуррентов через ЮKassa
+    # — для них save_payment_method=true даёт 403. Только bank_card и "" (когда
+    # тип не передан, ЮKassa сама покажет страницу выбора и сохранит карту).
+    YOOKASSA_RECURRING_SUPPORTED = {"", "bank_card"}
 
     async def create_initial_payment(
         self, user_id: int, tariff: str, method: str = "",
@@ -142,6 +147,10 @@ class SubscriptionService:
             raise ValueError("email_required")
 
         amount = float(TARIFF_PRICES[tariff])
+        save_method = (
+            self.yookassa_save_payment_method
+            and payment_method_type in self.YOOKASSA_RECURRING_SUPPORTED
+        )
         result = await self.yookassa.create_payment(
             amount=amount,
             description=f"Подписка на тариф {tariff} (месяц)",
@@ -151,7 +160,7 @@ class SubscriptionService:
             customer_email=profile.email,
             tax_system_code=self.yookassa_tax_system_code,
             vat_code=self.yookassa_vat_code,
-            save_payment_method=self.yookassa_save_payment_method,
+            save_payment_method=save_method,
             kind="initial",
             payment_method_type=payment_method_type,
         )

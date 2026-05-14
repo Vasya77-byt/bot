@@ -70,12 +70,23 @@ def build_app(
             profile.tariff_expires_at[:10]
             if profile.tariff_expires_at else "—"
         )
+        # Recurring-токен сохраняется только если провайдер реально умеет
+        # автосписания: Tochka subscription_operation_id или ЮKassa
+        # yookassa_payment_method_id (для bank_card). Для СБП/T-Pay/SberPay
+        # через ЮKassa никакого токена нет — пользователь продлевает вручную.
+        has_recurring = bool(
+            getattr(profile, "yookassa_payment_method_id", "")
+            or getattr(profile, "subscription_operation_id", "")
+        )
+        autorenew_line = (
+            "\n\nАвтопродление включено. Отключить: /cancel_subscription"
+            if has_recurring else ""
+        )
         text = (
             "✅ Оплата прошла!\n\n"
             f"Тариф: {profile.tariff.upper()}\n"
-            f"Подписка действует до: {expires_short}\n\n"
-            "Автопродление включено. "
-            "Отключить: /cancel_subscription"
+            f"Подписка действует до: {expires_short}"
+            f"{autorenew_line}"
         )
         try:
             await notify(profile.user_id, text)

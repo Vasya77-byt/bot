@@ -2978,7 +2978,16 @@ async def handle_referral(client: Client, message) -> None:
     """
     user_id = message.from_user.id
     profile = user_store.get(user_id)
-    base_url = os.getenv("WEBHOOK_PUBLIC_URL", "").rstrip("/")
+    # WEBHOOK_PUBLIC_URL может содержать path для регистрации webhook'а
+    # в Точке (https://example.com/tochka/webhook). Для Mini App нам нужен
+    # только корень — собираем его через urlparse, чтобы /miniapp/referral
+    # лёг прямо за доменом, а не за tochka/webhook/.
+    from urllib.parse import urlparse
+    parsed_url = urlparse(os.getenv("WEBHOOK_PUBLIC_URL", ""))
+    base_url = (
+        f"{parsed_url.scheme}://{parsed_url.netloc}"
+        if parsed_url.scheme and parsed_url.netloc else ""
+    )
     miniapp_url = f"{base_url}/miniapp/referral" if base_url else ""
 
     summary = (

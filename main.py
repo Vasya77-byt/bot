@@ -92,7 +92,7 @@ def build_app(settings: Settings) -> Client:
 def _main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📊 Проверить компанию", callback_data="mode_internal_analysis")],
+            [InlineKeyboardButton("📊 Проверить компанию", callback_data="mode_quick_check")],
             [InlineKeyboardButton("📋 Массовая проверка", callback_data="mode_mass_check")],
             [InlineKeyboardButton("🆘 Поддержка", url="https://t.me/YRS75")],
         ]
@@ -1316,6 +1316,7 @@ def _inn_prompt_text(action: str) -> str:
     """Промпт «отправь ИНН или название».
     Один формат для всех режимов — заголовок зависит от действия."""
     titles = {
+        "mode_quick_check":       "🔍 Краткая проверка компании",
         "mode_internal_analysis": "🔍 Внутренний анализ компании",
         "mode_client_proposal":   "💼 Коммерческое предложение",
         "mode_compare":           "⚖️ Сравнение компаний",
@@ -1681,6 +1682,46 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.message.reply_text(
                 f"⏳ {label} — раздел в разработке.\n"
                 f"Будет доступен после подключения ЗЧБ и Контур.Фокус."
+            )
+        return
+
+    # Quick → Full переход: юзер нажал «Полный отчёт» после краткой
+    # проверки. Расходует Full-квоту, рендерит полный анализ.
+    if data.startswith("full:"):
+        await callback_query.answer()
+        inn = data.split(":", 1)[1]
+        if not inn:
+            return
+        allowed = await _check_full_and_count(callback_query.message, user_id)
+        if not allowed:
+            return
+        company = await company_service.fetch(inn)
+        sec_result = None
+        try:
+            sec_result = await security_service.check(
+                inn=inn,
+                name=company.name if company else None,
+                okved=company.okved_main if company else None,
+                ogrn=company.ogrn if company else None,
+            )
+        except Exception as exc:
+            logger.error("Security check failed for INN %s: %s", inn, exc)
+        parsed_inner = ParseResult(
+            raw_text=inn, inn=inn, mode="internal_analysis",
+            is_request=False, is_proposal=False, company_data=company,
+        )
+        reply = render_response(
+            parsed=parsed_inner, company=company, risk=set(),
+            security=sec_result,
+        )
+        await callback_query.message.reply_text(
+            reply,
+            disable_web_page_preview=True,
+            reply_markup=_company_actions_keyboard(inn, user_id),
+        )
+        if user_store.get(user_id).effective_tariff() in ("pro", "business"):
+            asyncio.create_task(
+                _send_ai_insights(callback_query.message, company, sec_result),
             )
         return
 
@@ -2250,6 +2291,34 @@ def _build_web_report_button(
     return InlineKeyboardButton("🌐 Веб-отчёт", web_app=WebAppInfo(url=url))
 
 
+def _quick_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarkup:
+    """Кнопки под краткой (L1) карточкой компании.
+
+    Главная — «Полный отчёт» (расходует Full-квоту). Если у юзера
+    остались полные отчёты на сегодня — показываем её первой. Если
+    лимит исчерпан — показываем «Тарифы» как апсейл.
+    """
+    profile = user_store.get(user_id) if user_id else None
+    remaining_full = profile.remaining_full() if profile else None
+    rows: list[list[InlineKeyboardButton]] = []
+    if remaining_full is None or remaining_full > 0:
+        rows.append([
+            InlineKeyboardButton(
+                "📊 Полный отчёт", callback_data=f"full:{inn}",
+            ),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                "💎 Полный отчёт — апгрейд тарифа", callback_data="show_tariffs",
+            ),
+        ])
+    rows.append([
+        InlineKeyboardButton("💳 Тарифы", callback_data="show_tariffs"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarkup:
     """Кнопки действий под карточкой компании."""
     is_monitored = bool(user_id) and monitoring_store.get(user_id, inn) is not None
@@ -2435,7 +2504,7 @@ async def _handle_buy_tariff(
 def _match_reply_button(text: str) -> Optional[str]:
     """Сопоставляет текст Reply-кнопок с действиями."""
     mapping = {
-        "проверка компании": "mode_internal_analysis",
+        "проверка компании": "mode_quick_check",
         "сравнить": "mode_compare",
         "профиль": "show_profile",
         "тарифы": "show_tariffs",
@@ -2460,9 +2529,14 @@ async def _dispatch_action(
     risk = assess_risk(message.text or "")
     user_id = message.from_user.id
 
+    # Quick-режим: ветка обработана отдельно (дешёвая, идёт первой).
+    if action == "mode_quick_check":
+        await _do_quick_check(message, parsed, user_id)
+        return
+
     # Проверяем лимит для действий, связанных с проверкой компании
     if action in ("mode_internal_analysis", "mode_compare"):
-        allowed = await _check_limit_and_count(message, user_id)
+        allowed = await _check_full_and_count(message, user_id)
         if not allowed:
             return
 
@@ -2560,22 +2634,117 @@ async def _fetch_company(inn: str) -> Optional[CompanyData]:
     return await company_service.fetch(inn)
 
 
-async def _check_limit_and_count(message, user_id: int) -> bool:
-    """Проверяет лимит проверок и увеличивает счётчик.
-    Возвращает True если проверка разрешена, False — если лимит исчерпан."""
-    profile = user_store.get(user_id)
-    if not profile.can_check():
-        from user_store import TARIFF_LIMITS
-        limit = TARIFF_LIMITS.get(profile.tariff, 0)
+def _render_quick_card(company: Optional[CompanyData], inn: str) -> str:
+    """Краткая карточка для L1: 5-7 строк ключевой инфы.
+
+    Без security check, без ZCHB, без AI — это идёт в Full режим.
+    """
+    if company is None:
+        return (
+            f"❓ Компания с ИНН {inn} не найдена\n\n"
+            "Проверьте корректность ИНН. Если уверены — попробуйте\n"
+            "позже или нажмите «Полный отчёт» (агрегация всех источников)."
+        )
+    lines = ["🔍 *Краткая проверка*", ""]
+    if company.name:
+        lines.append(f"🏢 {company.name}")
+    lines.append(f"📋 ИНН: `{company.inn or inn}`")
+    if company.ogrn:
+        lines.append(f"📋 ОГРН: `{company.ogrn}`")
+    if company.status:
+        lines.append(f"📊 Статус: {company.status}")
+    if company.director:
+        lines.append(f"👤 {company.director}")
+    if company.region:
+        lines.append(f"📍 {company.region}")
+    if company.okved_main:
+        okved_str = company.okved_main
+        if company.okved_name:
+            okved_str = f"{okved_str} — {company.okved_name}"
+        lines.append(f"💼 ОКВЭД: {okved_str}")
+    if company.reg_date:
+        age_part = f" ({company.age_years} лет)" if company.age_years else ""
+        lines.append(f"📅 Зарегистрирована: {company.reg_date}{age_part}")
+    lines.append("")
+    lines.append("💡 Полный отчёт включает суды/ФССП/финансы/связи/AI-анализ.")
+    return "\n".join(lines)
+
+
+async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
+    """Краткая проверка (L1): дешёвая, ~1 платный запрос.
+
+    1. Проверяем quick-квоту, увеличиваем счётчик.
+    2. fetch_quick — только DaData (или ФНС как fallback).
+    3. Короткий рендер + клавиатура с «Полный отчёт».
+    """
+    inn = parsed.inn or ""
+    if not inn:
         await message.reply_text(
-            f"⛔️ Лимит проверок исчерпан.\n\n"
-            f"Ваш тариф: {profile.tariff.upper()} — {limit} проверок в день.\n"
-            f"Лимит обновится завтра.\n\n"
-            f"Для увеличения лимита перейдите на более высокий тариф — нажмите «Тарифы»."
+            "⚠️ Не нашёл ИНН в сообщении. Отправьте ИНН (10 или 12 цифр).",
+        )
+        return
+    allowed = await _check_quick_and_count(message, user_id)
+    if not allowed:
+        return
+    company = await company_service.fetch_quick(inn)
+    text = _render_quick_card(company, inn)
+    await message.reply_text(
+        text,
+        disable_web_page_preview=True,
+        reply_markup=_quick_actions_keyboard(inn, user_id),
+    )
+
+
+async def _check_full_and_count(message, user_id: int) -> bool:
+    """Проверяет лимит ПОЛНЫХ отчётов (L2+) и увеличивает счётчик.
+    Возвращает True если проверка разрешена, False — если лимит
+    исчерпан. На исчерпании отправляет пользователю сообщение с
+    остатком кратких проверок и предложением апгрейда."""
+    profile = user_store.get(user_id)
+    if not profile.can_full_check():
+        from user_store import TARIFF_FULL_LIMITS
+        eff = profile.effective_tariff()
+        limit = TARIFF_FULL_LIMITS.get(eff, 0)
+        remaining_quick = profile.remaining_quick()
+        quick_line = (
+            f"\n🔍 Кратких проверок осталось: {remaining_quick}"
+            if remaining_quick is not None and remaining_quick > 0 else ""
+        )
+        await message.reply_text(
+            f"⛔️ Дневной лимит полных отчётов исчерпан.\n\n"
+            f"Ваш тариф: {eff.upper()} — {limit} полных отчётов в день.\n"
+            f"Лимит обновится завтра."
+            f"{quick_line}\n\n"
+            f"Для увеличения — нажмите «Тарифы»."
         )
         return False
-    user_store.increment_checks(user_id)
+    user_store.increment_full(user_id)
     return True
+
+
+async def _check_quick_and_count(message, user_id: int) -> bool:
+    """Проверяет лимит КРАТКИХ проверок (L1) и увеличивает счётчик.
+    На исчерпании Quick предлагает либо подождать, либо апгрейд."""
+    profile = user_store.get(user_id)
+    if not profile.can_quick_check():
+        from user_store import TARIFF_QUICK_LIMITS
+        eff = profile.effective_tariff()
+        limit = TARIFF_QUICK_LIMITS.get(eff, 0)
+        await message.reply_text(
+            f"⛔️ Дневной лимит кратких проверок исчерпан.\n\n"
+            f"Ваш тариф: {eff.upper()} — {limit} кратких проверок в день.\n"
+            f"Лимит обновится завтра.\n\n"
+            f"Для увеличения — нажмите «Тарифы»."
+        )
+        return False
+    user_store.increment_quick(user_id)
+    return True
+
+
+# Alias для обратной совместимости: места, ещё дёргающие старое имя,
+# получают Full-логику (current behaviour сохранён до Step 3b завершения).
+async def _check_limit_and_count(message, user_id: int) -> bool:
+    return await _check_full_and_count(message, user_id)
 
 
 def _extract_format(args: list[str]) -> str:

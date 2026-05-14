@@ -157,6 +157,33 @@ async def build_admin_report(
     else:
         zchb_block = "• ZCHB: ключ не настроен"
 
+    # ── Глобальные квоты API (Step 4: api_quota) ──
+    # Локальный счётчик расхода бота — независим от ZCHB-stats апстрима
+    # (показывает в т.ч. DaData/ФНС/SBIS/GigaChat, у которых нет своего
+    # /stats endpoint).
+    quota_lines: list[str] = []
+    try:
+        from api_quota import get_quota
+        snap = get_quota().snapshot()
+        for api_name, info in snap.items():
+            limit = info["limit"]
+            used = info["used"]
+            if limit is None:
+                quota_lines.append(f"• {api_name}: {used} (безлимит)")
+                continue
+            marker = ""
+            if info["exhausted"]:
+                marker = " ⛔️"
+            elif info["near"]:
+                marker = " ⚠️"
+            quota_lines.append(
+                f"• {api_name}: {used}/{limit} ({info['percent']:.0f}%){marker}",
+            )
+    except Exception as exc:
+        logger.warning("Admin: api_quota snapshot failed: %s", exc)
+        quota_lines = ["• Квоты API: недоступно"]
+    quota_block = "\n".join(quota_lines)
+
     # ── Размер базы ──
     storage_dir = os.getenv("STORAGE_DIR", "storage")
     paths = {
@@ -206,6 +233,9 @@ async def build_admin_report(
         "",
         "🔌 ИСТОЧНИКИ ДАННЫХ",
         zchb_block,
+        "",
+        "📊 КВОТЫ API СЕГОДНЯ",
+        quota_block,
         "",
         "🤝 РЕФЕРАЛЫ",
         f"• Приглашено: {referral_invited}",

@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from api_quota import ApiQuotaExhausted, get_quota
 from cache import FileTTLCache
 from schemas import CompanyData
 
@@ -43,6 +44,12 @@ class FnsClient:
         if cached_raw is not None:
             return self._parse(cached_raw, inn)
 
+        try:
+            get_quota().check("fns")
+        except ApiQuotaExhausted as exc:
+            logger.warning("FNS skipped: %s", exc)
+            return None
+
         def _call() -> Optional[Dict[str, Any]]:
             try:
                 params = {
@@ -66,6 +73,7 @@ class FnsClient:
         if not raw:
             return None
 
+        get_quota().record("fns")
         # Кэшируем raw-ответ (даже если items пуст — это валидный ответ).
         self._cache_fetch.set(inn, raw)
         return self._parse(raw, inn)

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from api_quota import ApiQuotaExhausted, get_quota
 from cache import FileTTLCache
 
 logger = logging.getLogger("financial-architect")
@@ -453,6 +454,11 @@ class ZchbClient:
         return merged
 
     def _call_arbitration(self, inn_or_ogrn: str) -> Optional[Dict[str, Any]]:
+        try:
+            get_quota().check("zchb")
+        except ApiQuotaExhausted as exc:
+            logger.warning("ZCHB arbitration skipped: %s", exc)
+            return None
         url = f"{self.base_url}/court-arbitration"
         params = {
             "id": inn_or_ogrn,
@@ -462,6 +468,7 @@ class ZchbClient:
         try:
             resp = requests.get(url, params=params, timeout=self.timeout)
             if resp.status_code == 200:
+                get_quota().record("zchb")
                 return resp.json()
             logger.warning("ZCHB HTTP %s: %s", resp.status_code, resp.text[:300])
         except requests.RequestException as exc:
@@ -1539,6 +1546,11 @@ class ZchbClient:
 
     def _simple_call(self, method: str, identifier: str) -> Optional[Dict[str, Any]]:
         """Простой GET-запрос к ZCHB по имени метода и id."""
+        try:
+            get_quota().check("zchb")
+        except ApiQuotaExhausted as exc:
+            logger.warning("ZCHB %s skipped: %s", method, exc)
+            return None
         url = f"{self.base_url}/{method}"
         params = {
             "id": identifier,
@@ -1548,6 +1560,7 @@ class ZchbClient:
         try:
             resp = requests.get(url, params=params, timeout=self.timeout)
             if resp.status_code == 200:
+                get_quota().record("zchb")
                 return resp.json()
             logger.warning("ZCHB %s HTTP %s: %s",
                            method, resp.status_code, resp.text[:300])

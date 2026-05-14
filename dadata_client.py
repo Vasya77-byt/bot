@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from api_quota import ApiQuotaExhausted, get_quota
 from cache import FileTTLCache
 from schemas import CompanyData
 
@@ -52,6 +53,15 @@ class DaDataClient:
         if cached_raw is not None:
             return self._parse(cached_raw, inn)
 
+        # Глобальная квота: cache miss = реальный сетевой вызов.
+        # Если апстрим в auto-degradation — возвращаем None, как при
+        # любой другой ошибке. fetch продолжится с другими источниками.
+        try:
+            get_quota().check("dadata_fetch")
+        except ApiQuotaExhausted as exc:
+            logger.warning("DaData fetch skipped: %s", exc)
+            return None
+
         def _call() -> Optional[Dict[str, Any]]:
             try:
                 headers = {
@@ -80,6 +90,9 @@ class DaDataClient:
         if not raw:
             return None
 
+        # Учёт квоты только на успешный ответ — DaData биллит за 200 OK.
+        # Сетевые ошибки/5xx не считаем (raw is None).
+        get_quota().record("dadata_fetch")
         # Кэшируем только успешные ответы (даже если parse вернёт None
         # из-за пустых suggestions — это валидный ответ DaData,
         # дёргать API ещё раз нет смысла).
@@ -104,6 +117,12 @@ class DaDataClient:
         if cached_raw is not None:
             raw = cached_raw
         else:
+            try:
+                get_quota().check("dadata_suggest")
+            except ApiQuotaExhausted as exc:
+                logger.warning("DaData suggest skipped: %s", exc)
+                return []
+
             def _call() -> Optional[Dict[str, Any]]:
                 try:
                     headers = {
@@ -128,6 +147,7 @@ class DaDataClient:
             raw = await asyncio.to_thread(_call)
             if not raw:
                 return []
+            get_quota().record("dadata_suggest")
             self._cache_suggest.set(cache_key, raw)
 
         suggestions = raw.get("suggestions", [])

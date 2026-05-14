@@ -2361,6 +2361,21 @@ async def _show_payment_methods(message, tariff: str) -> None:
     )
 
 
+async def _send_ai_insights(message, company, security) -> None:
+    """Шлёт «🤖 На что обратить внимание» отдельным сообщением.
+    Тихо проглатывает любые ошибки — это бонусная фича, она не должна
+    помешать основному отчёту."""
+    try:
+        from ai_insights import generate_insights
+        from reputation_score import calculate_reputation
+        reputation = calculate_reputation(company, security)
+        block = await generate_insights(company, security, reputation, gigachat)
+        if block:
+            await message.reply_text(block, disable_web_page_preview=True)
+    except Exception as exc:
+        logger.warning("AI insights task failed: %s", exc)
+
+
 async def _handle_buy_tariff(
     message, user_id: int, tariff: str, method: str = "",
 ) -> None:
@@ -2480,6 +2495,12 @@ async def _dispatch_action(
             disable_web_page_preview=True,
             reply_markup=_company_actions_keyboard(inn, user_id),
         )
+        # AI-инсайты «На что обратить внимание» — фоном, отдельным сообщением,
+        # только для Pro/Business. Не блокирует основной отчёт.
+        if user_store.get(user_id).tariff in ("pro", "business"):
+            asyncio.create_task(
+                _send_ai_insights(message, company, sec_result),
+            )
 
     elif action == "mode_client_proposal":
         parsed_with_mode = ParseResult(

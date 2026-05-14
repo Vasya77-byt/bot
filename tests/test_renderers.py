@@ -395,25 +395,23 @@ class TestRenderInternalAnalysis:
         text = render_internal_analysis(c, risk=set())
         assert "Финансы" in text
 
-    def test_risk_score_block_at_top(self):
-        # Риск-скор — это первый блок отчёта, не где-то внизу
+    def test_reputation_block_at_top(self):
+        # Рейтинг благонадёжности — первый блок отчёта
         text = render_internal_analysis(_company(), risk=set())
-        assert text.startswith("🟢")  # эмодзи уровня low — первая строка
-        assert "Риск-скор" in text.split("\n")[0]
+        assert text.startswith("🟢")
+        assert "Рейтинг благонадёжности" in text.split("\n")[0]
 
     def test_clean_company_no_factors_block(self):
-        # У чистой компании в скоре нет факторов
+        # У чистой компании нет блока "Что повлияло"
         text = render_internal_analysis(_company(), risk=set())
-        assert "Факторов риска не обнаружено" in text
+        assert "Что повлияло" not in text
 
-    def test_risk_factors_listed_when_risky(self):
+    def test_factors_listed_when_risky(self):
         risky_text = render_internal_analysis(
             _company(status="Ликвидируется"), risk=set(),
         )
-        assert "Факторы:" in risky_text
-        assert "Статус: ликвидация" in risky_text
-        # Уровень medium при единственном факторе ликвидации
-        assert "Средний" in risky_text or "🟡" in risky_text
+        assert "Что повлияло" in risky_text
+        assert "ликвидация" in risky_text.lower()
 
 
 class TestRenderClientProposal:

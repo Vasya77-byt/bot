@@ -2,7 +2,7 @@ from typing import Optional, Set
 
 from compliance import legal_note
 from parsers import ParseResult
-from risk_score import calculate_risk_score, format_risk_block
+from reputation_score import calculate_reputation, format_reputation_block
 from schemas import CompanyData, empty_company
 from security_check import SecurityResult
 from user_store import TARIFF_FEATURES, TARIFF_LABELS, UserProfile
@@ -65,9 +65,9 @@ def render_comparison(
 def render_internal_analysis(company: CompanyData, risk: Set[str], security: Optional[SecurityResult] = None) -> str:
     lines = []
 
-    # ── Сводный риск-скор (заголовок отчёта) ──
-    score = calculate_risk_score(company, security)
-    lines.append(format_risk_block(score))
+    # ── Reputation Score (заголовок отчёта) ──
+    reputation = calculate_reputation(company, security)
+    lines.append(format_reputation_block(reputation))
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("")

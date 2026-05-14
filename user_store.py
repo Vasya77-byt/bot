@@ -580,7 +580,9 @@ class UserStore:
             if profile is None:
                 return
             current = profile.tariff if profile.is_subscription_active() else "free"
-            target = current if TARIFF_RANK.get(current, 0) >= TARIFF_RANK.get(min_tariff, 0) else min_tariff
+            cur_rank = TARIFF_RANK.get(current, 0)
+            min_rank = TARIFF_RANK.get(min_tariff, 0)
+            target = current if cur_rank >= min_rank else min_tariff
             self.activate_subscription(user_id, target, days=days)
             # Если у Free-юзера нет карты — отключаем auto_renew (как и
             # в обычной фазе-1 ветке).
@@ -594,7 +596,9 @@ class UserStore:
             if profile is None:
                 return
             # Lifetime повышаем только вверх (Diamond > Gold > free).
-            if TARIFF_RANK.get(lifetime_tariff, 0) > TARIFF_RANK.get(profile.lifetime_tariff or "free", 0):
+            new_rank = TARIFF_RANK.get(lifetime_tariff, 0)
+            cur_rank = TARIFF_RANK.get(profile.lifetime_tariff or "free", 0)
+            if new_rank > cur_rank:
                 profile.lifetime_tariff = lifetime_tariff
             if key == "diamond":
                 profile.revshare_enabled = True

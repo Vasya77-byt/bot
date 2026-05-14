@@ -534,7 +534,6 @@ class TestAwardInviteeBonus:
 
     def test_invitee_with_paid_tariff_extends_subscription(self, store):
         """Приглашённый со start-тарифом получает +15 дней."""
-        from user_store import REFERRAL_BONUS_DAYS
         referrer = store.get(1)
         store.set_referrer_by_code(2, referrer.referral_code)
         store.activate_subscription(2, "start", days=30)

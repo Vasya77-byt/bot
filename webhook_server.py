@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from aiohttp import web
 
@@ -33,7 +33,6 @@ from tochka_client import (
     ACQUIRING_EVENT,
     SUCCESS_STATUSES,
     TochkaClient,
-    parse_payment_link_id,
 )
 from yookassa_client import (
     PAYMENT_SUCCEEDED_EVENT,
@@ -41,6 +40,9 @@ from yookassa_client import (
     YooKassaClient,
 )
 from zchb_client import ZchbClient
+
+if TYPE_CHECKING:
+    from user_store import UserStore
 
 logger = logging.getLogger("financial-architect")
 

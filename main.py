@@ -2345,10 +2345,10 @@ PAYMENT_METHODS = ("card", "sbp", "tpay", "sberpay")
 
 def _payment_methods_keyboard(tariff: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Номер карты", callback_data=f"pay_card_{tariff}")],
-        [InlineKeyboardButton("🟢 СБП", callback_data=f"pay_sbp_{tariff}")],
+        [InlineKeyboardButton("⚡ СБП", callback_data=f"pay_sbp_{tariff}")],
+        [InlineKeyboardButton("🟢 SberPay", callback_data=f"pay_sberpay_{tariff}")],
         [InlineKeyboardButton("🟡 T-Pay", callback_data=f"pay_tpay_{tariff}")],
-        [InlineKeyboardButton("🟩 SberPay", callback_data=f"pay_sberpay_{tariff}")],
+        [InlineKeyboardButton("💳 Номер карты", callback_data=f"pay_card_{tariff}")],
     ])
 
 

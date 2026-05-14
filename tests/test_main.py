@@ -1013,7 +1013,7 @@ class TestHandleBuyTariff:
         kb = last["reply_markup"]
         callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
         assert callbacks == [
-            "pay_card_pro", "pay_sbp_pro", "pay_tpay_pro", "pay_sberpay_pro",
+            "pay_sbp_pro", "pay_sberpay_pro", "pay_tpay_pro", "pay_card_pro",
         ]
 
     @pytest.mark.parametrize("method", ["card", "sbp", "tpay", "sberpay"])

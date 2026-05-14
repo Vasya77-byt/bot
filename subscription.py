@@ -40,6 +40,7 @@ class SubscriptionService:
         yookassa: Optional[YooKassaClient] = None,
         yookassa_tax_system_code: int = 2,
         yookassa_vat_code: int = 1,
+        yookassa_save_payment_method: bool = True,
     ) -> None:
         self.tochka = tochka
         self.yookassa = yookassa
@@ -51,6 +52,7 @@ class SubscriptionService:
         self.tax_system_code = tax_system_code
         self.yookassa_tax_system_code = yookassa_tax_system_code
         self.yookassa_vat_code = yookassa_vat_code
+        self.yookassa_save_payment_method = yookassa_save_payment_method
 
     async def create_initial_payment(
         self, user_id: int, tariff: str
@@ -125,7 +127,7 @@ class SubscriptionService:
             customer_email=profile.email,
             tax_system_code=self.yookassa_tax_system_code,
             vat_code=self.yookassa_vat_code,
-            save_payment_method=True,
+            save_payment_method=self.yookassa_save_payment_method,
             kind="initial",
         )
         # У ЮKassa первичный платёж имеет собственный payment_id (UUID).

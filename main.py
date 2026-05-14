@@ -3002,6 +3002,7 @@ def main() -> None:
             tax_system_code=settings.tochka_tax_system_code,
             yookassa_tax_system_code=settings.yookassa_tax_system_code,
             yookassa_vat_code=settings.yookassa_vat_code,
+            yookassa_save_payment_method=settings.yookassa_save_payment_method,
         )
         logger.info(
             "Payments enabled: provider=%s tochka=%s yookassa=%s",

@@ -82,6 +82,41 @@ def service(yookassa, users, payments):
 
 
 @pytest.mark.asyncio
+async def test_initial_payment_save_method_disabled_via_flag(
+    yookassa, users, payments,
+):
+    """Если save_payment_method=False — флаг улетает к ЮKassa как False.
+    Используется когда у магазина не подключены рекуррентные платежи."""
+    svc = SubscriptionService(
+        tochka=None, yookassa=yookassa, provider="yookassa",
+        users=users, payments=payments,
+        redirect_url="https://t.me/x", fail_redirect_url="https://t.me/x",
+        yookassa_save_payment_method=False,
+    )
+    users.set_email(1, "a@b.ru")
+    yookassa.next_payment_result = PaymentResult(
+        payment_id="yk_x", confirmation_url="https://example.com/pay",
+        order_id="sub_1_start_xx", status="pending",
+    )
+    await svc.create_initial_payment(1, "start")
+    assert yookassa.create_payment_calls[0]["save_payment_method"] is False
+
+
+@pytest.mark.asyncio
+async def test_initial_payment_save_method_true_by_default(
+    service, yookassa, users,
+):
+    """По умолчанию save_payment_method=True (для авто-продлений)."""
+    users.set_email(1, "a@b.ru")
+    yookassa.next_payment_result = PaymentResult(
+        payment_id="yk_x", confirmation_url="https://example.com/pay",
+        order_id="sub_1_start_xx", status="pending",
+    )
+    await service.create_initial_payment(1, "start")
+    assert yookassa.create_payment_calls[0]["save_payment_method"] is True
+
+
+@pytest.mark.asyncio
 async def test_initial_payment_creates_yookassa_payment(
     service, yookassa, users, payments,
 ):

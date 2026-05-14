@@ -29,7 +29,14 @@ class Settings:
     yookassa_webhook_secret: str = ""
     # Чек 54-ФЗ: коды для ИП на УСН 6% без НДС (значения по умолчанию).
     yookassa_tax_system_code: int = 2    # 2=УСН доход, 3=УСН доход-расход, 6=ПСН
-    yookassa_vat_code: int = 1           # 1=без НДС
+    # Ставка НДС в чеке: 1=без НДС, 2=0%, 3=10%, 4=20%, 5=10/110, 6=20/120
+    yookassa_vat_code: int = 1
+    # Сохранять карту для автоплатежей? У некоторых магазинов услуга
+    # "save_payment_method" не подключена по умолчанию — ЮKassa тогда
+    # отвечает 403 "This store can't make recurring payments".
+    # В этом случае установите false и обратитесь в поддержку ЮKassa
+    # с запросом активировать рекуррентные платежи.
+    yookassa_save_payment_method: bool = True
     # URLs
     payment_redirect_url: str = "https://t.me/"           # успех
     payment_fail_redirect_url: str = "https://t.me/"      # неудача
@@ -97,6 +104,9 @@ class Settings:
                 os.getenv("YOOKASSA_TAX_SYSTEM_CODE", "2")
             ),
             yookassa_vat_code=int(os.getenv("YOOKASSA_VAT_CODE", "1")),
+            yookassa_save_payment_method=os.getenv(
+                "YOOKASSA_SAVE_PAYMENT_METHOD", "true",
+            ).lower() in ("true", "1", "yes"),
             payment_redirect_url=os.getenv(
                 "PAYMENT_REDIRECT_URL", "https://t.me/"
             ),

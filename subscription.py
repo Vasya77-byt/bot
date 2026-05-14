@@ -329,17 +329,46 @@ class SubscriptionService:
         приглашённого. Все начисления идемпотентны (one-shot через
         флаги в профилях). События для уведомлений складываются в
         очередь — webhook_server заберёт и разошлёт notify."""
+        from referral_tiers import current_tier
+
+        # Запоминаем выданные tier'ы ДО вызова — чтобы понять, что
+        # появилось нового именно в этом вызове. Если у приглашённого
+        # нет реферера, snapshot не нужен — award_referral_bonus вернёт
+        # None и tier-логика не сработает.
+        invited = self.users.get(paid_user_id)
+        granted_before: set[str] = set()
+        if invited.referrer_id is not None:
+            ref_profile = self.users._raw_profile(invited.referrer_id)
+            if ref_profile is not None:
+                granted_before = set(ref_profile.tier_rewards_granted)
+
         referrer = self.users.award_referral_bonus(paid_user_id)
         if referrer is not None:
             logger.info(
-                "Referral bonus granted: referrer=%s days_total=%s",
-                referrer.user_id, referrer.referral_bonus_days_total,
+                "Referral bonus granted: referrer=%s paid_count=%s days_total=%s",
+                referrer.user_id, referrer.referrals_paid_count,
+                referrer.referral_bonus_days_total,
             )
-            self._referral_events.append({
-                "kind": "referrer_paid",
-                "user_id": referrer.user_id,
-                "days": REFERRAL_BONUS_DAYS,
-            })
+            granted_now = set(referrer.tier_rewards_granted) - granted_before
+            if granted_now:
+                # Tier перекрыл базовый бонус — шлём только tier_unlocked
+                # (без referrer_paid), чтобы не дублировать радостное
+                # сообщение «+N дней».
+                tier = current_tier(referrer.referrals_paid_count)
+                self._referral_events.append({
+                    "kind": "tier_unlocked",
+                    "user_id": referrer.user_id,
+                    "tier_key": tier.key,
+                    "tier_label": tier.label,
+                    "tier_emoji": tier.emoji,
+                    "reward_text": tier.reward_text,
+                })
+            else:
+                self._referral_events.append({
+                    "kind": "referrer_paid",
+                    "user_id": referrer.user_id,
+                    "days": REFERRAL_BONUS_DAYS,
+                })
 
         invitee = self.users.award_invitee_bonus(paid_user_id)
         if invitee is not None:

@@ -97,6 +97,15 @@ def build_app(
                     f"🎁 Вам начислено {days} бонусных дней за переход "
                     "по реферальной ссылке!"
                 )
+            elif kind == "tier_unlocked":
+                emoji = evt.get("tier_emoji", "🎉")
+                label = evt.get("tier_label", "новый уровень")
+                reward = evt.get("reward_text", "")
+                text = (
+                    f"{emoji} Поздравляем, вы достигли уровня {label}!\n\n"
+                    f"Награда: {reward}\n"
+                    "Подробности — в кабинете /referral"
+                )
             else:
                 continue
             try:
@@ -371,6 +380,7 @@ def build_app(
             token = code if not source else f"{code}_{source}"
             return f"{base}?start={token}"
 
+        granted = set(profile.tier_rewards_granted)
         return web.json_response({
             "user_id": user_id,
             "referral_code": profile.referral_code,
@@ -379,6 +389,12 @@ def build_app(
                 "referrals_count": profile.referrals_count,
                 "referrals_paid_count": paid_count,
                 "referral_bonus_days_total": profile.referral_bonus_days_total,
+            },
+            "rewards": {
+                "lifetime_tariff": profile.lifetime_tariff,
+                "tier_rewards_granted": list(profile.tier_rewards_granted),
+                "revshare_enabled": profile.revshare_enabled,
+                "effective_tariff": profile.effective_tariff(),
             },
             "tier": {
                 "current": {
@@ -405,6 +421,7 @@ def build_app(
                         "key": t.key, "label": t.label, "emoji": t.emoji,
                         "threshold": t.threshold, "reward": t.reward_text,
                         "achieved": paid_count >= t.threshold,
+                        "granted": t.key in granted,
                     }
                     for t in TIERS
                 ],

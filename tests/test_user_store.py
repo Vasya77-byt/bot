@@ -646,3 +646,154 @@ class TestReferralSourceAndInvitees:
         # 11 (2024) должен быть первым, 10 (2020) — вторым
         assert invitees[0].user_id == 11
         assert invitees[1].user_id == 10
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Lifetime тариф и effective_tariff
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestLifetimeTariff:
+    def test_lifetime_only_returns_lifetime_tariff(self):
+        p = UserProfile(user_id=1, tariff="free", lifetime_tariff="pro")
+        assert p.is_subscription_active() is True
+        assert p.effective_tariff() == "pro"
+
+    def test_lifetime_business_above_monthly_pro(self):
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        p = UserProfile(
+            user_id=1,
+            tariff="pro",
+            tariff_expires_at=_iso(future),
+            lifetime_tariff="business",
+        )
+        assert p.effective_tariff() == "business"
+
+    def test_monthly_business_above_lifetime_pro(self):
+        future = datetime.now(timezone.utc) + timedelta(days=10)
+        p = UserProfile(
+            user_id=1,
+            tariff="business",
+            tariff_expires_at=_iso(future),
+            lifetime_tariff="pro",
+        )
+        assert p.effective_tariff() == "business"
+
+    def test_expired_monthly_falls_back_to_lifetime(self):
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        p = UserProfile(
+            user_id=1,
+            tariff="business",
+            tariff_expires_at=_iso(past),
+            lifetime_tariff="pro",
+        )
+        assert p.effective_tariff() == "pro"
+        assert p.is_subscription_active() is True
+
+    def test_no_lifetime_no_monthly_is_free(self):
+        p = UserProfile(user_id=1, tariff="free")
+        assert p.is_subscription_active() is False
+        assert p.effective_tariff() == "free"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tier-награды (Фаза 2 партнёрской программы)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTierRewards:
+    def _make_referrals(self, store, referrer_id: int, count: int) -> None:
+        """Создаёт count приглашённых и активирует каждому Start —
+        чтобы award_referral_bonus сработал без блокировки free."""
+        ref = store.get(referrer_id)
+        for i in range(count):
+            invited_id = 1000 + i
+            store.set_referrer_by_code(invited_id, ref.referral_code)
+            store.activate_subscription(invited_id, "start", days=30)
+            store.award_referral_bonus(invited_id)
+
+    def test_bronze_grants_30_days_pro_to_free(self, store):
+        self._make_referrals(store, 1, 3)
+        ref = store.get(1)
+        assert "bronze" in ref.tier_rewards_granted
+        assert ref.tariff == "pro"
+        expires = datetime.fromisoformat(ref.tariff_expires_at)
+        # ~30 дней от now (с погрешностью)
+        delta = expires - datetime.now(timezone.utc)
+        assert timedelta(days=29, hours=23) < delta < timedelta(days=30, minutes=1)
+
+    def test_bronze_extends_business_for_business_referrer(self, store):
+        store.activate_subscription(1, "business", days=10)
+        self._make_referrals(store, 1, 3)
+        ref = store.get(1)
+        # Тариф НЕ деградирует до Pro — продлили существующий business
+        assert ref.tariff == "business"
+        # 10 (initial) + 15 (1-я оплата) + 15 (2-я) + 30 (bronze на 3-й) = 70
+        expires = datetime.fromisoformat(ref.tariff_expires_at)
+        delta = expires - datetime.now(timezone.utc)
+        assert timedelta(days=69, hours=23) < delta < timedelta(days=70, minutes=1)
+
+    def test_silver_grants_90_days(self, store):
+        self._make_referrals(store, 1, 10)
+        ref = store.get(1)
+        assert "bronze" in ref.tier_rewards_granted
+        assert "silver" in ref.tier_rewards_granted
+
+    def test_gold_grants_lifetime_pro(self, store):
+        self._make_referrals(store, 1, 30)
+        ref = store.get(1)
+        assert "gold" in ref.tier_rewards_granted
+        assert ref.lifetime_tariff == "pro"
+        assert ref.effective_tariff() == "pro"
+        assert ref.revshare_enabled is False
+
+    def test_diamond_grants_lifetime_business_and_revshare(self, store):
+        self._make_referrals(store, 1, 100)
+        ref = store.get(1)
+        assert "diamond" in ref.tier_rewards_granted
+        assert ref.lifetime_tariff == "business"
+        assert ref.revshare_enabled is True
+
+    def test_non_threshold_payment_grants_plain_15_days(self, store):
+        # Достигаем bronze (3 оплативших), потом ещё одна оплата на 4ой
+        # — никакого нового tier, должен прийти +15 как раньше.
+        self._make_referrals(store, 1, 3)  # bronze unlocked, expires ~30d Pro
+        ref_after_bronze = store.get(1)
+        expires_after_bronze = ref_after_bronze.tariff_expires_at
+
+        # +1 приглашённый сверх bronze (paid=4, до silver=10 — не tier)
+        invited_id = 2000
+        store.set_referrer_by_code(invited_id, ref_after_bronze.referral_code)
+        store.activate_subscription(invited_id, "start", days=30)
+        store.award_referral_bonus(invited_id)
+
+        ref = store.get(1)
+        assert ref.referrals_paid_count == 4
+        # tier_rewards_granted не вырос
+        assert ref.tier_rewards_granted == ["bronze"]
+        # Подписка продлилась ровно на 15 дней
+        new_exp = datetime.fromisoformat(ref.tariff_expires_at)
+        old_exp = datetime.fromisoformat(expires_after_bronze)
+        delta = new_exp - old_exp
+        assert timedelta(days=14, hours=23) < delta < timedelta(days=15, minutes=1)
+
+    def test_tier_idempotent_via_invited_flag(self, store):
+        # Повторный вызов award_referral_bonus для одного и того же
+        # приглашённого не должен ничего делать (защита на стороне invited).
+        self._make_referrals(store, 1, 3)
+        first_state = store.get(1)
+        # Имитируем повтор: тот же invited
+        result = store.award_referral_bonus(1000)  # тот же 1000 что и в _make_referrals
+        assert result is None
+        ref = store.get(1)
+        assert ref.referrals_paid_count == first_state.referrals_paid_count
+        assert ref.tier_rewards_granted == first_state.tier_rewards_granted
+
+    def test_lifetime_persists_in_storage(self, store, tmp_path):
+        self._make_referrals(store, 1, 30)
+        # Перезагружаем store из того же файла (module-fixture использует
+        # tmp_path / "users.json")
+        store2 = UserStore(str(tmp_path / "users.json"))
+        ref = store2.get(1)
+        assert ref.lifetime_tariff == "pro"
+        assert "gold" in ref.tier_rewards_granted

@@ -623,3 +623,58 @@ class TestPollPendingPayments:
         assert result == []
         assert tochka.subscription_status_calls == []
         assert users.get(42).tariff_expires_at == first_expires
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Tier-награды: события tier_unlocked в очереди реф-уведомлений
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestTierUnlockedEvents:
+    def _pay_n_referrals(self, service, payments, users, referrer_id, n):
+        ref = users.get(referrer_id)
+        for i in range(n):
+            invited_id = 5000 + i
+            users.set_referrer_by_code(invited_id, ref.referral_code)
+            op_id = f"op-{i}"
+            order = f"sub_{invited_id}_pro_x"
+            payments.record_created(
+                operation_id=op_id, order_id=order,
+                user_id=invited_id, tariff="pro", amount=1290.0,
+            )
+            service.handle_webhook_paid(
+                operation_id=op_id, order_id=order, amount=1290.0,
+            )
+
+    def test_bronze_payment_emits_tier_unlocked_not_referrer_paid(
+        self, service, users, payments,
+    ):
+        self._pay_n_referrals(service, payments, users, 1, 3)
+        events = service.consume_referral_events()
+        # 3 invitee_received + 2 referrer_paid + 1 tier_unlocked (на 3-ей оплате)
+        tier_events = [e for e in events if e["kind"] == "tier_unlocked"]
+        referrer_paid = [e for e in events if e["kind"] == "referrer_paid"]
+        assert len(tier_events) == 1
+        assert tier_events[0]["tier_key"] == "bronze"
+        assert tier_events[0]["user_id"] == 1
+        # На пересекающей tier оплате referrer_paid НЕ дублируется
+        assert len(referrer_paid) == 2  # за 1-ую и 2-ую оплату
+
+    def test_non_threshold_payment_emits_referrer_paid(
+        self, service, users, payments,
+    ):
+        # 1 оплата — не достигает bronze (=3), идёт обычный referrer_paid
+        self._pay_n_referrals(service, payments, users, 1, 1)
+        events = service.consume_referral_events()
+        tier_events = [e for e in events if e["kind"] == "tier_unlocked"]
+        referrer_paid = [e for e in events if e["kind"] == "referrer_paid"]
+        assert tier_events == []
+        assert len(referrer_paid) == 1
+
+    def test_consume_clears_queue(self, service, users, payments):
+        self._pay_n_referrals(service, payments, users, 1, 1)
+        first = service.consume_referral_events()
+        second = service.consume_referral_events()
+        assert len(first) >= 1
+        assert second == []
+

@@ -72,11 +72,25 @@
     border: 1px solid var(--separator);
   }
   .tier.achieved { background: rgba(36, 129, 204, 0.08); border-color: var(--button); }
+  .tier.granted { background: rgba(46, 160, 67, 0.12); border-color: #2ea043; }
   .tier-emoji { font-size: 22px; }
   .tier-text { flex: 1; }
   .tier-name { font-weight: 600; font-size: 14px; }
   .tier-reward { color: var(--hint); font-size: 13px; margin-top: 1px; }
   .tier-check { color: var(--button); font-size: 18px; }
+  .tier-badge {
+    background: #2ea043; color: #fff; font-size: 11px;
+    padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  }
+
+  .lifetime-banner {
+    background: linear-gradient(135deg, #ffd700, #ffa500);
+    color: #1a1a1a;
+    padding: 12px 14px; border-radius: 12px;
+    font-weight: 600; font-size: 14px;
+    margin-bottom: 12px;
+    text-align: center;
+  }
 
   .btn {
     display: block; width: 100%;
@@ -229,16 +243,31 @@ function render(d) {
     }).join('');
   }
 
-  const tiersHtml = t.all_tiers.map(tier => `
-    <div class="tier ${tier.achieved ? 'achieved' : ''}">
+  const tiersHtml = t.all_tiers.map(tier => {
+    const cls = tier.granted ? 'granted' : (tier.achieved ? 'achieved' : '');
+    const mark = tier.granted
+      ? '<div class="tier-badge">Награда</div>'
+      : (tier.achieved ? '<div class="tier-check">✓</div>' : '');
+    return `
+    <div class="tier ${cls}">
       <div class="tier-emoji">${tier.emoji}</div>
       <div class="tier-text">
         <div class="tier-name">${escapeHtml(tier.label)} — ${tier.threshold} оплативших</div>
         <div class="tier-reward">${escapeHtml(tier.reward)}</div>
       </div>
-      ${tier.achieved ? '<div class="tier-check">✓</div>' : ''}
-    </div>
-  `).join('');
+      ${mark}
+    </div>`;
+  }).join('');
+
+  const rewards = d.rewards || {};
+  let lifetimeBanner = '';
+  if (rewards.lifetime_tariff) {
+    const tariffLabel = rewards.lifetime_tariff.toUpperCase();
+    const revshare = rewards.revshare_enabled
+      ? ' + 10% revshare'
+      : '';
+    lifetimeBanner = `<div class="lifetime-banner">⭐ У вас тариф ${escapeHtml(tariffLabel)} навсегда${revshare}</div>`;
+  }
 
   let progressHtml = '';
   if (t.next) {
@@ -258,6 +287,7 @@ function render(d) {
     <h1>${t.current.emoji} ${escapeHtml(t.current.label)}</h1>
     <p class="hint">Приглашайте друзей — получайте бонусные дни.</p>
 
+    ${lifetimeBanner}
     <div class="card">
       <div class="stats">
         <div><div class="stat-num">${s.referrals_count}</div><div class="stat-label">Приглашено</div></div>

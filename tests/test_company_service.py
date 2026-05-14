@@ -343,3 +343,55 @@ class TestCardToCompany:
         assert cd.capital is None
         assert cd.employees_count is None
         assert cd.revenue_last_year is None
+
+
+class TestFetchQuick:
+    """fetch_quick — экономный L1 для preview перед платным «Полным
+    отчётом». Должен дёргать только DaData (или FNS как fallback),
+    БЕЗ обращений к СБИС/ЗЧБ/GigaChat."""
+
+    @pytest.mark.asyncio
+    async def test_returns_dadata_when_available(self, service):
+        service.dadata = FakeClient(result=CompanyData(inn="1", name="X"))
+        service.fns = FakeClient(result=CompanyData(inn="1", name="Y"))
+        service.sbis = FakeClient(result=CompanyData(inn="1", name="Z"))
+        # ЗЧБ — отдельный API, не должен трогаться
+        zchb_spy = FakeClient(result=None)
+        service.zchb = zchb_spy
+
+        result = await service.fetch_quick("7707083893")
+        assert result is not None
+        assert result.name == "X"  # DaData приоритет
+        # ФНС и СБИС не вызывались (DaData ответила)
+        assert service.fns.call_count == 0
+        assert service.sbis.call_count == 0
+        # ЗЧБ тем более не вызывался
+        assert zchb_spy.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_fns_when_dadata_empty(self, service):
+        service.dadata = FakeClient(result=None)
+        service.fns = FakeClient(result=CompanyData(inn="1", name="FromFNS"))
+        service.sbis = FakeClient(result=CompanyData(inn="1", name="Y"))
+
+        result = await service.fetch_quick("7707083893")
+        assert result is not None
+        assert result.name == "FromFNS"
+        assert service.dadata.call_count == 1
+        assert service.fns.call_count == 1
+        assert service.sbis.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_all_sources_fail(self, service):
+        service.dadata = FakeClient(result=None)
+        service.fns = FakeClient(result=None)
+        result = await service.fetch_quick("7707083893")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_dadata_exception_falls_back_to_fns(self, service):
+        service.dadata = FakeClient(exception=ConnectionError("net"))
+        service.fns = FakeClient(result=CompanyData(inn="1", name="FNSdata"))
+        result = await service.fetch_quick("7707083893")
+        assert result is not None
+        assert result.name == "FNSdata"

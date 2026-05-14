@@ -400,6 +400,61 @@ class SubscriptionService:
         self.payments.mark_failed(operation_id, error=error)
         logger.info("Payment %s marked failed: %s", operation_id, error)
 
+    def handle_refund(
+        self, *, operation_id: str = "", order_id: str = "",
+        reason: str = "refund",
+    ) -> Optional[dict]:
+        """Откатывает реф-бонусы при возврате платежа приглашённого.
+
+        Идентифицирует платёж по operation_id или order_id. Помечает
+        запись как refunded и снимает бонусы у реферера и приглашённого
+        через user_store.revoke_*. Идемпотентен: повторный вызов на
+        уже-refunded записи ничего не делает.
+
+        Возвращает словарь с инфой о том, что было отозвано (для
+        логирования / уведомлений), либо None если запись не найдена /
+        уже refunded / у юзера не было реферера.
+
+        ВАЖНО: не откатывает уже-выданный срок подписки и не отзывает
+        lifetime/tier_rewards_granted (см. user_store.revoke_referral_bonus).
+
+        Метод публичный — вызывается из webhook'а возврата провайдера
+        либо из админ-CLI. Webhook'и refund'ов в текущей версии не
+        интегрированы (формат меняется у Точки/ЮКассы) — точка входа
+        зарезервирована.
+        """
+        rec = None
+        if operation_id:
+            rec = self.payments.find_by_operation(operation_id)
+        if rec is None and order_id:
+            rec = self.payments.find_by_order(order_id)
+        if rec is None:
+            logger.warning(
+                "Refund: payment not found op=%s order=%s",
+                operation_id, order_id,
+            )
+            return None
+        if rec.status == "refunded":
+            logger.info("Refund: %s already refunded", rec.operation_id)
+            return None
+
+        self.payments.mark_refunded(rec.operation_id, reason=reason)
+        revoked_referrer = self.users.revoke_referral_bonus(rec.user_id)
+        revoked_invitee = self.users.revoke_invitee_bonus(rec.user_id)
+
+        result = {
+            "operation_id": rec.operation_id,
+            "user_id": rec.user_id,
+            "referrer_user_id": revoked_referrer.user_id if revoked_referrer else None,
+            "invitee_revoked": revoked_invitee is not None,
+        }
+        logger.info(
+            "Refund processed: payment=%s user=%s referrer_revoked=%s invitee_revoked=%s",
+            rec.operation_id, rec.user_id,
+            bool(revoked_referrer), bool(revoked_invitee),
+        )
+        return result
+
     async def try_renew(self, profile: UserProfile) -> tuple[bool, str]:
         """Автопродление по активному провайдеру."""
         if profile.tariff == "free" or not profile.auto_renew:

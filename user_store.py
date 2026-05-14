@@ -647,3 +647,67 @@ class UserStore:
         """Возвращает профиль, не создавая его если нет."""
         raw = self._data.get(str(user_id))
         return self._profile_from_raw(raw) if raw else None
+
+    # ── Откат бонусов при возврате платежа (chargeback / refund) ─────
+
+    def revoke_referral_bonus(
+        self, invited_user_id: int, days: int = REFERRAL_BONUS_DAYS,
+    ) -> Optional[UserProfile]:
+        """Откатывает реф-бонус у реферера при возврате платежа
+        приглашённого. Идемпотентен — если бонус не был выдан,
+        возвращает None.
+
+        Что делает:
+        - декремент `referrals_paid_count` (не ниже 0)
+        - уменьшение `referral_bonus_days_total` на days (не ниже 0)
+        - сброс `referral_bonus_granted = False` на приглашённом
+          (повторная оплата того же юзера снова даст бонус)
+
+        Что НЕ делает (намеренно, sticky):
+        - не отнимает уже-выданный срок подписки (нет истории
+          по конкретным начислениям, точный rollback невозможен)
+        - не отзывает lifetime_tariff и не вычищает
+          tier_rewards_granted: gold/diamond — навсегда, иначе
+          подорвём доверие к программе
+
+        Возвращает обновлённый профиль реферера, либо None если
+        бонус не был выдан / нет реферера / нет такого приглашённого.
+        """
+        invited = self._raw_profile(invited_user_id)
+        if invited is None:
+            return None
+        if not invited.referral_bonus_granted:
+            return None
+        if invited.referrer_id is None:
+            return None
+
+        referrer = self._raw_profile(invited.referrer_id)
+        if referrer is None:
+            return None
+
+        referrer.referrals_paid_count = max(0, referrer.referrals_paid_count - 1)
+        referrer.referral_bonus_days_total = max(
+            0, referrer.referral_bonus_days_total - days,
+        )
+        self.save_profile(referrer)
+
+        invited.referral_bonus_granted = False
+        self.save_profile(invited)
+        return referrer
+
+    def revoke_invitee_bonus(
+        self, invited_user_id: int,
+    ) -> Optional[UserProfile]:
+        """Откатывает бонус приглашённого (бесплатные дни, которые ему
+        зачисляли за оплату по реф-ссылке). Идемпотентен.
+
+        Сбрасывает `invitee_bonus_granted = False` — при повторной
+        оплате (после refund'а) бонус снова можно выдать.
+        Срок подписки не уменьшаем (см. revoke_referral_bonus).
+        """
+        invited = self._raw_profile(invited_user_id)
+        if invited is None or not invited.invitee_bonus_granted:
+            return None
+        invited.invitee_bonus_granted = False
+        self.save_profile(invited)
+        return invited

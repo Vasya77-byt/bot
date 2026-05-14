@@ -797,3 +797,115 @@ class TestTierRewards:
         ref = store2.get(1)
         assert ref.lifetime_tariff == "pro"
         assert "gold" in ref.tier_rewards_granted
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Refund / chargeback: revoke_referral_bonus и revoke_invitee_bonus
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestRevokeReferralBonus:
+    def _setup(self, store, referrer_id=1, invited_id=2):
+        ref = store.get(referrer_id)
+        store.set_referrer_by_code(invited_id, ref.referral_code)
+        store.activate_subscription(invited_id, "pro", days=30)
+        store.award_referral_bonus(invited_id)
+        return store.get(referrer_id), store.get(invited_id)
+
+    def test_revokes_paid_count_and_days(self, store):
+        ref_before, inv_before = self._setup(store)
+        assert ref_before.referrals_paid_count == 1
+        assert ref_before.referral_bonus_days_total == 15
+        assert inv_before.referral_bonus_granted is True
+
+        result = store.revoke_referral_bonus(2)
+        assert result is not None
+        ref = store.get(1)
+        assert ref.referrals_paid_count == 0
+        assert ref.referral_bonus_days_total == 0
+        # Флаг сброшен — повторная оплата того же юзера снова даст бонус
+        assert store.get(2).referral_bonus_granted is False
+
+    def test_idempotent_second_revoke_returns_none(self, store):
+        self._setup(store)
+        first = store.revoke_referral_bonus(2)
+        second = store.revoke_referral_bonus(2)
+        assert first is not None
+        assert second is None
+
+    def test_no_bonus_granted_returns_none(self, store):
+        # Юзер 2 пришёл по реф-ссылке, но ещё не оплатил
+        ref = store.get(1)
+        store.set_referrer_by_code(2, ref.referral_code)
+        result = store.revoke_referral_bonus(2)
+        assert result is None
+
+    def test_no_referrer_returns_none(self, store):
+        store.get(42)  # без referrer_id
+        result = store.revoke_referral_bonus(42)
+        assert result is None
+
+    def test_unknown_invited_returns_none(self, store):
+        # Юзер 999 не существует — _raw_profile вернёт None
+        result = store.revoke_referral_bonus(999)
+        assert result is None
+
+    def test_subscription_days_not_rolled_back(self, store):
+        # Намеренное поведение: срок подписки реферера НЕ откатывается.
+        # Мы продлили — назад не отнимаем (нет истории по конкретным
+        # transactions, "честный" rollback невозможен).
+        ref, inv = self._setup(store)
+        expires_after_bonus = store.get(1).tariff_expires_at
+        store.revoke_referral_bonus(2)
+        assert store.get(1).tariff_expires_at == expires_after_bonus
+
+    def test_lifetime_and_tier_grants_are_sticky(self, store):
+        # Юзер достиг Diamond (100 опл.); при revoke последнего платежа
+        # lifetime НЕ снимается, tier_rewards_granted остаётся.
+        ref = store.get(1)
+        for i in range(100):
+            inv_id = 9000 + i
+            store.set_referrer_by_code(inv_id, ref.referral_code)
+            store.activate_subscription(inv_id, "pro", days=30)
+            store.award_referral_bonus(inv_id)
+        ref = store.get(1)
+        assert ref.lifetime_tariff == "business"
+        assert "diamond" in ref.tier_rewards_granted
+        assert ref.revshare_enabled is True
+
+        store.revoke_referral_bonus(9099)
+        ref = store.get(1)
+        # paid_count сполз с 100 на 99
+        assert ref.referrals_paid_count == 99
+        # Но lifetime/tier_rewards/revshare НЕ откатываются
+        assert ref.lifetime_tariff == "business"
+        assert "diamond" in ref.tier_rewards_granted
+        assert ref.revshare_enabled is True
+
+
+class TestRevokeInviteeBonus:
+    def test_revokes_flag(self, store):
+        ref = store.get(1)
+        store.set_referrer_by_code(2, ref.referral_code)
+        store.activate_subscription(2, "pro", days=30)
+        store.award_invitee_bonus(2)
+        assert store.get(2).invitee_bonus_granted is True
+
+        result = store.revoke_invitee_bonus(2)
+        assert result is not None
+        assert store.get(2).invitee_bonus_granted is False
+
+    def test_idempotent(self, store):
+        ref = store.get(1)
+        store.set_referrer_by_code(2, ref.referral_code)
+        store.activate_subscription(2, "pro", days=30)
+        store.award_invitee_bonus(2)
+        first = store.revoke_invitee_bonus(2)
+        second = store.revoke_invitee_bonus(2)
+        assert first is not None
+        assert second is None
+
+    def test_no_bonus_returns_none(self, store):
+        store.get(42)
+        result = store.revoke_invitee_bonus(42)
+        assert result is None

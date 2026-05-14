@@ -678,3 +678,81 @@ class TestTierUnlockedEvents:
         assert len(first) >= 1
         assert second == []
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Refund: handle_refund откатывает реф-бонусы и помечает платёж
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHandleRefund:
+    def _create_paid_referral(self, service, users, payments, op_id="op-r1"):
+        """Готовит ситуацию: юзер 1 пригласил юзера 42, 42 оплатил Pro,
+        бонус начислен."""
+        ref = users.get(1)
+        users.set_referrer_by_code(42, ref.referral_code)
+        payments.record_created(
+            operation_id=op_id, order_id=f"sub_42_pro_{op_id}",
+            user_id=42, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id=op_id, order_id=f"sub_42_pro_{op_id}", amount=1290.0,
+        )
+
+    def test_refund_marks_payment_and_revokes_bonus(
+        self, service, users, payments,
+    ):
+        self._create_paid_referral(service, users, payments)
+        # До рефанда
+        assert users.get(1).referrals_paid_count == 1
+        assert users.get(42).referral_bonus_granted is True
+
+        result = service.handle_refund(operation_id="op-r1", reason="chargeback")
+        assert result is not None
+        assert result["referrer_user_id"] == 1
+        assert result["invitee_revoked"] is True
+
+        # Платёж refunded
+        rec = payments.find_by_operation("op-r1")
+        assert rec.status == "refunded"
+        assert rec.error == "chargeback"
+        # Реферер откатан
+        assert users.get(1).referrals_paid_count == 0
+        # Флаг снят
+        assert users.get(42).referral_bonus_granted is False
+        assert users.get(42).invitee_bonus_granted is False
+
+    def test_refund_idempotent(self, service, users, payments):
+        self._create_paid_referral(service, users, payments)
+        first = service.handle_refund(operation_id="op-r1")
+        second = service.handle_refund(operation_id="op-r1")
+        assert first is not None
+        assert second is None
+        # Двойной откат не сполз paid_count в минус
+        assert users.get(1).referrals_paid_count == 0
+
+    def test_refund_unknown_payment_returns_none(self, service, users, payments):
+        result = service.handle_refund(operation_id="op-unknown")
+        assert result is None
+
+    def test_refund_by_order_id(self, service, users, payments):
+        self._create_paid_referral(service, users, payments)
+        result = service.handle_refund(order_id="sub_42_pro_op-r1")
+        assert result is not None
+        assert payments.find_by_operation("op-r1").status == "refunded"
+
+    def test_refund_without_referrer_does_not_crash(
+        self, service, users, payments,
+    ):
+        # Платёж юзера без реферера — refund должен пройти без revoke
+        payments.record_created(
+            operation_id="op-nr", order_id="sub_100_pro_x",
+            user_id=100, tariff="pro", amount=1290.0,
+        )
+        service.handle_webhook_paid(
+            operation_id="op-nr", order_id="sub_100_pro_x", amount=1290.0,
+        )
+        result = service.handle_refund(operation_id="op-nr")
+        assert result is not None
+        assert result["referrer_user_id"] is None
+        assert result["invitee_revoked"] is False
+

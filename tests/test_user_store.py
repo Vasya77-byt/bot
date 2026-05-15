@@ -1011,3 +1011,33 @@ class TestUserStoreQuickFullHelpers:
         store.increment_full(1)
         assert store.get(1).full_today == 1
         assert store.get(1).quick_today == 0
+
+
+class TestFirstFullUpsell:
+    """D1: one-shot флаг для первого upsell'а Free-юзеру после Full-отчёта."""
+
+    def test_default_is_false(self):
+        p = UserProfile(user_id=1)
+        assert p.first_full_upsell_shown is False
+
+    def test_mark_sets_true(self, store):
+        store.get(1)
+        result = store.mark_first_full_upsell_shown(1)
+        assert result.first_full_upsell_shown is True
+        # И персистится
+        assert store.get(1).first_full_upsell_shown is True
+
+    def test_mark_idempotent(self, store):
+        store.get(1)
+        store.mark_first_full_upsell_shown(1)
+        # Повторный вызов не падает и не меняет ничего
+        store.mark_first_full_upsell_shown(1)
+        store.mark_first_full_upsell_shown(1)
+        assert store.get(1).first_full_upsell_shown is True
+
+    def test_independent_per_user(self, store):
+        store.get(1)
+        store.get(2)
+        store.mark_first_full_upsell_shown(1)
+        assert store.get(1).first_full_upsell_shown is True
+        assert store.get(2).first_full_upsell_shown is False

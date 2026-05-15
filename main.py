@@ -1635,6 +1635,72 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             return
 
+        if action_part == "ca_card" and inn_part:
+            await callback_query.answer()
+            # D2: структурированная PDF-карточка контрагента (для досье).
+            # Доступна Pro/Business — как Excel/1С (одна категория экспортов).
+            profile = user_store.get(user_id)
+            if profile.effective_tariff() not in ("pro", "business"):
+                await callback_query.message.reply_text(
+                    "📋 PDF-карточка контрагента — фича тарифов Pro и Business.\n\n"
+                    "Нажмите «Тарифы» чтобы перейти.",
+                )
+                return
+            await callback_query.message.reply_text(
+                "📋 Готовлю карточку контрагента...",
+            )
+            # Re-fetch из кэша (после Full уже там — 0 API-вызовов).
+            company = await company_service.fetch(inn_part)
+            if company is None:
+                await callback_query.message.reply_text(
+                    f"⚠️ Не удалось получить данные по ИНН {inn_part}.\n"
+                    "Запросите сначала полный отчёт.",
+                )
+                return
+            # Security result для секции «Риски» — best-effort.
+            sec_result = None
+            try:
+                sec_result = await security_service.check(
+                    inn=inn_part,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                    ogrn=company.ogrn if company else None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Card PDF security check failed for %s: %s", inn_part, exc,
+                )
+            from exports import build_company_card_pdf
+            try:
+                content = build_company_card_pdf(company, sec_result)
+            except Exception as exc:
+                logger.exception("Card PDF build failed for %s: %s", inn_part, exc)
+                error_text = "⚠️ Не удалось собрать карточку.\n"
+                if "шрифт" in str(exc).lower() or "font" in str(exc).lower():
+                    error_text += (
+                        "На сервере не установлен шрифт с поддержкой кириллицы. "
+                        "Сообщите в поддержку: @YRS75"
+                    )
+                else:
+                    error_text += "Попробуйте ещё раз или сообщите в поддержку."
+                await callback_query.message.reply_text(error_text)
+                return
+            filename = f"card_{inn_part}.pdf"
+            doc = BytesIO(content)
+            doc.name = filename
+            try:
+                await callback_query.message.reply_document(
+                    document=doc, file_name=filename,
+                    caption=f"📋 Карточка контрагента (ИНН {inn_part})",
+                )
+            except Exception as exc:
+                logger.exception("Card PDF send failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Карточка собралась, но Telegram отказался принимать файл. "
+                    "Сообщите в поддержку: @YRS75",
+                )
+            return
+
         if action_part in ("ca_xlsx", "ca_1c") and inn_part:
             await callback_query.answer()
             # Фича Pro/Business — на Free/Start апсейл.
@@ -1764,10 +1830,17 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             disable_web_page_preview=True,
             reply_markup=_company_actions_keyboard(inn, user_id),
         )
-        if user_store.get(user_id).effective_tariff() in ("pro", "business"):
+        profile_after = user_store.get(user_id)
+        if profile_after.effective_tariff() in ("pro", "business"):
             asyncio.create_task(
                 _send_ai_insights(callback_query.message, company, sec_result),
             )
+        else:
+            # D1: после первого Full-отчёта Free-юзеру показываем upsell.
+            # One-shot через флаг — не спамим повторно.
+            if not profile_after.first_full_upsell_shown:
+                await _send_first_full_upsell(callback_query.message)
+                user_store.mark_first_full_upsell_shown(user_id)
         return
 
     # Выбор компании из результатов поиска по названию
@@ -2357,7 +2430,10 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         ],
         [monitor_btn],
         [
-            InlineKeyboardButton("📄 PDF", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📄 PDF-отчёт", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📋 Карточка", callback_data=f"ca_card:{inn}"),
+        ],
+        [
             InlineKeyboardButton("📊 Excel", callback_data=f"ca_xlsx:{inn}"),
             InlineKeyboardButton("📁 1С", callback_data=f"ca_1c:{inn}"),
         ],
@@ -2707,6 +2783,32 @@ async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
         disable_web_page_preview=True,
         reply_markup=_quick_actions_keyboard(inn, user_id),
     )
+
+
+async def _send_first_full_upsell(message) -> None:
+    """One-shot промо-плашка для Free-юзера сразу после первого
+    полного отчёта (D1). Цель — мягкий апсейл на платные тарифы,
+    показывая что они получат.
+
+    Вызывается ровно один раз за всю жизнь юзера; флаг
+    first_full_upsell_shown гарантирует отсутствие повторов.
+    """
+    text = (
+        "🎉 *Вы получили свой первый полный отчёт!*\n\n"
+        "На бесплатном тарифе у вас 5 быстрых проверок и 1 полный отчёт в день.\n\n"
+        "💎 *Платные тарифы дают:*\n"
+        "• Start — до 5 полных отчётов и мониторинг 3 ИНН\n"
+        "• Pro — 30 полных, ИИ-анализ рисков, мониторинг 30 ИНН\n"
+        "• Business — 150 полных + массовая проверка + Excel/1С-экспорт\n\n"
+        "Все тарифы — от 500 ₽/мес. Окупаются с первого крупного контракта."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Посмотреть тарифы", callback_data="show_tariffs")],
+    ])
+    try:
+        await message.reply_text(text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.warning("First-full upsell send failed: %s", exc)
 
 
 async def _run_bulk_check(message, user_id: int, content: bytes) -> None:
@@ -3205,6 +3307,8 @@ async def handle_start(client: Client, message) -> None:
         "– Следить за изменениями в компании\n"
         "– Получать помощь от ИИ-агента\n"
         "– Посмотреть связи компании и её историю\n\n"
+        "🆓 Бесплатно: 5 быстрых проверок + 1 полный отчёт в день.\n"
+        "💎 Тарифы от 500 ₽/мес — больше проверок, ИИ-анализ, мониторинг.\n\n"
         "/menu — показать меню\n"
         "/documents — правовые документы\n"
         "/referral — реферальная программа\n\n"

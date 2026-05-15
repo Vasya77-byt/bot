@@ -1635,6 +1635,51 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             return
 
+        if action_part in ("ca_xlsx", "ca_1c") and inn_part:
+            await callback_query.answer()
+            # Фича Pro/Business — на Free/Start апсейл.
+            profile = user_store.get(user_id)
+            if profile.effective_tariff() not in ("pro", "business"):
+                await callback_query.message.reply_text(
+                    "📊 Excel/1С-экспорт доступен на тарифах Pro и Business.\n\n"
+                    "Нажмите «Тарифы» чтобы перейти.",
+                )
+                return
+            # Re-fetch из кэша (после Full отчёта данные уже там — 0 API-вызовов).
+            company = await company_service.fetch(inn_part)
+            if company is None:
+                await callback_query.message.reply_text(
+                    f"⚠️ Не удалось получить данные по ИНН {inn_part}.\n"
+                    "Проверьте, что вы перед этим запросили полный отчёт.",
+                )
+                return
+            if action_part == "ca_xlsx":
+                from exports import build_company_xlsx
+                content = build_company_xlsx(company)
+                filename = f"company_{inn_part}.xlsx"
+                caption = f"📊 Excel по ИНН {inn_part}"
+            else:  # ca_1c
+                from exports import build_company_1c_csv
+                content = build_company_1c_csv(company)
+                filename = f"contractor_{inn_part}.csv"
+                caption = (
+                    f"📁 1С-CSV по ИНН {inn_part}\n"
+                    "Импорт: Обработки → Загрузка данных из табличного документа"
+                )
+            doc = BytesIO(content)
+            doc.name = filename
+            try:
+                await callback_query.message.reply_document(
+                    document=doc, file_name=filename, caption=caption,
+                )
+            except Exception as exc:
+                logger.exception("Export send failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось отправить файл. Попробуйте ещё раз или "
+                    "сообщите в поддержку: @YRS75",
+                )
+            return
+
         if action_part == "ca_ai" and inn_part:
             await callback_query.answer()
             await callback_query.message.reply_text("🤖 Запрашиваю ИИ-анализ у GigaChat...")
@@ -2058,41 +2103,8 @@ async def handle_text_message(client: Client, message) -> None:
         return
 
     if pending_action == "mode_mass_check":
-        inns = re.findall(r'\b\d{10}(?:\d{2})?\b', text)
-        if not inns:
-            await message.reply_text(
-                "⚠️ Не найдено ни одного ИНН.\n\n"
-                "Отправьте ИНН через запятую или по одному в строке:"
-            )
-            _user_state[user_id] = "mode_mass_check"
-            return
-        await message.reply_text(f"🔍 Начинаю проверку {len(inns)} ИНН...")
-        for inn in inns:
-            allowed = await _check_limit_and_count(message, user_id)
-            if not allowed:
-                break
-            company = await _fetch_company(inn)
-            sec_result = None
-            try:
-                sec_result = await security_service.check(
-                    inn=inn,
-                    name=company.name if company else None,
-                    okved=company.okved_main if company else None,
-
-                    ogrn=company.ogrn if company else None,
-                )
-            except Exception as exc:
-                logger.error("Security check failed: %s", exc)
-            parsed_inner = ParseResult(
-                raw_text=inn, inn=inn, mode="internal_analysis",
-                is_request=False, is_proposal=False, company_data=company,
-            )
-            reply = render_response(parsed=parsed_inner, company=company, risk=set(), security=sec_result)
-            await message.reply_text(
-                reply,
-                disable_web_page_preview=True,
-                reply_markup=_company_actions_keyboard(inn, user_id),
-            )
+        # Bulk через текстовую вставку: парсим ИНН прямо из text.
+        await _run_bulk_check(message, user_id, text.encode("utf-8"))
         return
 
     if pending_action and parsed.inn:
@@ -2345,7 +2357,9 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         ],
         [monitor_btn],
         [
-            InlineKeyboardButton("📄 Скачать PDF", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📄 PDF", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📊 Excel", callback_data=f"ca_xlsx:{inn}"),
+            InlineKeyboardButton("📁 1С", callback_data=f"ca_1c:{inn}"),
         ],
     ]
     web_btn = _build_web_report_button(inn, user_id)
@@ -2693,6 +2707,104 @@ async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
         disable_web_page_preview=True,
         reply_markup=_quick_actions_keyboard(inn, user_id),
     )
+
+
+async def _run_bulk_check(message, user_id: int, content: bytes) -> None:
+    """Bulk-проверка (Step C1): парсит ИНН из контента, проверяет
+    лимиты и квоты, асинхронно обрабатывает с троттлингом, отдаёт
+    Excel-файл с результатами.
+
+    Защита бюджета — три гейта:
+    1. Per-user daily limit (TARIFF_BULK_LIMITS): Pro=30, Business=100
+    2. Per-batch cap (BULK_MAX_PER_REQUEST=30): один батч не больше 30
+    3. Pre-flight quota check: если апстрим >70% — отказ
+    """
+    from bulk_check import (
+        BulkPreflightError,
+        BULK_MAX_PER_REQUEST,
+        parse_csv_inns,
+        preflight_check,
+        process_batch,
+    )
+    from exports import build_bulk_xlsx
+
+    profile = user_store.get(user_id)
+    if profile.effective_tariff() not in ("pro", "business"):
+        await message.reply_text(
+            "📋 Массовая проверка — фича тарифов Pro и Business.\n\n"
+            "Нажмите «Тарифы» чтобы перейти.",
+        )
+        return
+
+    inns = parse_csv_inns(content, max_count=BULK_MAX_PER_REQUEST)
+    if not inns:
+        await message.reply_text(
+            "⚠️ Не нашёл ИНН в файле/сообщении.\n\n"
+            f"Загрузите CSV/TXT или вставьте ИНН (до {BULK_MAX_PER_REQUEST} шт.)\n"
+            "по одному в строке или через запятую.",
+        )
+        _user_state[user_id] = "mode_mass_check"
+        return
+
+    if not profile.can_bulk(count=len(inns)):
+        remaining = profile.remaining_bulk()
+        await message.reply_text(
+            f"⛔️ Дневной лимит bulk-проверок исчерпан.\n\n"
+            f"Ваш тариф: {profile.effective_tariff().upper()}\n"
+            f"Осталось сегодня: {remaining} ИНН (вы загрузили {len(inns)}).\n"
+            f"Лимит обновится завтра.",
+        )
+        return
+
+    try:
+        preflight_check()
+    except BulkPreflightError as exc:
+        await message.reply_text(f"⏳ {exc}")
+        return
+
+    status_msg = await message.reply_text(
+        f"🔍 Bulk-проверка {len(inns)} ИНН (Quick-режим)...\n"
+        f"Прогресс: 0/{len(inns)}",
+    )
+
+    async def _progress(done: int, total: int) -> None:
+        if done % 5 == 0 or done == total:
+            try:
+                await status_msg.edit_text(
+                    f"🔍 Bulk-проверка {total} ИНН (Quick-режим)...\n"
+                    f"Прогресс: {done}/{total}",
+                )
+            except Exception:
+                pass
+
+    results = await process_batch(
+        inns, company_service, progress_callback=_progress,
+    )
+
+    # Учёт ИНН в дневной квоте bulk
+    user_store.increment_bulk(user_id, count=len(inns))
+
+    # Excel-файл
+    xlsx_bytes = build_bulk_xlsx(results)
+    from io import BytesIO
+    bio = BytesIO(xlsx_bytes)
+    bio.name = "bulk_check.xlsx"
+
+    from user_store import TARIFF_BULK_LIMITS
+    found = sum(1 for r in results if r.name)
+    errors = sum(1 for r in results if r.error)
+    caption = (
+        f"✅ Готово: {len(results)} ИНН проверено.\n"
+        f"Найдено: {found}, ошибок: {errors}.\n\n"
+        f"📊 Bulk-квота: использовано {profile.bulk_today + len(inns)}/"
+        f"{TARIFF_BULK_LIMITS[profile.effective_tariff()]} сегодня."
+    )
+    try:
+        await status_msg.edit_text(caption)
+    except Exception:
+        pass
+
+    await message.reply_document(document=bio, caption="Отчёт по контрагентам")
 
 
 async def _check_full_and_count(message, user_id: int) -> bool:
@@ -3233,6 +3345,45 @@ async def handle_documents(client: Client, message) -> None:
     )
 
 
+async def handle_bulk_upload(client: Client, message) -> None:
+    """Приём загруженного файла (CSV/TXT) для bulk-проверки.
+
+    Срабатывает, когда юзер находится в режиме mode_mass_check и
+    отправляет document. Скачиваем файл в память (cap ~256 KiB —
+    защита от мегабайтных файлов), парсим ИНН и запускаем bulk-check.
+    """
+    user_id = message.from_user.id
+    if _user_state.get(user_id) != "mode_mass_check":
+        return  # юзер не в bulk-режиме — игнорируем документ молча
+
+    doc = message.document
+    if doc is None:
+        return
+
+    # Cap размера: 256 KiB — для 30 ИНН с лихвой. Защита от случайного
+    # огромного бинарника.
+    max_size = 256 * 1024
+    if (doc.file_size or 0) > max_size:
+        await message.reply_text(
+            "⚠️ Файл слишком большой (>256 KiB). "
+            "Bulk-проверка работает с CSV/TXT до 30 ИНН.",
+        )
+        return
+
+    # Скачиваем в память
+    try:
+        buf = await message.download(in_memory=True)
+        content = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf)
+    except Exception as exc:
+        logger.error("Bulk: download failed: %s", exc)
+        await message.reply_text("⚠️ Не удалось прочитать файл. Попробуйте ещё раз.")
+        return
+
+    # Очищаем state до запуска — чтобы юзер мог снова войти в режим
+    _user_state.pop(user_id, None)
+    await _run_bulk_check(message, user_id, content)
+
+
 async def handle_admin(client: Client, message) -> None:
     """Команда /admin — реалтайм-отчёт для админов.
     Доступ ограничен set'ом admin_user_ids (заполняется из ENV)."""
@@ -3355,6 +3506,7 @@ def main() -> None:
             MessageHandler(handle_admin, filters.command(["admin"])),
             CallbackQueryHandler(handle_callback),
             MessageHandler(handle_contact, filters.contact),
+            MessageHandler(handle_bulk_upload, filters.document),
             MessageHandler(
                 handle_text_message,
                 filters.text & ~filters.command([

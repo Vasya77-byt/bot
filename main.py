@@ -1807,7 +1807,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         inn = data.split(":", 1)[1]
         if not inn:
             return
-        allowed = await _check_full_and_count(callback_query.message, user_id)
+        allowed = await _check_and_count(callback_query.message, user_id)
         if not allowed:
             return
 
@@ -1870,7 +1870,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         if not inn:
             return
         # Засчитываем как обычную проверку — лимиты должны работать
-        allowed = await _check_full_and_count(callback_query.message, user_id)
+        allowed = await _check_and_count(callback_query.message, user_id)
         if not allowed:
             return
         company = await company_service.fetch(inn)
@@ -1967,7 +1967,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         inn = data.split(":", 1)[1]
         if not inn:
             return
-        allowed = await _check_full_and_count(callback_query.message, user_id)
+        allowed = await _check_and_count(callback_query.message, user_id)
         if not allowed:
             return
         company = await company_service.fetch(inn)
@@ -2464,13 +2464,13 @@ def _tariffs_text() -> str:
         "\n"
         "─── 🆓 Free ───\n"
         "Бесплатно навсегда\n"
-        "• 5 быстрых проверок + 1 полный отчёт в день\n"
+        "• 5 проверок в день\n"
         "• Краткий отчёт + светофор\n"
         "• Стоп-листы и суды (сводка)\n"
         "\n"
         "─── ⭐️ Start ───\n"
         "💰 500 ₽/мес\n"
-        "📊 50 проверок/день\n"
+        "📊 20 проверок/день\n"
         "  ✅ Полный отчёт\n"
         "  ✅ ЕГРЮЛ\n"
         "  ✅ Суды/ФССП\n"
@@ -2478,7 +2478,7 @@ def _tariffs_text() -> str:
         "\n"
         "─── 💎 Pro ───\n"
         "💰 990 ₽/мес\n"
-        "📊 300 проверок/день\n"
+        "📊 40 проверок/день\n"
         "  ✅ Всё из Start\n"
         "  ✅ ИИ-анализ\n"
         "  ✅ Связи\n"
@@ -2487,7 +2487,7 @@ def _tariffs_text() -> str:
         "\n"
         "─── 🏆 Business ───\n"
         "💰 2 490 ₽/мес\n"
-        "📊 Безлимитные проверки\n"
+        "📊 80 проверок/день\n"
         "  ✅ Всё из Pro\n"
         "  ✅ API доступ\n"
         "  ✅ Массовые проверки\n"
@@ -2639,7 +2639,7 @@ async def _dispatch_action(
 
     # Проверяем лимит для действий, связанных с проверкой компании
     if action in ("mode_internal_analysis", "mode_compare"):
-        allowed = await _check_full_and_count(message, user_id)
+        allowed = await _check_and_count(message, user_id)
         if not allowed:
             return
 
@@ -2778,7 +2778,7 @@ async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
             "⚠️ Не нашёл ИНН в сообщении. Отправьте ИНН (10 или 12 цифр).",
         )
         return
-    allowed = await _check_quick_and_count(message, user_id)
+    allowed = await _check_and_count(message, user_id)
     if not allowed:
         return
     # Quick короткий, но typing-индикатор не повредит (~1 сек на DaData).
@@ -2802,11 +2802,11 @@ async def _send_first_full_upsell(message) -> None:
     """
     text = (
         "🎉 *Вы получили свой первый полный отчёт!*\n\n"
-        "На бесплатном тарифе у вас 5 быстрых проверок и 1 полный отчёт в день.\n\n"
+        "На бесплатном тарифе у вас 5 проверок в день.\n\n"
         "💎 *Платные тарифы дают:*\n"
-        "• Start — до 5 полных отчётов и мониторинг 3 ИНН\n"
-        "• Pro — 30 полных, ИИ-анализ рисков, мониторинг 30 ИНН\n"
-        "• Business — 150 полных + массовая проверка + Excel/1С-экспорт\n\n"
+        "• Start — 20 проверок/день + мониторинг 3 ИНН\n"
+        "• Pro — 40 проверок/день, ИИ-анализ рисков, мониторинг 30 ИНН\n"
+        "• Business — 80 проверок/день + массовая проверка + Excel/1С\n\n"
         "Все тарифы — от 500 ₽/мес. Окупаются с первого крупного контракта."
     )
     keyboard = InlineKeyboardMarkup([
@@ -2993,49 +2993,28 @@ async def _update_status(status_msg, text: str) -> None:
         pass
 
 
-async def _check_full_and_count(message, user_id: int) -> bool:
-    """Проверяет лимит ПОЛНЫХ отчётов (L2+) и увеличивает счётчик.
-    Возвращает True если проверка разрешена, False — если лимит
-    исчерпан. На исчерпании отправляет пользователю сообщение с
-    остатком кратких проверок и предложением апгрейда."""
-    profile = user_store.get(user_id)
-    if not profile.can_full_check():
-        from user_store import TARIFF_FULL_LIMITS
-        eff = profile.effective_tariff()
-        limit = TARIFF_FULL_LIMITS.get(eff, 0)
-        remaining_quick = profile.remaining_quick()
-        quick_line = (
-            f"\n🔍 Кратких проверок осталось: {remaining_quick}"
-            if remaining_quick is not None and remaining_quick > 0 else ""
-        )
-        await message.reply_text(
-            f"⛔️ Дневной лимит полных отчётов исчерпан.\n\n"
-            f"Ваш тариф: {eff.upper()} — {limit} полных отчётов в день.\n"
-            f"Лимит обновится завтра."
-            f"{quick_line}\n\n"
-            f"Для увеличения — нажмите «Тарифы»."
-        )
-        return False
-    user_store.increment_full(user_id)
-    return True
+async def _check_and_count(message, user_id: int) -> bool:
+    """Проверяет общий дневной лимит проверок и увеличивает счётчик.
+    Возвращает True если проверка разрешена, False — если лимит исчерпан.
 
-
-async def _check_quick_and_count(message, user_id: int) -> bool:
-    """Проверяет лимит КРАТКИХ проверок (L1) и увеличивает счётчик.
-    На исчерпании Quick предлагает либо подождать, либо апгрейд."""
+    Используется для всех типов проверок: ввод ИНН (Quick preview),
+    нажатие «Полный отчёт», поиск по названию, открытие из «Мои
+    компании». Bulk-проверки идут через отдельный счётчик
+    (см. _run_bulk_check + can_bulk).
+    """
     profile = user_store.get(user_id)
-    if not profile.can_quick_check():
-        from user_store import TARIFF_QUICK_LIMITS
+    if not profile.can_check():
+        from user_store import TARIFF_LIMITS
         eff = profile.effective_tariff()
-        limit = TARIFF_QUICK_LIMITS.get(eff, 0)
+        limit = TARIFF_LIMITS.get(eff, 0)
         await message.reply_text(
-            f"⛔️ Дневной лимит кратких проверок исчерпан.\n\n"
-            f"Ваш тариф: {eff.upper()} — {limit} кратких проверок в день.\n"
+            f"⛔️ Дневной лимит проверок исчерпан.\n\n"
+            f"Ваш тариф: {eff.upper()} — {limit} проверок в день.\n"
             f"Лимит обновится завтра.\n\n"
             f"Для увеличения — нажмите «Тарифы»."
         )
         return False
-    user_store.increment_quick(user_id)
+    user_store.increment_checks(user_id)
     return True
 
 
@@ -3047,8 +3026,7 @@ async def handle_my_subscription(client: Client, message) -> None:
     profile = user_store.get(user_id)
     if profile.tariff == "free":
         await message.reply_text(
-            "🆓 У вас бесплатный тариф Free — "
-            "5 быстрых проверок + 1 полный отчёт в день.\n\n"
+            "🆓 У вас бесплатный тариф Free — 5 проверок в день.\n\n"
             "Чтобы оформить подписку, нажмите «Тарифы»."
         )
         return
@@ -3291,7 +3269,7 @@ async def handle_start(client: Client, message) -> None:
         "– Следить за изменениями в компании\n"
         "– Получать помощь от ИИ-агента\n"
         "– Посмотреть связи компании и её историю\n\n"
-        "🆓 Бесплатно: 5 быстрых проверок + 1 полный отчёт в день.\n"
+        "🆓 Бесплатно: 5 проверок в день.\n"
         "💎 Тарифы от 500 ₽/мес — больше проверок, ИИ-анализ, мониторинг.\n\n"
         "/menu — показать меню\n"
         "/documents — правовые документы\n"

@@ -533,8 +533,7 @@ def render_profile(
 
     from user_store import (
         TARIFF_BULK_LIMITS,
-        TARIFF_FULL_LIMITS,
-        TARIFF_QUICK_LIMITS,
+        TARIFF_LIMITS,
     )
 
     profile.reset_if_new_day()
@@ -575,9 +574,8 @@ def render_profile(
 
     lines.append(f"Всего проверок: {profile.checks_total}")
 
-    # ── Счётчики на сегодня (Quick / Full / Bulk) ──
-    quick_limit = TARIFF_QUICK_LIMITS.get(eff_tariff)
-    full_limit = TARIFF_FULL_LIMITS.get(eff_tariff)
+    # ── Счётчики на сегодня (общий + bulk) ──
+    daily_limit = TARIFF_LIMITS.get(eff_tariff)
     bulk_limit = TARIFF_BULK_LIMITS.get(eff_tariff)
 
     def _fmt(used: int, limit) -> str:
@@ -585,9 +583,7 @@ def render_profile(
 
     lines.extend([
         "",
-        "📊 Сегодня:",
-        f"   Быстрые проверки: {_fmt(profile.quick_today, quick_limit)}",
-        f"   Полные отчёты: {_fmt(profile.full_today, full_limit)}",
+        f"📊 Проверок сегодня: {_fmt(profile.checks_today, daily_limit)}",
     ])
     if bulk_limit and bulk_limit > 0:
         lines.append(

@@ -40,23 +40,15 @@ logger = logging.getLogger("financial-architect")
 
 STORAGE_FILE = os.getenv("USERS_FILE", "users.json")
 
-# ── Quick/Full модель лимитов (Step 3 — экономия бюджета API) ──
-# Quick = краткая проверка (только DaData ~1₽): название, ИНН, статус,
-#         директор, ОКВЭД. Лимит большой — это маркетинговая воронка.
-# Full  = полный отчёт (DaData + ФНС + ЗЧБ + AI + ...). Дорогой по
-#         API (~10-20₽ с кэшем). Лимит жёсткий — защита бюджета.
-TARIFF_QUICK_LIMITS: Dict[str, Optional[int]] = {
+# Общий дневной лимит проверок (любого типа — Quick preview или Full отчёт).
+# Quick (краткая, ~1₽) и Full (полный, ~10-20₽) на UI-уровне разделены —
+# юзер сначала видит short-карточку, потом полный отчёт по кнопке.
+# Но СЧЁТЧИК один: каждая проверка декрементирует одну единицу.
+TARIFF_LIMITS: Dict[str, Optional[int]] = {
     "free": 5,
-    "start": 30,
-    "pro": 150,
-    "business": None,  # безлимит
-}
-
-TARIFF_FULL_LIMITS: Dict[str, Optional[int]] = {
-    "free": 1,
-    "start": 5,
-    "pro": 30,
-    "business": 150,
+    "start": 20,
+    "pro": 40,
+    "business": 80,
 }
 
 # Bulk-проверка (Block C, Step C1): отдельный счётчик ИНН в день.
@@ -157,11 +149,9 @@ TARIFF_FEATURES = {
 class UserProfile:
     user_id: int
     tariff: str = "free"
+    checks_today: int = 0        # общий счётчик проверок за сегодня
     checks_date: str = ""        # ISO дата последнего сброса: "2024-01-15"
     checks_total: int = 0
-    # Quick/Full модель: два счётчика для экономии бюджета API.
-    quick_today: int = 0         # краткие проверки (L1, ~1 запрос)
-    full_today: int = 0          # полные отчёты (L2+, ~3-5 запросов)
     # Bulk-проверка (Step C1): отдельный счётчик ИНН в день для bulk-загрузок.
     bulk_today: int = 0          # ИНН, обработанных через bulk-upload сегодня
     # Подписка
@@ -211,8 +201,7 @@ class UserProfile:
     def reset_if_new_day(self) -> None:
         today = date.today().isoformat()
         if self.checks_date != today:
-            self.quick_today = 0
-            self.full_today = 0
+            self.checks_today = 0
             self.bulk_today = 0
             self.checks_date = today
 
@@ -243,46 +232,30 @@ class UserProfile:
         lifetime = self.lifetime_tariff or "free"
         return monthly if TARIFF_RANK.get(monthly, 0) >= TARIFF_RANK.get(lifetime, 0) else lifetime
 
-    def can_quick_check(self) -> bool:
-        """Можно ли сделать ещё одну краткую проверку (L1)."""
+    def can_check(self) -> bool:
+        """Можно ли сделать ещё одну проверку (любого типа — Quick или Full)."""
         self.reset_if_new_day()
-        limit = TARIFF_QUICK_LIMITS.get(self.effective_tariff())
+        limit = TARIFF_LIMITS.get(self.effective_tariff())
         if limit is None:
             return True
-        return self.quick_today < limit
+        return self.checks_today < limit
 
-    def can_full_check(self) -> bool:
-        """Можно ли запросить ещё один полный отчёт (L2+)."""
+    def remaining_checks(self) -> Optional[int]:
+        """Остаток проверок на сегодня; None — безлимит."""
         self.reset_if_new_day()
-        limit = TARIFF_FULL_LIMITS.get(self.effective_tariff())
-        if limit is None:
-            return True
-        return self.full_today < limit
-
-    def remaining_quick(self) -> Optional[int]:
-        """Остаток кратких проверок на сегодня; None — безлимит."""
-        self.reset_if_new_day()
-        limit = TARIFF_QUICK_LIMITS.get(self.effective_tariff())
+        limit = TARIFF_LIMITS.get(self.effective_tariff())
         if limit is None:
             return None
-        return max(0, limit - self.quick_today)
+        return max(0, limit - self.checks_today)
 
-    def remaining_full(self) -> Optional[int]:
-        """Остаток полных отчётов на сегодня; None — безлимит."""
-        self.reset_if_new_day()
-        limit = TARIFF_FULL_LIMITS.get(self.effective_tariff())
-        if limit is None:
-            return None
-        return max(0, limit - self.full_today)
+    def daily_limit(self) -> Optional[int]:
+        """Дневной лимит по effective-тарифу."""
+        return TARIFF_LIMITS.get(self.effective_tariff())
 
-    def increment_quick(self) -> None:
+    def increment(self) -> None:
+        """Инкремент общего счётчика проверок."""
         self.reset_if_new_day()
-        self.quick_today += 1
-        self.checks_total += 1
-
-    def increment_full(self) -> None:
-        self.reset_if_new_day()
-        self.full_today += 1
+        self.checks_today += 1
         self.checks_total += 1
 
     def can_bulk(self, count: int = 1) -> bool:
@@ -381,17 +354,10 @@ class UserStore:
         self._data[str(profile.user_id)] = asdict(profile)
         self._save()
 
-    def increment_quick(self, user_id: int) -> UserProfile:
-        """Инкремент счётчика кратких проверок (L1)."""
+    def increment_checks(self, user_id: int) -> UserProfile:
+        """Инкремент общего счётчика проверок (Quick или Full — всё равно)."""
         profile = self.get(user_id)
-        profile.increment_quick()
-        self.save_profile(profile)
-        return profile
-
-    def increment_full(self, user_id: int) -> UserProfile:
-        """Инкремент счётчика полных отчётов (L2+)."""
-        profile = self.get(user_id)
-        profile.increment_full()
+        profile.increment()
         self.save_profile(profile)
         return profile
 

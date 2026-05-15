@@ -199,11 +199,11 @@ class SubscriptionService:
 
         method: "" / "sbp" / "tpay" / "sberpay" — выбор способа в ЮKassa.
         """
-        from user_store import TOPUP_MAX_RUB, TOPUP_MIN_RUB
-        if amount_rub < TOPUP_MIN_RUB or amount_rub > TOPUP_MAX_RUB:
+        from user_store import TOPUP_PACKAGES_RUB
+        if amount_rub not in TOPUP_PACKAGES_RUB:
+            packages = ", ".join(f"{p}₽" for p in TOPUP_PACKAGES_RUB)
             raise ValueError(
-                f"Сумма пополнения должна быть от {TOPUP_MIN_RUB} до "
-                f"{TOPUP_MAX_RUB}₽",
+                f"Сумма должна быть одной из: {packages}",
             )
         if self.yookassa is None:
             raise ValueError(

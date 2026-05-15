@@ -1051,38 +1051,31 @@ class TestWalletBalance:
 
 
 class TestTopupBonus:
-    """Прогрессивный бонус при пополнении."""
+    """Бонусы по фиксированным пакетам: 300/500/990/2490."""
 
-    def test_below_threshold_no_bonus(self):
+    def test_300_no_bonus(self):
         from user_store import calc_topup_credits
-        base, bonus = calc_topup_credits(500)
-        assert base == 50000  # 500₽
+        base, bonus = calc_topup_credits(300)
+        assert base == 30000
         assert bonus == 0
 
-    def test_1000_gives_10_percent(self):
+    def test_500_no_bonus(self):
         from user_store import calc_topup_credits
-        base, bonus = calc_topup_credits(1000)
-        assert base == 100000
-        assert bonus == 10000  # +100₽
+        base, bonus = calc_topup_credits(500)
+        assert base == 50000
+        assert bonus == 0
 
-    def test_3000_gives_15_percent(self):
+    def test_990_gives_5_percent(self):
         from user_store import calc_topup_credits
-        base, bonus = calc_topup_credits(3000)
-        assert base == 300000
-        assert bonus == 45000  # +450₽
+        base, bonus = calc_topup_credits(990)
+        assert base == 99000
+        assert bonus == 4950  # +49.50₽
 
-    def test_5000_gives_20_percent(self):
+    def test_2490_gives_10_percent(self):
         from user_store import calc_topup_credits
-        base, bonus = calc_topup_credits(5000)
-        assert base == 500000
-        assert bonus == 100000  # +1000₽
-
-    def test_10000_still_20_percent(self):
-        from user_store import calc_topup_credits
-        # Выше всех порогов — берём 20%
-        base, bonus = calc_topup_credits(10000)
-        assert base == 1000000
-        assert bonus == 200000
+        base, bonus = calc_topup_credits(2490)
+        assert base == 249000
+        assert bonus == 24900  # +249₽
 
 
 class TestUserStoreWalletHelpers:

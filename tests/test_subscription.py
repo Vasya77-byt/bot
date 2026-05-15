@@ -760,56 +760,53 @@ class TestHandleRefund:
 class TestWalletTopup:
     """Wallet: пополнение баланса через webhook."""
 
-    def test_topup_credits_balance_via_tochka_webhook(
-        self, service, users, payments,
-    ):
-        # Создаём запись пополнения как будто create_topup_payment отработал
+    def test_topup_300_no_bonus(self, service, users, payments):
+        # Минимальный пакет: 300₽ без бонуса
         payments.record_created(
             operation_id="topup-1", order_id="topup-1",
-            user_id=42, tariff="topup_500", amount=500.0,
+            user_id=42, tariff="topup_300", amount=300.0,
             kind="topup",
         )
         service.handle_webhook_paid(
-            operation_id="topup-1", order_id="topup-1", amount=500.0,
+            operation_id="topup-1", order_id="topup-1", amount=300.0,
         )
-        # 500₽ → 50000 копеек, без бонуса (порог 1000)
         profile = users.get(42)
-        assert profile.balance_kopeks == 50000
+        assert profile.balance_kopeks == 30000
         assert profile.balance_bonus_kopeks == 0
         # Подписка НЕ активирована — это пополнение
         assert profile.tariff == "free"
 
-    def test_topup_1000_includes_10_percent_bonus(
+    def test_topup_990_includes_5_percent_bonus(
         self, service, users, payments,
     ):
         payments.record_created(
             operation_id="topup-2", order_id="topup-2",
-            user_id=42, tariff="topup_1000", amount=1000.0,
+            user_id=42, tariff="topup_990", amount=990.0,
             kind="topup",
         )
         service.handle_webhook_paid(
-            operation_id="topup-2", order_id="topup-2", amount=1000.0,
+            operation_id="topup-2", order_id="topup-2", amount=990.0,
         )
         profile = users.get(42)
-        # 1000₽ + 10% бонус = 1100₽ = 110000 коп.
-        assert profile.balance_kopeks == 110000
-        assert profile.balance_bonus_kopeks == 10000  # 100₽ бонус
+        # 990₽ + 5% бонус ≈ 1039.50₽ = 103950 коп.
+        assert profile.balance_kopeks == 103950
+        assert profile.balance_bonus_kopeks == 4950  # ≈49.50₽ бонус
 
-    def test_topup_5000_includes_20_percent_bonus(
+    def test_topup_2490_includes_10_percent_bonus(
         self, service, users, payments,
     ):
         payments.record_created(
             operation_id="topup-3", order_id="topup-3",
-            user_id=42, tariff="topup_5000", amount=5000.0,
+            user_id=42, tariff="topup_2490", amount=2490.0,
             kind="topup",
         )
         service.handle_webhook_paid(
-            operation_id="topup-3", order_id="topup-3", amount=5000.0,
+            operation_id="topup-3", order_id="topup-3", amount=2490.0,
         )
         profile = users.get(42)
-        # 5000₽ + 20% = 6000₽
-        assert profile.balance_kopeks == 600000
-        assert profile.balance_bonus_kopeks == 100000
+        # 2490₽ + 10% = 2739₽
+        assert profile.balance_kopeks == 273900
+        assert profile.balance_bonus_kopeks == 24900
 
     def test_topup_idempotent(self, service, users, payments):
         """Повторный webhook на тот же operation_id не должен задвоить
@@ -847,14 +844,15 @@ class TestWalletTopup:
         assert rec.status == "paid"
 
     @pytest.mark.asyncio
-    async def test_create_topup_payment_below_min_raises(self, service):
-        with pytest.raises(ValueError, match="100"):
-            await service.create_topup_payment(user_id=1, amount_rub=50)
+    async def test_create_topup_arbitrary_amount_raises(self, service):
+        # Произвольная сумма (не из TOPUP_PACKAGES_RUB) — отказ
+        with pytest.raises(ValueError, match="500"):
+            await service.create_topup_payment(user_id=1, amount_rub=750)
 
     @pytest.mark.asyncio
-    async def test_create_topup_payment_above_max_raises(self, service):
-        with pytest.raises(ValueError, match="10000"):
-            await service.create_topup_payment(user_id=1, amount_rub=100000)
+    async def test_create_topup_zero_raises(self, service):
+        with pytest.raises(ValueError):
+            await service.create_topup_payment(user_id=1, amount_rub=0)
 
     @pytest.mark.asyncio
     async def test_create_topup_without_yookassa_raises(self, users, payments):

@@ -318,6 +318,81 @@ def calculate_risk_score(
     return RiskScore(score=score, level=level, factors=factors)
 
 
+# ────────────────────────────────────────────────────────────────────
+# 5-категорийная разбивка для визуализации (Business веб-отчёт).
+# Каждый фактор отнесён к одной из 5 категорий по подстроке в label —
+# намеренно lazy-mapping, чтобы не плодить параллельный реестр.
+# Веса аггрегируются и клампятся в 0..100 — это значение на оси радара.
+# ────────────────────────────────────────────────────────────────────
+
+CATEGORY_KEYS = ("legal", "financial", "tax", "operational", "reputational")
+CATEGORY_LABELS = {
+    "legal":        "Юридический",
+    "financial":    "Финансовый",
+    "tax":          "Налоговый",
+    "operational":  "Операционный",
+    "reputational": "Репутационный",
+}
+
+
+def _categorize_factor(factor: ScoreFactor) -> str:
+    """Сопоставляет фактор с категорией. Эвристика по label — добавление
+    нового factor требует только осмысленного label, без правок здесь.
+    Неизвестные факторы → operational (общая корзина)."""
+    label = factor.label.lower()
+    if any(k in label for k in ("фссп", "суды", "арбитраж", "иск", "производст")):
+        return "legal"
+    if any(k in label for k in ("выручка", "прибыль", "финанс", "капитал")):
+        return "financial"
+    if any(k in label for k in ("налог", "недоимка", "задолженность", "отчётност",
+                                  "отчетност")):
+        return "tax"
+    if any(k in label for k in ("недобросов", "массовый руковод", "массовый учред",
+                                  "массов", "адрес", "репутац", "санкц", "террор",
+                                  "иноагент")):
+        return "reputational"
+    # статус, возраст, реорг, проверки и прочее структурное → operational
+    return "operational"
+
+
+def calculate_category_scores(
+    company: Optional[CompanyData],
+    security: Optional[SecurityResult] = None,
+) -> dict:
+    """Возвращает {category_key: score_0_100} по 5 осям радара.
+
+    Используется в Business веб-отчёте для построения radar chart.
+    Сумма points всех факторов в категории клампится в 0..100 — это
+    позиция на оси (выше = выше риск в этой категории).
+    """
+    result = calculate_risk_score(company, security)
+    by_category: dict[str, int] = {k: 0 for k in CATEGORY_KEYS}
+    for f in result.factors:
+        cat = _categorize_factor(f)
+        by_category[cat] += f.points
+    return {k: max(0, min(v, 100)) for k, v in by_category.items()}
+
+
+def factor_breakdown(
+    company: Optional[CompanyData],
+    security: Optional[SecurityResult] = None,
+) -> list[dict]:
+    """Возвращает список {label, points, category} для donut chart.
+    Только сработавшие факторы (с points > 0). Сортировка — по убыванию
+    points, чтобы крупные сектора были видны первыми."""
+    result = calculate_risk_score(company, security)
+    items = [
+        {
+            "label": f.label,
+            "points": f.points,
+            "category": _categorize_factor(f),
+        }
+        for f in result.factors if f.points > 0
+    ]
+    items.sort(key=lambda x: x["points"], reverse=True)
+    return items
+
+
 # Эмодзи и подписи уровней — единое место правды для рендера
 LEVEL_EMOJI = {
     "low":      "🟢",

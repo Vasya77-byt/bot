@@ -9,5 +9,8 @@ sentry-sdk==2.17.0
 fpdf2==2.7.9
 pillow==12.2.0
 openpyxl==3.1.5
+# OCR ИНН с фото (визитки/договоры). Требует системного tesseract:
+# apt install tesseract-ocr tesseract-ocr-rus
+pytesseract==0.3.13
 PyJWT[crypto]==2.12.0
 jinja2==3.1.6

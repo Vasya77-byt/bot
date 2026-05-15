@@ -242,3 +242,79 @@ def test_render_handles_minimum_data():
     )
     assert isinstance(html, bytes)
     assert b"</html>" in html
+
+
+class TestBusinessWebReport:
+    """D-карта-рисков: расширенный веб-отчёт для Business-юзеров.
+
+    Pro-юзеры получают тот же отчёт что и раньше; Business — плюс
+    радар, donut и timeline. Технически — флаг is_business=True в
+    render_report включает дополнительные секции в шаблоне.
+    """
+
+    def test_default_renders_pro_version(self):
+        html = render_report(
+            inn="1", company=None, card=None, security=None,
+        ).decode("utf-8")
+        # Базовые секции есть
+        assert "Арбитражные суды" in html
+        # Business-секции — НЕТ
+        assert "Карта рисков" not in html
+        assert "riskRadar" not in html
+        assert "btn-share" not in html
+
+    def test_business_flag_adds_radar(self):
+        html = render_report(
+            inn="1", company=None, card=None, security=None,
+            is_business=True,
+        ).decode("utf-8")
+        # Карта рисков (радар) появляется
+        assert "Карта рисков" in html
+        assert "riskRadar" in html
+        # Кнопки в шапке секции
+        assert "Скачать PDF" in html
+        assert "btn-share" in html
+
+    def test_business_with_factors_shows_donut(self):
+        from schemas import CompanyData
+        # Компания с возрастом < 1 года → срабатывает _age_factor
+        company = CompanyData(inn="1", name="X", age_years=0, status="Действующая")
+        html = render_report(
+            inn="1", company=company, card=None, security=None,
+            is_business=True,
+        ).decode("utf-8")
+        # Donut появляется когда есть факторы
+        assert "riskDonut" in html
+        assert "Из чего складывается риск" in html
+
+    def test_business_without_factors_no_donut(self):
+        # Полностью пустой контекст → нет факторов → donut-секция скрыта
+        html = render_report(
+            inn="1", company=None, card=None, security=None,
+            is_business=True,
+        ).decode("utf-8")
+        # Радар всегда есть (даже с нулевыми score), donut-секция только
+        # при наличии факторов. Проверяем по заголовку секции и canvas-элементу,
+        # а не по слову `riskDonut` (оно есть в JS как защитный if).
+        assert "riskRadar" in html
+        assert "Из чего складывается риск" not in html
+        assert 'id="riskDonut"' not in html
+
+    def test_radar_has_all_five_categories(self):
+        html = render_report(
+            inn="1", company=None, card=None, security=None,
+            is_business=True,
+        ).decode("utf-8")
+        # 5 категорий с подписями
+        for label in ("Юридический", "Финансовый", "Налоговый",
+                      "Операционный", "Репутационный"):
+            assert label in html, f"{label} категория отсутствует в HTML"
+
+    def test_html_is_valid_structure(self):
+        """Smoke: business HTML заканчивается </html>."""
+        html = render_report(
+            inn="1", company=None, card=None, security=None,
+            is_business=True,
+        )
+        assert b"<!DOCTYPE" in html or b"<!doctype" in html
+        assert b"</html>" in html

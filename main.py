@@ -1825,6 +1825,27 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
 
     # Quick → Full переход: юзер нажал «Полный отчёт» после краткой
     # проверки. Расходует Full-квоту, рендерит полный анализ.
+    # OCR pick: юзер выбрал один ИНН из нескольких найденных на фото
+    if data.startswith("ocr_pick:"):
+        await callback_query.answer()
+        inn = data.split(":", 1)[1]
+        if not inn:
+            return
+        parsed = ParseResult(
+            raw_text=inn, inn=inn, mode="quick_check",
+            is_request=False, is_proposal=False, company_data=None,
+        )
+        await _do_quick_check(callback_query.message, parsed, user_id)
+        return
+
+    if data == "ocr_cancel":
+        await callback_query.answer("Отменено")
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
+        return
+
     if data.startswith("full:"):
         await callback_query.answer()
         inn = data.split(":", 1)[1]
@@ -3518,6 +3539,90 @@ async def handle_bulk_upload(client: Client, message) -> None:
     await _run_bulk_check(message, user_id, content)
 
 
+async def handle_photo_ocr(client: Client, message) -> None:
+    """Приём фото (визитки, договора) — извлекает ИНН и запускает
+    Quick-проверку.
+
+    Поведение:
+    - 1 валидный ИНН → автоматический Quick check (как при ручном вводе).
+    - 2-5 ИНН → клавиатура «Выберите для проверки» с кнопками `ocr_pick:<inn>`.
+    - 0 → «Не нашёл ИНН, введите вручную».
+    Лимит: расходует Quick-квоту юзера (одна найденная компания = 1 проверка).
+    """
+    user_id = message.from_user.id
+    if message.photo is None:
+        return
+
+    # Cap размера: Telegram photo обычно <1 MiB, но защита от
+    # извращённых случаев.
+    file_size = getattr(message.photo, "file_size", 0) or 0
+    if file_size > 5 * 1024 * 1024:
+        await message.reply_text(
+            "⚠️ Фото слишком большое (>5 MiB). Отправьте поменьше.",
+        )
+        return
+
+    await message.reply_text("🔍 Сканирую фото для поиска ИНН...")
+
+    try:
+        buf = await message.download(in_memory=True)
+        content = buf.getvalue() if hasattr(buf, "getvalue") else bytes(buf)
+    except Exception as exc:
+        logger.error("OCR: photo download failed: %s", exc)
+        await message.reply_text(
+            "⚠️ Не удалось скачать фото. Попробуйте ещё раз.",
+        )
+        return
+
+    try:
+        from ocr import extract_inns_from_image
+        inns = extract_inns_from_image(content)
+    except Exception as exc:
+        logger.exception("OCR: extract failed: %s", exc)
+        await message.reply_text(
+            "⚠️ OCR временно недоступен. Введите ИНН вручную.",
+        )
+        return
+
+    if not inns:
+        await message.reply_text(
+            "❌ Не нашёл ИНН на фото.\n\n"
+            "Возможные причины: плохое освещение, неровный наклон, "
+            "сильно сжатое фото.\n\n"
+            "Можно ввести ИНН вручную — отправьте 10 или 12 цифр сообщением.",
+        )
+        return
+
+    # Один ИНН — сразу Quick check, без подтверждения
+    if len(inns) == 1:
+        inn = inns[0]
+        await message.reply_text(
+            f"✅ Нашёл ИНН: `{inn}`. Запускаю быструю проверку...",
+        )
+        # Эмулируем поведение Quick check через _do_quick_check
+        parsed = ParseResult(
+            raw_text=inn, inn=inn, mode="quick_check",
+            is_request=False, is_proposal=False, company_data=None,
+        )
+        await _do_quick_check(message, parsed, user_id)
+        return
+
+    # Несколько ИНН — клавиатура выбора (ограничиваем до 5 для UX)
+    inns = inns[:5]
+    rows = [
+        [InlineKeyboardButton(f"🔍 {inn}", callback_data=f"ocr_pick:{inn}")]
+        for inn in inns
+    ]
+    rows.append([InlineKeyboardButton(
+        "❌ Отмена", callback_data="ocr_cancel",
+    )])
+    await message.reply_text(
+        f"На фото найдено несколько ИНН ({len(inns)}). "
+        "Выберите, какой проверить:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 async def handle_admin(client: Client, message) -> None:
     """Команда /admin — реалтайм-отчёт для админов.
     Доступ ограничен set'ом admin_user_ids (заполняется из ENV)."""
@@ -3641,6 +3746,7 @@ def main() -> None:
             CallbackQueryHandler(handle_callback),
             MessageHandler(handle_contact, filters.contact),
             MessageHandler(handle_bulk_upload, filters.document),
+            MessageHandler(handle_photo_ocr, filters.photo),
             MessageHandler(
                 handle_text_message,
                 filters.text & ~filters.command([

@@ -155,6 +155,88 @@
     </div>
     {% endif %}
 
+    {% if is_business %}
+    {# ════════ КАРТА РИСКОВ (Business) ════════ #}
+    <div class="card p-6">
+      <div class="flex items-center justify-between flex-wrap gap-3 mb-6">
+        <h2 class="section-title flex items-center gap-2">
+          <span>🎯</span>Карта рисков
+        </h2>
+        <div class="flex gap-2">
+          <button onclick="window.print()" class="px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/40 text-blue-400 text-sm hover:bg-blue-500/20">
+            📄 Скачать PDF
+          </button>
+          <button id="btn-share" class="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/40 text-emerald-400 text-sm hover:bg-emerald-500/20">
+            🔗 Поделиться
+          </button>
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-6 items-center">
+        <div>
+          <canvas id="riskRadar" width="380" height="380"></canvas>
+        </div>
+        <div class="space-y-2">
+          {% for cat in category_radar %}
+          <div class="flex items-center justify-between p-2 rounded-lg bg-black/20">
+            <span class="text-sm">{{ cat.label }}</span>
+            <span class="text-sm font-semibold
+              {% if cat.value >= 60 %}text-red-400
+              {% elif cat.value >= 30 %}text-yellow-400
+              {% else %}text-emerald-400{% endif %}">
+              {{ cat.value }}/100
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    {% if score_breakdown %}
+    {# ════════ ВКЛАД ФАКТОРОВ (Business, donut) ════════ #}
+    <div class="card p-6">
+      <h2 class="section-title flex items-center justify-center gap-2 mb-6">
+        <span>🍩</span>Из чего складывается риск
+      </h2>
+      <div class="grid md:grid-cols-2 gap-6 items-center">
+        <div>
+          <canvas id="riskDonut" width="300" height="300"></canvas>
+        </div>
+        <div class="space-y-1 max-h-72 overflow-auto">
+          {% for item in score_breakdown %}
+          <div class="flex items-center justify-between p-2 text-sm">
+            <span class="truncate pr-2">{{ item.label }}</span>
+            <span class="font-semibold text-red-400">+{{ item.points }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if timeline_events %}
+    {# ════════ TIMELINE СОБЫТИЙ (Business) ════════ #}
+    <div class="card p-6">
+      <h2 class="section-title flex items-center justify-center gap-2 mb-6">
+        <span>📅</span>История изменений
+      </h2>
+      <div class="space-y-3">
+        {% for event in timeline_events %}
+        <div class="flex items-start gap-3">
+          <div class="flex-shrink-0 mt-1 w-3 h-3 rounded-full
+            {% if event.kind == 'critical' %}bg-red-500
+            {% elif event.kind == 'warning' %}bg-yellow-500
+            {% else %}bg-blue-500{% endif %}"></div>
+          <div class="flex-1 min-w-0">
+            <div class="text-xs text-gray-400">{{ event.date }}</div>
+            <div class="text-sm">{{ event.title }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% endif %}
+
     {# ════════ АРБИТРАЖНЫЕ СУДЫ ════════ #}
     <div class="card p-6">
       <h2 class="section-title flex items-center justify-center gap-2 mb-6">
@@ -326,5 +408,98 @@
     });
   });
 </script>
+
+{% if is_business %}
+<script>
+  // ── Business: Radar chart (карта рисков) ──
+  (function() {
+    const radarData = {{ category_radar_json|safe }};
+    if (!radarData || !radarData.length) return;
+    const ctx = document.getElementById('riskRadar');
+    if (!ctx) return;
+    new Chart(ctx, {
+      type: 'radar',
+      data: {
+        labels: radarData.map(d => d.label),
+        datasets: [{
+          label: 'Риск',
+          data: radarData.map(d => d.value),
+          fill: true,
+          backgroundColor: 'rgba(239,68,68,0.2)',
+          borderColor: 'rgb(239,68,68)',
+          pointBackgroundColor: 'rgb(239,68,68)',
+        }]
+      },
+      options: {
+        scales: {
+          r: {
+            min: 0, max: 100,
+            ticks: { stepSize: 25, color: '#94a3b8', backdropColor: 'transparent' },
+            grid: { color: 'rgba(148,163,184,0.2)' },
+            angleLines: { color: 'rgba(148,163,184,0.2)' },
+            pointLabels: { color: '#cbd5e1', font: { size: 12 } },
+          }
+        },
+        plugins: { legend: { display: false } },
+      }
+    });
+  })();
+
+  // ── Business: Donut chart (вклад факторов) ──
+  (function() {
+    const items = {{ score_breakdown_json|safe }};
+    if (!items || !items.length) return;
+    const ctx = document.getElementById('riskDonut');
+    if (!ctx) return;
+    // Цвета по категориям
+    const colorByCategory = {
+      legal:        '#f97316',  // orange
+      financial:    '#3b82f6',  // blue
+      tax:          '#a855f7',  // purple
+      operational:  '#eab308',  // yellow
+      reputational: '#ef4444',  // red
+    };
+    new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: items.map(i => i.label),
+        datasets: [{
+          data: items.map(i => i.points),
+          backgroundColor: items.map(i => colorByCategory[i.category] || '#64748b'),
+          borderColor: '#0f172a',
+          borderWidth: 2,
+        }]
+      },
+      options: {
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => `${ctx.label}: +${ctx.parsed} баллов`,
+            }
+          }
+        },
+      }
+    });
+  })();
+
+  // ── Business: «Поделиться» — копирует ссылку отчёта ──
+  (function() {
+    const btn = document.getElementById('btn-share');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(window.location.href);
+        const orig = btn.textContent;
+        btn.textContent = '✓ Скопировано';
+        setTimeout(() => { btn.textContent = orig; }, 2000);
+      } catch (e) {
+        // Fallback для старых браузеров
+        prompt('Скопируйте ссылку:', window.location.href);
+      }
+    });
+  })();
+</script>
+{% endif %}
 </body>
 </html>

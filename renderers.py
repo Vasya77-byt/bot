@@ -594,27 +594,9 @@ def render_profile(
             f"   Bulk-проверки: {_fmt(profile.bulk_today, bulk_limit)}",
         )
 
-    # ── Мониторинг ──
-    if monitoring_count is not None:
-        mon_limit_str = "∞" if monitoring_limit is None else str(monitoring_limit)
-        lines.append("")
-        lines.append(
-            f"👁 Мониторинг: {monitoring_count}/{mon_limit_str} компаний",
-        )
-
-    # ── Реф.программа (только если что-то есть) ──
-    if profile.referrals_count > 0 or profile.referrals_paid_count > 0:
-        from referral_tiers import current_tier
-        tier = current_tier(profile.referrals_paid_count)
-        lines.extend([
-            "",
-            "🤝 Реф.программа:",
-            f"   Приглашено: {profile.referrals_count}",
-            f"   Оплатили: {profile.referrals_paid_count}",
-            f"   Получено бонусных дней: {profile.referral_bonus_days_total}",
-        ])
-        if tier.key != "none":
-            lines.append(f"   Уровень: {tier.emoji} {tier.label}")
+    # Параметры monitoring_count / monitoring_limit оставлены в сигнатуре
+    # для обратной совместимости с вызовами в main.py, но не рендерятся
+    # — счётчик мониторинга и реф.программа доступны в отдельных меню.
 
     # ── Возможности тарифа ──
     lines.extend(["", "─── Возможности ───"])

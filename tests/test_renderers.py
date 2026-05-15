@@ -335,36 +335,25 @@ class TestRenderProfile:
         text = render_profile(p)
         assert "навсегда" in text
 
-    def test_referral_block_when_invited(self):
+    def test_referral_block_not_in_profile(self):
+        """Реф.программа доступна в отдельном меню — в профиле не дублируем."""
         p = UserProfile(
             user_id=1, tariff="free",
             referrals_count=5, referrals_paid_count=2,
             referral_bonus_days_total=30,
         )
         text = render_profile(p)
-        assert "🤝 Реф.программа" in text
-        assert "Приглашено: 5" in text
-        assert "Оплатили: 2" in text
-        assert "Получено бонусных дней: 30" in text
-
-    def test_referral_block_hidden_when_no_invites(self):
-        p = UserProfile(user_id=1, tariff="free")
-        text = render_profile(p)
         assert "🤝 Реф.программа" not in text
+        assert "Приглашено:" not in text
 
-    def test_referral_tier_shown_when_threshold_reached(self):
-        p = UserProfile(
-            user_id=1, tariff="free",
-            referrals_count=3, referrals_paid_count=3,  # Bronze
-        )
-        text = render_profile(p)
-        # Bronze emoji + label
-        assert "🥉" in text or "Bronze" in text or "Бронза" in text or "ронз" in text
-
-    def test_monitoring_shown_when_param_provided(self):
+    def test_monitoring_not_in_profile(self):
+        """Мониторинг отображается в своём меню «Мои компании», не в профиле.
+        В списке фич `👁 Мониторинг` может появиться как отдельная фича —
+        но строка `Мониторинг: N/M` с реальным счётчиком не должна."""
         p = UserProfile(user_id=1, tariff="pro")
         text = render_profile(p, monitoring_count=5, monitoring_limit=30)
-        assert "👁 Мониторинг: 5/30" in text
+        assert "5/30" not in text
+        assert "Мониторинг: 5" not in text
 
 
 class TestRenderComparison:

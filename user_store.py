@@ -85,10 +85,25 @@ def calc_topup_credits(amount_rub: int) -> tuple:
 
 
 PAID_ACTION_PRICES_KOPEKS: Dict[str, int] = {
-    "quick_check":  500,   # 5₽ за краткую проверку
-    "full_check":  1500,   # 15₽ за полный отчёт
-    "ai_analysis": 3000,   # 30₽ за AI-анализ
-    "bulk_inn":     800,   # 8₽ за один ИНН в bulk
+    # Разовые «короткие запросы» — оплачиваются за единицу
+    "quick_check":  500,    # 5₽ за краткую проверку (когда квота исчерпана)
+    "full_check":  1500,    # 15₽ за полный отчёт
+    "ai_analysis": 3000,    # 30₽ за AI-анализ
+    "bulk_inn":     800,    # 8₽ за один ИНН в bulk
+    # Подписки на 30 дней — оплачиваются единым списанием с баланса.
+    # Цены те же что в TARIFF_PRICES, продублированы для удобства
+    # списания через try_spend.
+    "subscribe_start":      50000,    # 500₽
+    "subscribe_pro":        99000,    # 990₽
+    "subscribe_business":  249000,    # 2490₽
+}
+
+
+# Mapping: action-key → tariff-name для подписок (для try_buy_subscription).
+SUBSCRIPTION_ACTION_TO_TARIFF: Dict[str, str] = {
+    "subscribe_start":    "start",
+    "subscribe_pro":      "pro",
+    "subscribe_business": "business",
 }
 
 # Прогрессивные бонусы при пополнении (по сумме платежа).
@@ -477,6 +492,32 @@ class UserStore:
         profile = self.get(user_id)
         profile.add_balance(base_kopeks, bonus_kopeks)
         self.save_profile(profile)
+        return profile
+
+    def try_buy_subscription(
+        self, user_id: int, tariff: str, days: int = 30,
+    ) -> Optional[UserProfile]:
+        """Атомарная покупка подписки С БАЛАНСА юзера.
+
+        Списывает стоимость тарифа и активирует подписку на N дней.
+        Возвращает обновлённый профиль при успехе, None при нехватке
+        баланса или неверном тарифе.
+
+        Это главный способ покупки тарифа в wallet-модели — заменяет
+        прямую оплату эквайрингом. Auto-renewal тоже через этот метод.
+        """
+        if tariff not in TARIFF_PRICES:
+            return None
+        action = f"subscribe_{tariff}"
+        # Списываем (try_spend сам persist'ит при успехе)
+        if not self.try_spend(user_id, action):
+            return None
+        # Активируем подписку. Auto-renew выключаем — повторная покупка
+        # юзером следующего месяца идёт явно (или через try_renew).
+        profile = self.activate_subscription(user_id, tariff, days=days)
+        # activate_subscription выставляет auto_renew=True; в wallet-модели
+        # автопродление работает через списание с баланса каждый месяц,
+        # это OK.
         return profile
 
     def increment_bulk(self, user_id: int, count: int = 1) -> UserProfile:

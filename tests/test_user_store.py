@@ -1113,3 +1113,55 @@ class TestUserStoreWalletHelpers:
         store2 = UserStore(filepath=path)
         # Баланс не изменился
         assert store2.get(1).balance_kopeks == 500
+
+
+class TestTryBuySubscription:
+    """Покупка тарифа с баланса (wallet-модель оплаты подписки)."""
+
+    def test_successful_purchase_activates_subscription(self, store):
+        # Кладём 500₽ — хватит на Start
+        store.add_balance(1, base_kopeks=50000)
+        result = store.try_buy_subscription(1, "start")
+        assert result is not None
+        # Подписка активирована
+        assert result.tariff == "start"
+        assert result.is_subscription_active() is True
+        # Баланс списан
+        assert result.balance_kopeks == 0
+
+    def test_insufficient_balance_returns_none(self, store):
+        # 300₽ — на Start (500₽) не хватит
+        store.add_balance(1, base_kopeks=30000)
+        result = store.try_buy_subscription(1, "start")
+        assert result is None
+        # Баланс не тронут
+        assert store.get(1).balance_kopeks == 30000
+        # Подписка не активирована
+        assert store.get(1).tariff == "free"
+
+    def test_unknown_tariff_returns_none(self, store):
+        store.add_balance(1, base_kopeks=500000)  # 5000₽
+        result = store.try_buy_subscription(1, "enterprise")
+        assert result is None
+        # Баланс не списан на левый тариф
+        assert store.get(1).balance_kopeks == 500000
+
+    def test_pro_price_990(self, store):
+        # Pro = 990₽ = 99000 копеек
+        store.add_balance(1, base_kopeks=99000)
+        assert store.try_buy_subscription(1, "pro") is not None
+        assert store.get(1).balance_kopeks == 0
+
+    def test_business_price_2490(self, store):
+        store.add_balance(1, base_kopeks=249000)  # 2490₽
+        assert store.try_buy_subscription(1, "business") is not None
+        assert store.get(1).balance_kopeks == 0
+
+    def test_bonus_spent_first_on_subscription(self, store):
+        # 600₽ всего: 500₽ база + 100₽ бонус. Покупаем Start (500₽).
+        store.add_balance(1, base_kopeks=50000, bonus_kopeks=10000)
+        store.try_buy_subscription(1, "start")
+        # Сначала тратится бонус → бонус 100₽ полностью + 400₽ с базы
+        profile = store.get(1)
+        assert profile.balance_kopeks == 10000  # 100₽ остатка
+        assert profile.balance_bonus_kopeks == 0  # бонус закончился

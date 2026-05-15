@@ -1424,7 +1424,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник арбитражных дел не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Суды» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text("⚖️ Запрашиваю арбитражные дела...")
@@ -1440,8 +1441,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zakupki.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник госзакупок не настроен (ZAKUPKI_API_URL).\n"
-                    "Для подключения сообщите админу: @YRS75",
+                    "🔧 Раздел «Контракты» в данный момент подключается. "
+                    "Попробуйте позже.",
                 )
                 return
             await callback_query.message.reply_text("📦 Запрашиваю данные по контрактам...")
@@ -1464,7 +1465,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник финансовых данных не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Финансы» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text("📊 Собираю финансовый отчёт...")
@@ -1501,7 +1503,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник связей не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Связи» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text(
@@ -1518,7 +1521,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник истории не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «История» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text(
@@ -1560,7 +1564,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник ЕГРЮЛ не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «ЕГРЮЛ» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             card = await zchb.get_card(inn_part)
@@ -1636,15 +1641,10 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 content = build_kp_pdf(title, body, company)
             except Exception as exc:
                 logger.exception("PDF build failed for %s: %s", inn_part, exc)
-                error_text = "⚠️ Не удалось собрать PDF.\n"
-                if "шрифт не найден" in str(exc).lower() or "font" in str(exc).lower():
-                    error_text += (
-                        "На сервере не установлен шрифт с поддержкой кириллицы. "
-                        "Сообщите в поддержку: @YRS75"
-                    )
-                else:
-                    error_text += "Сохраните текст отчёта из чата или попробуйте ещё раз."
-                await callback_query.message.reply_text(error_text)
+                await callback_query.message.reply_text(
+                    "📄 PDF-отчёт временно недоступен. "
+                    "Попробуйте ещё раз или сохраните текст из чата."
+                )
                 return
             filename = f"report_{inn_part}.pdf"
             doc = BytesIO(content)
@@ -1657,8 +1657,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("PDF send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ PDF собрался, но Telegram отказался принимать файл. "
-                    "Сообщите в поддержку: @YRS75"
+                    "📄 Не удалось отправить PDF. Попробуйте ещё раз."
                 )
             return
 
@@ -1702,15 +1701,9 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 content = build_company_card_pdf(company, sec_result)
             except Exception as exc:
                 logger.exception("Card PDF build failed for %s: %s", inn_part, exc)
-                error_text = "⚠️ Не удалось собрать карточку.\n"
-                if "шрифт" in str(exc).lower() or "font" in str(exc).lower():
-                    error_text += (
-                        "На сервере не установлен шрифт с поддержкой кириллицы. "
-                        "Сообщите в поддержку: @YRS75"
-                    )
-                else:
-                    error_text += "Попробуйте ещё раз или сообщите в поддержку."
-                await callback_query.message.reply_text(error_text)
+                await callback_query.message.reply_text(
+                    "📋 Карточка временно недоступна. Попробуйте ещё раз."
+                )
                 return
             filename = f"card_{inn_part}.pdf"
             doc = BytesIO(content)
@@ -1723,8 +1716,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("Card PDF send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ Карточка собралась, но Telegram отказался принимать файл. "
-                    "Сообщите в поддержку: @YRS75",
+                    "📋 Не удалось отправить карточку. Попробуйте ещё раз."
                 )
             return
 
@@ -1768,8 +1760,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("Export send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ Не удалось отправить файл. Попробуйте ещё раз или "
-                    "сообщите в поддержку: @YRS75",
+                    "📊 Не удалось отправить файл. Попробуйте ещё раз."
                 )
             return
 
@@ -1798,7 +1789,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             else:
                 await callback_query.message.reply_text(
-                    "❌ Не удалось получить ИИ-анализ. Проверьте GIGACHAT_CREDENTIALS в .env"
+                    "🤖 ИИ-анализ временно недоступен. "
+                    "Попробуйте через несколько минут."
                 )
             return
 

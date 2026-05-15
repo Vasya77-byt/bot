@@ -70,6 +70,16 @@ TARIFF_FULL_LIMITS: Dict[str, Optional[int]] = {
     "business": 150,
 }
 
+# Bulk-проверка (Block C, Step C1): отдельный счётчик ИНН в день.
+# Не отъедает Full-квоту — пользователь может делать обычные проверки
+# параллельно с bulk-загрузками. Per-batch cap отдельно — см. BULK_MAX_PER_REQUEST.
+TARIFF_BULK_LIMITS: Dict[str, Optional[int]] = {
+    "free": 0,
+    "start": 0,
+    "pro": 30,
+    "business": 100,
+}
+
 # Лимиты подписок на мониторинг ИНН (одновременно отслеживаемых)
 TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
     "free": 0,         # на free мониторинг недоступен
@@ -166,6 +176,8 @@ class UserProfile:
     # Quick/Full модель (Step 3): два счётчика для экономии бюджета API.
     quick_today: int = 0         # краткие проверки (L1, ~1 запрос)
     full_today: int = 0          # полные отчёты (L2+, ~3-5 запросов)
+    # Bulk-проверка (Step C1): отдельный счётчик ИНН в день для bulk-загрузок.
+    bulk_today: int = 0          # ИНН, обработанных через bulk-upload сегодня
     # Подписка
     tariff_expires_at: str = ""      # ISO datetime в UTC, пусто для free
     subscription_operation_id: str = ""  # operationId подписки в Точке
@@ -213,6 +225,7 @@ class UserProfile:
             self.checks_today = 0
             self.quick_today = 0
             self.full_today = 0
+            self.bulk_today = 0
             self.checks_date = today
 
     def _monthly_active(self) -> bool:
@@ -292,6 +305,27 @@ class UserProfile:
         self.reset_if_new_day()
         self.full_today += 1
         self.checks_total += 1
+
+    def can_bulk(self, count: int = 1) -> bool:
+        """Можно ли обработать ещё `count` ИНН в bulk сегодня."""
+        self.reset_if_new_day()
+        limit = TARIFF_BULK_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return True
+        return self.bulk_today + count <= limit
+
+    def remaining_bulk(self) -> Optional[int]:
+        """Остаток ИНН для bulk на сегодня; None — безлимит, 0 — недоступен."""
+        self.reset_if_new_day()
+        limit = TARIFF_BULK_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return None
+        return max(0, limit - self.bulk_today)
+
+    def increment_bulk(self, count: int = 1) -> None:
+        self.reset_if_new_day()
+        self.bulk_today += count
+        self.checks_total += count
 
     def has_completed_onboarding(self) -> bool:
         """Прошёл ли клиент обязательные шаги: оферта принята + телефон."""
@@ -401,6 +435,13 @@ class UserStore:
         """Инкремент счётчика полных отчётов (L2+)."""
         profile = self.get(user_id)
         profile.increment_full()
+        self.save_profile(profile)
+        return profile
+
+    def increment_bulk(self, user_id: int, count: int = 1) -> UserProfile:
+        """Инкремент счётчика bulk-проверок на N ИНН."""
+        profile = self.get(user_id)
+        profile.increment_bulk(count)
         self.save_profile(profile)
         return profile
 

@@ -196,6 +196,126 @@ def build_kp_png(title: str, body: str, company: Optional[CompanyData] = None, w
     return buffer.getvalue()
 
 
+def build_bulk_xlsx(results: list, filename: str = "bulk_check.xlsx") -> bytes:
+    """Сборка Excel-файла из списка BulkResult.
+
+    Использует openpyxl (lazy-import — не подгружаем при обычных
+    операциях). Если openpyxl не установлен, fallback'имся на CSV.
+
+    Каждая строка — один ИНН с базовыми данными:
+    ИНН / Название / ОГРН / Статус / Директор / Регион / ОКВЭД /
+    Дата регистрации / Возраст (лет) / Комментарий.
+
+    Column auto-width, заголовок жирным, ошибочные строки помечены
+    в колонке «Комментарий».
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError:
+        # Fallback: CSV в bytes — Excel откроет, но без форматирования
+        return _build_bulk_csv(results)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Контрагенты"
+
+    headers = [
+        "ИНН", "Название", "ОГРН", "Статус", "Директор",
+        "Регион", "ОКВЭД", "ОКВЭД-описание",
+        "Дата регистрации", "Возраст (лет)", "Комментарий",
+    ]
+    ws.append(headers)
+    # Стиль заголовка
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="2481CC")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+
+    error_fill = PatternFill("solid", fgColor="FFE5E5")
+    for r in results:
+        comment = ""
+        if r.error == "not_found":
+            comment = "Не найдена"
+        elif r.error == "quota_exhausted":
+            comment = "Лимит API — попробуйте позже"
+        elif r.error:
+            comment = "Ошибка проверки"
+        row = [
+            r.inn or "",
+            r.name or "",
+            r.ogrn or "",
+            r.status or "",
+            r.director or "",
+            r.region or "",
+            r.okved_main or "",
+            r.okved_name or "",
+            r.reg_date or "",
+            r.age_years if r.age_years is not None else "",
+            comment,
+        ]
+        ws.append(row)
+        if r.error:
+            # Подсвечиваем строки с ошибкой розовым
+            for cell in ws[ws.max_row]:
+                cell.fill = error_fill
+
+    # Auto-width: по самой длинной ячейке в колонке (clamp на 50)
+    for col_idx, _ in enumerate(headers, start=1):
+        max_len = max(
+            (
+                len(str(ws.cell(row=r, column=col_idx).value or ""))
+                for r in range(1, ws.max_row + 1)
+            ),
+            default=10,
+        )
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_bulk_csv(results: list) -> bytes:
+    """Fallback: CSV-байты, если openpyxl не установлен.
+
+    BOM добавляется для совместимости с русским Excel — иначе он
+    разваливает кодировку при двойном клике."""
+    import csv
+    import io
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=";")
+    writer.writerow([
+        "ИНН", "Название", "ОГРН", "Статус", "Директор",
+        "Регион", "ОКВЭД", "ОКВЭД-описание",
+        "Дата регистрации", "Возраст (лет)", "Комментарий",
+    ])
+    for r in results:
+        comment = ""
+        if r.error == "not_found":
+            comment = "Не найдена"
+        elif r.error == "quota_exhausted":
+            comment = "Лимит API — попробуйте позже"
+        elif r.error:
+            comment = "Ошибка проверки"
+        writer.writerow([
+            r.inn or "",
+            r.name or "",
+            r.ogrn or "",
+            r.status or "",
+            r.director or "",
+            r.region or "",
+            r.okved_main or "",
+            r.okved_name or "",
+            r.reg_date or "",
+            r.age_years if r.age_years is not None else "",
+            comment,
+        ])
+    return ("﻿" + out.getvalue()).encode("utf-8")
+
+
 def _company_block(company: CompanyData) -> str:
     return "\n".join(
         [

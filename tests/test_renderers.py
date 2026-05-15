@@ -280,8 +280,8 @@ class TestRenderProfile:
         )
         text = render_profile(p)
         assert "Free" in text
-        # Free: 5 проверок в день
-        assert "Проверок сегодня: 3/5" in text
+        # Free: 3 проверки в день
+        assert "Проверок сегодня: 3/3" in text
         # Bulk не показываем для Free (лимит 0)
         assert "Bulk-проверки" not in text
         assert "Всего проверок: 10" in text

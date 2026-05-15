@@ -871,11 +871,11 @@ class TestUnifiedChecksLimits:
         p = UserProfile(user_id=1)
         assert p.checks_today == 0
 
-    def test_free_limit_5(self):
+    def test_free_limit_3(self):
         p = UserProfile(user_id=1, tariff="free")
-        assert p.remaining_checks() == 5
+        assert p.remaining_checks() == 3
         assert p.can_check() is True
-        assert p.daily_limit() == 5
+        assert p.daily_limit() == 3
 
     def test_start_limit_20(self):
         future = datetime.now(timezone.utc) + timedelta(days=30)
@@ -905,11 +905,11 @@ class TestUnifiedChecksLimits:
         p.increment()
         assert p.checks_today == 2
         assert p.checks_total == 2
-        assert p.remaining_checks() == 3  # 5 - 2
+        assert p.remaining_checks() == 1  # 3 - 2
 
     def test_blocks_after_limit(self):
         p = UserProfile(user_id=1, tariff="free")
-        for _ in range(5):
+        for _ in range(3):
             p.increment()
         assert p.can_check() is False
         assert p.remaining_checks() == 0
@@ -928,7 +928,7 @@ class TestUnifiedChecksLimits:
             user_id=1, tariff="pro", tariff_expires_at=_iso(past),
         )
         # Просрочен → effective_tariff=free → лимит free
-        assert p.remaining_checks() == 5
+        assert p.remaining_checks() == 3
 
     def test_lifetime_pro_grants_pro_limit(self):
         p = UserProfile(user_id=1, tariff="free", lifetime_tariff="pro")

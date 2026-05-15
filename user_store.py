@@ -45,7 +45,7 @@ STORAGE_FILE = os.getenv("USERS_FILE", "users.json")
 # юзер сначала видит short-карточку, потом полный отчёт по кнопке.
 # Но СЧЁТЧИК один: каждая проверка декрементирует одну единицу.
 TARIFF_LIMITS: Dict[str, Optional[int]] = {
-    "free": 5,
+    "free": 3,
     "start": 20,
     "pro": 40,
     "business": 80,

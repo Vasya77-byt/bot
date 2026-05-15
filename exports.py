@@ -278,6 +278,156 @@ def build_bulk_xlsx(results: list, filename: str = "bulk_check.xlsx") -> bytes:
     return buf.getvalue()
 
 
+def build_company_card_pdf(
+    company: CompanyData, security_result=None,
+) -> bytes:
+    """Структурированная PDF-карточка контрагента (D2).
+
+    В отличие от build_kp_pdf (текстовый дамп отчёта в формате КП),
+    эта карточка организована блоками-секциями: основные данные,
+    регистрация, финансы, риски. Подходит для бухгалтерии/юристов
+    как due-diligence document.
+
+    Секции:
+    1. Шапка с названием и ИНН
+    2. Основные данные (5-7 полей)
+    3. Регистрация и активность
+    4. Финансы (если есть)
+    5. Риски (security_result) — список проверок с маркерами
+
+    Footer: дата генерации, бренд MondayCompany.
+    """
+    from datetime import datetime
+    font_path = _find_truetype_font()
+    if not font_path:
+        raise FontNotFoundError(
+            "TrueType-шрифт не найден. Установите fonts-dejavu-core "
+            "или положите DejaVuSans.ttf в каталог проекта.",
+        )
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("CustomFont", "", font_path)
+
+    # ── Шапка ──
+    pdf.set_font("CustomFont", size=16)
+    title = "Карточка контрагента"
+    pdf.cell(0, 10, text=_pdf_safe(title), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("CustomFont", size=12)
+    if company.name:
+        pdf.cell(0, 8, text=_pdf_safe(company.name), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("CustomFont", size=10)
+    pdf.cell(
+        0, 6,
+        text=_pdf_safe(f"ИНН: {company.inn or '—'} · ОГРН: {company.ogrn or '—'}"),
+        new_x="LMARGIN", new_y="NEXT",
+    )
+    pdf.ln(4)
+
+    def _section(title: str, rows: list) -> None:
+        """Помощник: секция с заголовком и парами ключ-значение.
+
+        new_x="LMARGIN" критичен: без него multi_cell оставляет курсор
+        на правом краю предыдущей строки, и следующий вызов получает
+        width=0 → 'Not enough horizontal space' exception.
+        """
+        pdf.set_font("CustomFont", size=12)
+        pdf.cell(0, 7, text=_pdf_safe(title), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("CustomFont", size=10)
+        for label, value in rows:
+            if value in (None, "", "не указано"):
+                value = "—"
+            pdf.multi_cell(
+                0, 6, text=_pdf_safe(f"{label}: {value}"),
+                new_x="LMARGIN", new_y="NEXT",
+            )
+        pdf.ln(2)
+
+    # ── Основные данные ──
+    _section("1. Основные данные", [
+        ("Статус", company.status),
+        ("Руководитель", company.director),
+        ("Регион", company.region),
+        ("Адрес", company.address),
+        ("КПП", company.kpp),
+    ])
+
+    # ── Регистрация и активность ──
+    age_str = f"{company.age_years} лет" if company.age_years is not None else "—"
+    _section("2. Регистрация и активность", [
+        ("Дата регистрации", company.reg_date),
+        ("Возраст", age_str),
+        ("ОКВЭД", company.okved_main),
+        ("Описание ОКВЭД", company.okved_name),
+    ])
+
+    # ── Финансы ──
+    capital_str = (
+        f"{company.capital:,.0f} ₽".replace(",", " ")
+        if company.capital else "—"
+    )
+    employees_str = (
+        f"{company.employees_count:,}".replace(",", " ")
+        if company.employees_count else "—"
+    )
+    revenue_str = (
+        f"{company.revenue_last_year:,.0f} ₽".replace(",", " ")
+        if company.revenue_last_year else "—"
+    )
+    profit_str = (
+        f"{company.profit_last_year:,.0f} ₽".replace(",", " ")
+        if company.profit_last_year else "—"
+    )
+    _section("3. Финансы", [
+        ("Уставный капитал", capital_str),
+        ("Сотрудники", employees_str),
+        ("Выручка за год", revenue_str),
+        ("Прибыль за год", profit_str),
+    ])
+
+    # ── Риски (если security_result доступен) ──
+    if security_result is not None:
+        pdf.set_font("CustomFont", size=12)
+        pdf.cell(
+            0, 7, text=_pdf_safe("4. Проверки безопасности"),
+            new_x="LMARGIN", new_y="NEXT",
+        )
+        pdf.set_font("CustomFont", size=10)
+        # security_result обычно имеет .checks или .items с парами
+        # (name, status, details). Используем универсальный подход:
+        # пытаемся получить str(security_result), либо итерируемся.
+        sec_text = ""
+        try:
+            if hasattr(security_result, "items"):
+                for item in security_result.items:
+                    marker = "⚠️" if getattr(item, "is_critical", False) else "✓"
+                    name = getattr(item, "name", "проверка")
+                    status = getattr(item, "status", "")
+                    sec_text += f"{marker} {name}: {status}\n"
+            else:
+                sec_text = str(security_result)
+        except Exception:
+            sec_text = "Результаты проверок не удалось разобрать."
+        if not sec_text.strip():
+            sec_text = "Проверки не обнаружили существенных рисков."
+        pdf.multi_cell(
+            0, 6, text=_pdf_safe(sec_text),
+            new_x="LMARGIN", new_y="NEXT",
+        )
+        pdf.ln(2)
+
+    # ── Footer ──
+    pdf.set_font("CustomFont", size=8)
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sources = company.source or "—"
+    footer = f"Сгенерировано MondayCompany · {generated} · Источники: {sources}"
+    pdf.cell(0, 5, text=_pdf_safe(footer), new_x="LMARGIN", new_y="NEXT")
+
+    output = BytesIO()
+    pdf.output(output)
+    return output.getvalue()
+
+
 def build_company_xlsx(company: CompanyData) -> bytes:
     """Excel-карточка по одной компании.
 

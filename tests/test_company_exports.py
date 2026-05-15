@@ -124,3 +124,50 @@ class TestBuild1CCsv:
         data = build_company_1c_csv(company)
         assert isinstance(data, bytes)  # не упало
         # cp1251 либо смог либо подставил '?' — главное не исключение
+
+
+class TestBuildCompanyCardPdf:
+    """D2: структурированная PDF-карточка контрагента."""
+
+    def test_returns_pdf_bytes(self, full_company):
+        from exports import build_company_card_pdf
+        data = build_company_card_pdf(full_company)
+        assert isinstance(data, bytes)
+        # PDF начинается с "%PDF"
+        assert data[:4] == b"%PDF"
+
+    def test_works_with_sparse_company(self, sparse_company):
+        from exports import build_company_card_pdf
+        data = build_company_card_pdf(sparse_company)
+        assert data[:4] == b"%PDF"
+        # Sparse не должен падать — пустые поля рисуются как «—»
+
+    def test_works_without_security_result(self, full_company):
+        from exports import build_company_card_pdf
+        data = build_company_card_pdf(full_company, security_result=None)
+        assert data[:4] == b"%PDF"
+
+    def test_works_with_security_result(self, full_company):
+        from exports import build_company_card_pdf
+
+        # Минимальная заглушка SecurityResult — должна не уронить рендер
+        class FakeItem:
+            def __init__(self, name, status, is_critical=False):
+                self.name = name
+                self.status = status
+                self.is_critical = is_critical
+
+        class FakeResult:
+            items = [
+                FakeItem("ФССП", "не найден"),
+                FakeItem("Банкротство", "найдено", is_critical=True),
+            ]
+
+        data = build_company_card_pdf(full_company, security_result=FakeResult())
+        assert data[:4] == b"%PDF"
+
+    def test_handles_corrupt_security_result(self, full_company):
+        """Если security_result имеет неожиданную форму — не падаем."""
+        from exports import build_company_card_pdf
+        data = build_company_card_pdf(full_company, security_result="not-an-object")
+        assert data[:4] == b"%PDF"

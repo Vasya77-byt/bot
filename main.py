@@ -1764,10 +1764,17 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             disable_web_page_preview=True,
             reply_markup=_company_actions_keyboard(inn, user_id),
         )
-        if user_store.get(user_id).effective_tariff() in ("pro", "business"):
+        profile_after = user_store.get(user_id)
+        if profile_after.effective_tariff() in ("pro", "business"):
             asyncio.create_task(
                 _send_ai_insights(callback_query.message, company, sec_result),
             )
+        else:
+            # D1: после первого Full-отчёта Free-юзеру показываем upsell.
+            # One-shot через флаг — не спамим повторно.
+            if not profile_after.first_full_upsell_shown:
+                await _send_first_full_upsell(callback_query.message)
+                user_store.mark_first_full_upsell_shown(user_id)
         return
 
     # Выбор компании из результатов поиска по названию
@@ -2709,6 +2716,32 @@ async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
     )
 
 
+async def _send_first_full_upsell(message) -> None:
+    """One-shot промо-плашка для Free-юзера сразу после первого
+    полного отчёта (D1). Цель — мягкий апсейл на платные тарифы,
+    показывая что они получат.
+
+    Вызывается ровно один раз за всю жизнь юзера; флаг
+    first_full_upsell_shown гарантирует отсутствие повторов.
+    """
+    text = (
+        "🎉 *Вы получили свой первый полный отчёт!*\n\n"
+        "На бесплатном тарифе у вас 5 быстрых проверок и 1 полный отчёт в день.\n\n"
+        "💎 *Платные тарифы дают:*\n"
+        "• Start — до 5 полных отчётов и мониторинг 3 ИНН\n"
+        "• Pro — 30 полных, ИИ-анализ рисков, мониторинг 30 ИНН\n"
+        "• Business — 150 полных + массовая проверка + Excel/1С-экспорт\n\n"
+        "Все тарифы — от 500 ₽/мес. Окупаются с первого крупного контракта."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Посмотреть тарифы", callback_data="show_tariffs")],
+    ])
+    try:
+        await message.reply_text(text, reply_markup=keyboard)
+    except Exception as exc:
+        logger.warning("First-full upsell send failed: %s", exc)
+
+
 async def _run_bulk_check(message, user_id: int, content: bytes) -> None:
     """Bulk-проверка (Step C1): парсит ИНН из контента, проверяет
     лимиты и квоты, асинхронно обрабатывает с троттлингом, отдаёт
@@ -3205,6 +3238,8 @@ async def handle_start(client: Client, message) -> None:
         "– Следить за изменениями в компании\n"
         "– Получать помощь от ИИ-агента\n"
         "– Посмотреть связи компании и её историю\n\n"
+        "🆓 Бесплатно: 5 быстрых проверок + 1 полный отчёт в день.\n"
+        "💎 Тарифы от 500 ₽/мес — больше проверок, ИИ-анализ, мониторинг.\n\n"
         "/menu — показать меню\n"
         "/documents — правовые документы\n"
         "/referral — реферальная программа\n\n"

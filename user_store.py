@@ -196,6 +196,9 @@ class UserProfile:
     last_expiry_reminder_date: str = ""
     # Флаг, что юзер уже получил уведомление о переходе на Free (один раз)
     expired_notice_sent: bool = False
+    # Флаг, что Free-юзеру уже показали upsell на тарифы после первой
+    # полной проверки (D1) — один раз навсегда, без повторов.
+    first_full_upsell_shown: bool = False
     email: str = ""                  # email для чека
     phone: str = ""                  # телефон в формате +79991234567
     full_name: str = ""              # ФИО клиента (опц., из профиля)
@@ -443,6 +446,15 @@ class UserStore:
         profile = self.get(user_id)
         profile.increment_bulk(count)
         self.save_profile(profile)
+        return profile
+
+    def mark_first_full_upsell_shown(self, user_id: int) -> UserProfile:
+        """One-shot: помечает, что upsell после первого Full-отчёта
+        уже показан (D1). Идемпотентно — повторный вызов безопасен."""
+        profile = self.get(user_id)
+        if not profile.first_full_upsell_shown:
+            profile.first_full_upsell_shown = True
+            self.save_profile(profile)
         return profile
 
     def set_tariff(self, user_id: int, tariff: str) -> UserProfile:

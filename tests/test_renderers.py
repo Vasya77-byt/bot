@@ -272,31 +272,30 @@ class TestRenderProposal:
 
 
 class TestRenderProfile:
-    def test_free_user_has_quick_full_counters(self):
+    def test_free_user_shows_unified_counter(self):
         p = UserProfile(
             user_id=1, tariff="free",
-            quick_today=2, full_today=1,
+            checks_today=3,
             checks_total=10, checks_date=date.today().isoformat(),
         )
         text = render_profile(p)
         assert "Free" in text
-        # Free: Quick=5, Full=1, Bulk=0
-        assert "Быстрые проверки: 2/5" in text
-        assert "Полные отчёты: 1/1" in text
+        # Free: 5 проверок в день
+        assert "Проверок сегодня: 3/5" in text
         # Bulk не показываем для Free (лимит 0)
         assert "Bulk-проверки" not in text
         assert "Всего проверок: 10" in text
 
-    def test_business_shows_unlimited_quick(self):
+    def test_business_shows_80_limit(self):
         future = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
         p = UserProfile(
             user_id=1, tariff="business",
             tariff_expires_at=future,
-            quick_today=99, checks_date=date.today().isoformat(),
+            checks_today=15, checks_date=date.today().isoformat(),
         )
         text = render_profile(p)
-        # Business Quick = ∞
-        assert "Быстрые проверки: 99/∞" in text
+        # Business: 80 проверок в день
+        assert "Проверок сегодня: 15/80" in text
         # Business Bulk = 100
         assert "Bulk-проверки: 0/100" in text
 

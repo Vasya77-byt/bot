@@ -5,13 +5,3 @@ services:
     build: .
     env_file:
       - .env
-    depends_on:
-      - sbis-mock
-
-  sbis-mock:
-    build: .
-    command: ["python", "sbis_mock.py"]
-    environment:
-      - SBIS_MOCK_PORT=8081
-    ports:
-      - "8081:8081"

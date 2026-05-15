@@ -1,8 +1,10 @@
 """Тесты monitoring — snapshot/diff/format для уведомлений."""
 
 from monitoring import (
+    EventCategory,
     FieldChange,
     TRACKED_FIELDS,
+    categorize_change,
     diff_snapshots,
     format_change_message,
     make_snapshot,
@@ -183,3 +185,126 @@ class TestFormatChangeMessage:
         assert "Статус: A → B" in text
         assert "Руководитель: Иван → Пётр" in text
         assert "Производств ФССП: 1 → 5" in text
+
+
+class TestCategorizeChange:
+    """D3: классификация одного изменения в EventCategory."""
+
+    def test_status_to_bankrupt(self):
+        ch = FieldChange("status", "Статус", "Действующая", "Банкрот")
+        assert categorize_change(ch) == EventCategory.BANKRUPTCY
+
+    def test_status_to_liquidation(self):
+        ch = FieldChange("status", "Статус", "Действующая", "Ликвидируется")
+        assert categorize_change(ch) == EventCategory.LIQUIDATION
+
+    def test_status_reorg(self):
+        ch = FieldChange("status", "Статус", "Действующая", "Реорганизация")
+        assert categorize_change(ch) == EventCategory.REORG
+
+    def test_director_change(self):
+        ch = FieldChange("director", "Руководитель", "Иван", "Пётр")
+        assert categorize_change(ch) == EventCategory.DIRECTOR_CHANGE
+
+    def test_fssp_count_increase(self):
+        ch = FieldChange("fssp_count", "Производств ФССП", 2, 5)
+        assert categorize_change(ch) == EventCategory.NEW_LAWSUITS
+
+    def test_fssp_count_decrease(self):
+        ch = FieldChange("fssp_count", "Производств ФССП", 5, 2)
+        assert categorize_change(ch) == EventCategory.LAWSUITS_DECREASE
+
+    def test_risk_increase_low_to_high(self):
+        ch = FieldChange("risk_level", "Уровень риска", "low", "high")
+        assert categorize_change(ch) == EventCategory.RISK_INCREASE
+
+    def test_risk_increase_med_to_critical(self):
+        ch = FieldChange("risk_level", "Уровень риска", "medium", "critical")
+        assert categorize_change(ch) == EventCategory.RISK_INCREASE
+
+    def test_risk_decrease(self):
+        ch = FieldChange("risk_level", "Уровень риска", "high", "medium")
+        assert categorize_change(ch) == EventCategory.RISK_DECREASE
+
+    def test_capital_decrease(self):
+        ch = FieldChange("capital", "Уст. капитал", 1_000_000.0, 500_000.0)
+        assert categorize_change(ch) == EventCategory.CAPITAL_DECREASE
+
+    def test_capital_increase(self):
+        ch = FieldChange("capital", "Уст. капитал", 100_000.0, 500_000.0)
+        assert categorize_change(ch) == EventCategory.CAPITAL_INCREASE
+
+    def test_address_change(self):
+        ch = FieldChange("address", "Адрес", "Москва", "СПб")
+        assert categorize_change(ch) == EventCategory.ADDRESS_CHANGE
+
+    def test_name_change(self):
+        ch = FieldChange("name", "Название", "ООО А", "ООО Б")
+        assert categorize_change(ch) == EventCategory.NAME_CHANGE
+
+    def test_okved_change(self):
+        ch = FieldChange("okved_main", "ОКВЭД", "62.01", "47.11")
+        assert categorize_change(ch) == EventCategory.OKVED_CHANGE
+
+    def test_unknown_field_is_other(self):
+        ch = FieldChange("unknown_field", "Что-то", "a", "b")
+        assert categorize_change(ch) == EventCategory.OTHER
+
+
+class TestFormatChangeMessageCategorized:
+    """D3: проверяем что новый формат группирует и помечает события."""
+
+    def test_bankruptcy_message_has_critical_marker(self):
+        ch = FieldChange("status", "Статус", "Действующая", "Банкрот")
+        text = format_change_message("123", "ООО Тест", [ch])
+        assert "🚨" in text  # critical эмодзи
+        assert "Банкротство" in text  # категория-секция
+        assert "Серьёзное изменение" in text
+        # Рекомендация для critical событий
+        assert "приостанов" in text.lower() or "проверить" in text.lower()
+
+    def test_director_change_warning_marker(self):
+        ch = FieldChange("director", "Руководитель", "Иван", "Пётр")
+        text = format_change_message("123", "X", [ch])
+        assert "⚠️" in text or "Внимание" in text
+        assert "Смена руководителя" in text
+
+    def test_fssp_increase_emoji(self):
+        ch = FieldChange("fssp_count", "Производств ФССП", 1, 10)
+        text = format_change_message("123", "X", [ch])
+        assert "⚖️" in text
+        assert "Новые производства ФССП" in text
+
+    def test_positive_event_uses_positive_tone(self):
+        ch = FieldChange("fssp_count", "Производств ФССП", 5, 1)
+        text = format_change_message("123", "X", [ch])
+        assert "✅" in text
+        # Положительные события — отдельная подача
+        assert "меньше" in text.lower() or "позитивн" in text.lower() or "снизи" in text.lower()
+
+    def test_critical_overrides_info(self):
+        """Если есть critical + info — общий заголовок critical."""
+        changes = [
+            FieldChange("status", "Статус", "Действующая", "Банкрот"),
+            FieldChange("okved_main", "ОКВЭД", "62.01", "47.11"),
+        ]
+        text = format_change_message("123", "X", changes)
+        assert "🚨" in text  # critical верх
+        assert "Банкротство" in text
+        assert "Смена основного ОКВЭД" in text
+
+    def test_sections_separated(self):
+        changes = [
+            FieldChange("status", "Статус", "Действующая", "Банкрот"),
+            FieldChange("director", "Руководитель", "Иван", "Пётр"),
+        ]
+        text = format_change_message("123", "X", changes)
+        # Каждая категория — на отдельной строке с эмодзи
+        assert "🚨 Банкротство" in text
+        assert "👤 Смена руководителя" in text
+
+    def test_info_only_simple_header(self):
+        ch = FieldChange("name", "Название", "ООО А", "ООО Б")
+        text = format_change_message("123", "X", [ch])
+        assert "🔔" in text or "Изменения" in text
+

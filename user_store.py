@@ -61,6 +61,51 @@ TARIFF_BULK_LIMITS: Dict[str, Optional[int]] = {
     "business": 100,
 }
 
+# Кошелёк (Wallet): цены платных действий с баланса юзера.
+# Хранится в КОПЕЙКАХ — чтобы избежать float-погрешностей.
+# Юзер пополняет произвольной суммой, тратит на действия по этим ценам.
+# Доступ из main.py / subscription.py через try_spend(action).
+def calc_topup_bonus_percent(amount_rub: int) -> int:
+    """Возвращает процент бонуса для суммы пополнения.
+    Применяется по убыванию порога — первый матчинг побеждает."""
+    for threshold, bonus_pct in TOPUP_BONUS_THRESHOLDS_RUB:
+        if amount_rub >= threshold:
+            return bonus_pct
+    return 0
+
+
+def calc_topup_credits(amount_rub: int) -> tuple:
+    """По сумме оплаты возвращает (base_kopeks, bonus_kopeks).
+    base — возвратная часть, bonus — невозвратный бонус.
+    """
+    base_kopeks = amount_rub * 100
+    bonus_pct = calc_topup_bonus_percent(amount_rub)
+    bonus_kopeks = base_kopeks * bonus_pct // 100
+    return base_kopeks, bonus_kopeks
+
+
+PAID_ACTION_PRICES_KOPEKS: Dict[str, int] = {
+    "quick_check":  500,   # 5₽ за краткую проверку
+    "full_check":  1500,   # 15₽ за полный отчёт
+    "ai_analysis": 3000,   # 30₽ за AI-анализ
+    "bulk_inn":     800,   # 8₽ за один ИНН в bulk
+}
+
+# Прогрессивные бонусы при пополнении (по сумме платежа).
+# Порог в рублях → бонус в процентах. Бонус НЕВОЗВРАТЕН по оферте,
+# база — возвращаемая часть. Применяется по убыванию порога:
+# первый матчинг → этот бонус.
+TOPUP_BONUS_THRESHOLDS_RUB: list = [
+    (5000, 20),  # от 5000₽ → +20%
+    (3000, 15),  # от 3000₽ → +15%
+    (1000, 10),  # от 1000₽ → +10%
+]
+
+# Минимальная и максимальная сумма пополнения (защита от error'ов).
+TOPUP_MIN_RUB = 100
+TOPUP_MAX_RUB = 10000
+
+
 # Лимиты подписок на мониторинг ИНН (одновременно отслеживаемых)
 TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
     "free": 0,         # на free мониторинг недоступен
@@ -152,6 +197,14 @@ class UserProfile:
     checks_today: int = 0        # общий счётчик проверок за сегодня
     checks_date: str = ""        # ISO дата последнего сброса: "2024-01-15"
     checks_total: int = 0
+    # Кошелёк (Wallet) — баланс в копейках. Юзер пополняет, тратит
+    # на платные действия. Не сбрасывается с течением времени.
+    # См. PAID_ACTION_PRICES_KOPEKS для расценок.
+    balance_kopeks: int = 0
+    # Сколько копеек из текущего баланса — невозвратный бонус (за объём
+    # при пополнении). Возврат разрешён только в пределах
+    # (balance_kopeks - balance_bonus_kopeks).
+    balance_bonus_kopeks: int = 0
     # Bulk-проверка (Step C1): отдельный счётчик ИНН в день для bulk-загрузок.
     bulk_today: int = 0          # ИНН, обработанных через bulk-upload сегодня
     # Подписка
@@ -258,6 +311,48 @@ class UserProfile:
         self.checks_today += 1
         self.checks_total += 1
 
+    # ── Кошелёк (Wallet) ──
+
+    @property
+    def balance_rub(self) -> float:
+        """Баланс в рублях (для отображения)."""
+        return self.balance_kopeks / 100
+
+    def can_afford(self, action: str) -> bool:
+        """Хватает ли баланса на действие. Неизвестное действие → False."""
+        price = PAID_ACTION_PRICES_KOPEKS.get(action)
+        if price is None:
+            return False
+        return self.balance_kopeks >= price
+
+    def try_spend(self, action: str) -> bool:
+        """Атомарно списывает с баланса стоимость действия.
+
+        Возвращает True если списано, False если денег не хватает или
+        action неизвестен. При успешном списании баланс уменьшается,
+        бонусная часть тратится В ПЕРВУЮ ОЧЕРЕДЬ (так юзер не теряет
+        возвратные деньги до конца).
+        """
+        price = PAID_ACTION_PRICES_KOPEKS.get(action)
+        if price is None or self.balance_kopeks < price:
+            return False
+        # Сначала тратим бонус (невозвратный), потом возвратный остаток
+        if self.balance_bonus_kopeks >= price:
+            self.balance_bonus_kopeks -= price
+        else:
+            # Бонус кончается частично — остаток списываем с базы
+            self.balance_bonus_kopeks = 0
+        self.balance_kopeks -= price
+        return True
+
+    def add_balance(self, base_kopeks: int, bonus_kopeks: int = 0) -> None:
+        """Пополняет баланс. base_kopeks — возвратная часть (что юзер
+        реально заплатил), bonus_kopeks — невозвратный бонус за объём."""
+        if base_kopeks < 0 or bonus_kopeks < 0:
+            return
+        self.balance_kopeks += base_kopeks + bonus_kopeks
+        self.balance_bonus_kopeks += bonus_kopeks
+
     def can_bulk(self, count: int = 1) -> bool:
         """Можно ли обработать ещё `count` ИНН в bulk сегодня."""
         self.reset_if_new_day()
@@ -358,6 +453,29 @@ class UserStore:
         """Инкремент общего счётчика проверок (Quick или Full — всё равно)."""
         profile = self.get(user_id)
         profile.increment()
+        self.save_profile(profile)
+        return profile
+
+    def try_spend(self, user_id: int, action: str) -> bool:
+        """Атомарное списание с баланса юзера. True если успешно.
+
+        Тонкость: persist'ит профиль ТОЛЬКО при успешном списании.
+        Если try_spend в UserProfile вернул False — изменений не было.
+        """
+        profile = self.get(user_id)
+        if profile.try_spend(action):
+            self.save_profile(profile)
+            return True
+        return False
+
+    def add_balance(
+        self, user_id: int, base_kopeks: int, bonus_kopeks: int = 0,
+    ) -> UserProfile:
+        """Зачисляет на баланс. Используется webhook'ом после оплаты
+        пополнения. base — возвратная часть, bonus — невозвратный
+        бонус за объём (см. TOPUP_BONUS_THRESHOLDS_RUB)."""
+        profile = self.get(user_id)
+        profile.add_balance(base_kopeks, bonus_kopeks)
         self.save_profile(profile)
         return profile
 

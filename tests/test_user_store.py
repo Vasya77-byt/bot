@@ -971,3 +971,145 @@ class TestFirstFullUpsell:
         store.mark_first_full_upsell_shown(1)
         assert store.get(1).first_full_upsell_shown is True
         assert store.get(2).first_full_upsell_shown is False
+
+
+class TestWalletBalance:
+    """Кошелёк: баланс юзера в копейках, траты на платные действия."""
+
+    def test_default_balance_zero(self):
+        p = UserProfile(user_id=1)
+        assert p.balance_kopeks == 0
+        assert p.balance_bonus_kopeks == 0
+        assert p.balance_rub == 0.0
+
+    def test_add_balance_no_bonus(self):
+        p = UserProfile(user_id=1)
+        p.add_balance(50000)  # 500₽
+        assert p.balance_kopeks == 50000
+        assert p.balance_bonus_kopeks == 0
+        assert p.balance_rub == 500.0
+
+    def test_add_balance_with_bonus(self):
+        p = UserProfile(user_id=1)
+        p.add_balance(100000, 10000)  # 1000₽ + 100₽ бонус
+        assert p.balance_kopeks == 110000
+        assert p.balance_bonus_kopeks == 10000
+        assert p.balance_rub == 1100.0
+
+    def test_try_spend_success(self):
+        p = UserProfile(user_id=1, balance_kopeks=50000)
+        # Full check = 15₽ = 1500 копеек
+        assert p.try_spend("full_check") is True
+        assert p.balance_kopeks == 48500
+
+    def test_try_spend_insufficient_funds(self):
+        p = UserProfile(user_id=1, balance_kopeks=1000)  # 10₽
+        # Full = 15₽ — не хватает
+        assert p.try_spend("full_check") is False
+        # Баланс не меняется
+        assert p.balance_kopeks == 1000
+
+    def test_try_spend_unknown_action(self):
+        p = UserProfile(user_id=1, balance_kopeks=100000)
+        assert p.try_spend("teleportation") is False
+        assert p.balance_kopeks == 100000
+
+    def test_try_spend_uses_bonus_first(self):
+        """Бонусная часть тратится в первую очередь — юзер не теряет
+        возвратные деньги до конца."""
+        p = UserProfile(
+            user_id=1,
+            balance_kopeks=50000, balance_bonus_kopeks=10000,
+        )  # 500₽: 400₽ база + 100₽ бонус
+        p.try_spend("full_check")  # 15₽
+        # Бонус уменьшился на 15₽
+        assert p.balance_bonus_kopeks == 8500
+        assert p.balance_kopeks == 48500
+
+    def test_try_spend_bonus_runs_out_partially(self):
+        """Когда бонуса не хватает на действие — обнуляется, остаток
+        списывается с базы."""
+        p = UserProfile(
+            user_id=1,
+            balance_kopeks=50000, balance_bonus_kopeks=500,
+        )  # 500₽ всего, 5₽ бонус
+        p.try_spend("full_check")  # 15₽ — больше бонуса
+        # Бонус обнулён, база уменьшилась
+        assert p.balance_bonus_kopeks == 0
+        assert p.balance_kopeks == 48500
+
+    def test_can_afford(self):
+        p = UserProfile(user_id=1, balance_kopeks=1000)
+        assert p.can_afford("quick_check") is True  # 5₽
+        assert p.can_afford("full_check") is False  # 15₽
+        assert p.can_afford("unknown") is False
+
+    def test_negative_amounts_ignored(self):
+        p = UserProfile(user_id=1, balance_kopeks=1000)
+        p.add_balance(-1000)
+        assert p.balance_kopeks == 1000
+
+
+class TestTopupBonus:
+    """Прогрессивный бонус при пополнении."""
+
+    def test_below_threshold_no_bonus(self):
+        from user_store import calc_topup_credits
+        base, bonus = calc_topup_credits(500)
+        assert base == 50000  # 500₽
+        assert bonus == 0
+
+    def test_1000_gives_10_percent(self):
+        from user_store import calc_topup_credits
+        base, bonus = calc_topup_credits(1000)
+        assert base == 100000
+        assert bonus == 10000  # +100₽
+
+    def test_3000_gives_15_percent(self):
+        from user_store import calc_topup_credits
+        base, bonus = calc_topup_credits(3000)
+        assert base == 300000
+        assert bonus == 45000  # +450₽
+
+    def test_5000_gives_20_percent(self):
+        from user_store import calc_topup_credits
+        base, bonus = calc_topup_credits(5000)
+        assert base == 500000
+        assert bonus == 100000  # +1000₽
+
+    def test_10000_still_20_percent(self):
+        from user_store import calc_topup_credits
+        # Выше всех порогов — берём 20%
+        base, bonus = calc_topup_credits(10000)
+        assert base == 1000000
+        assert bonus == 200000
+
+
+class TestUserStoreWalletHelpers:
+    """UserStore-обёртки: персистентность."""
+
+    def test_add_balance_persists(self, tmp_path):
+        path = str(tmp_path / "u.json")
+        store = UserStore(filepath=path)
+        store.add_balance(1, base_kopeks=100000, bonus_kopeks=10000)
+        # Перезагружаем с диска
+        store2 = UserStore(filepath=path)
+        assert store2.get(1).balance_kopeks == 110000
+        assert store2.get(1).balance_bonus_kopeks == 10000
+
+    def test_try_spend_persists_on_success(self, tmp_path):
+        path = str(tmp_path / "u.json")
+        store = UserStore(filepath=path)
+        store.add_balance(1, base_kopeks=50000)  # 500₽
+        assert store.try_spend(1, "full_check") is True
+        store2 = UserStore(filepath=path)
+        assert store2.get(1).balance_kopeks == 48500
+
+    def test_try_spend_no_persist_on_failure(self, tmp_path):
+        path = str(tmp_path / "u.json")
+        store = UserStore(filepath=path)
+        store.add_balance(1, base_kopeks=500)  # 5₽
+        assert store.try_spend(1, "full_check") is False  # надо 15₽
+        store2 = UserStore(filepath=path)
+        # Баланс не изменился
+        assert store2.get(1).balance_kopeks == 500

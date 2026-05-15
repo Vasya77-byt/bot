@@ -36,6 +36,7 @@ from yookassa_client import YooKassaClient, YooKassaError
 from user_store import TARIFF_PRICES, UserStore
 from settings import Settings
 from admin_stats import build_admin_report, parse_admin_user_ids
+from zakupki_client import ZakupkiClient
 from zchb_client import ZchbClient
 from storage import save_file_bytes
 from metadata_store import MetadataStore
@@ -57,6 +58,7 @@ company_service = CompanyService()
 security_service = SecurityService()
 gigachat = GigaChatClient()
 zchb = ZchbClient()
+zakupki = ZakupkiClient()
 user_store = UserStore()
 payments_store = PaymentsStore()
 monitoring_store = MonitoringStore()
@@ -1433,6 +1435,31 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             )
             return
 
+        if action_part == "ca_contracts" and inn_part:
+            # E: Прямые данные госзакупок (топ-N контрактов + РНП-флаг)
+            await callback_query.answer()
+            if not zakupki.enabled:
+                await callback_query.message.reply_text(
+                    "⚠️ Источник госзакупок не настроен (ZAKUPKI_API_URL).\n"
+                    "Для подключения сообщите админу: @YRS75",
+                )
+                return
+            await callback_query.message.reply_text("📦 Запрашиваю данные по контрактам...")
+            try:
+                stats = await zakupki.get_stats(inn_part, top_n=5)
+            except Exception as exc:
+                logger.error("Zakupki failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось получить данные. Попробуйте позже.",
+                )
+                return
+            from zakupki_client import format_stats_message
+            await callback_query.message.reply_text(
+                format_stats_message(stats, inn_part),
+                disable_web_page_preview=True,
+            )
+            return
+
         if action_part == "ca_finance" and inn_part:
             await callback_query.answer()
             if not zchb.enabled:
@@ -2427,6 +2454,9 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         [
             InlineKeyboardButton("📜 История", callback_data=f"ca_history:{inn}"),
             InlineKeyboardButton("🔗 Связи", callback_data=f"ca_links:{inn}"),
+        ],
+        [
+            InlineKeyboardButton("📦 Контракты", callback_data=f"ca_contracts:{inn}"),
         ],
         [monitor_btn],
         [

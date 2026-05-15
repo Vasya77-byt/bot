@@ -380,3 +380,98 @@ class TestDaDataSuggestByName:
         )
         result = await client.suggest_by_name("Сбер")
         assert all(c.source == "dadata" for c in result)
+
+
+class TestDaDataCrossUserCache:
+    """Cross-user persistent cache: один и тот же ИНН/query — один HTTP-вызов
+    в окно TTL, независимо от того, сколько разных юзеров спросило."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_company_caches_response(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        call_count = {"n": 0}
+
+        def fake_post(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"suggestions": [_suggestion()]})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+
+        r1 = await client.fetch_company("7707083893")
+        r2 = await client.fetch_company("7707083893")
+        r3 = await client.fetch_company("7707083893")
+
+        assert r1 is not None and r2 is not None and r3 is not None
+        # 3 запроса юзера → 1 HTTP-вызов
+        assert call_count["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_company_different_inns_separate(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        call_count = {"n": 0}
+
+        def fake_post(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"suggestions": [_suggestion()]})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+
+        await client.fetch_company("7707083893")
+        await client.fetch_company("7728168971")
+        # Разные ИНН — разные ключи кэша
+        assert call_count["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_call_not_cached(self, monkeypatch):
+        """Если запрос упал (None) — не кэшируем, чтобы при восстановлении
+        связи следующий вызов реально проверил API."""
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        call_count = {"n": 0}
+
+        def fake_post(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(500, {})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+        await client.fetch_company("7707083893")
+        await client.fetch_company("7707083893")
+        assert call_count["n"] == 2  # оба запроса прошли
+
+    @pytest.mark.asyncio
+    async def test_suggest_caches_by_normalized_query(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        call_count = {"n": 0}
+
+        def fake_post(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"suggestions": [_suggestion()]})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+
+        await client.suggest_by_name("Сбер")
+        await client.suggest_by_name("сбер")    # lowercase
+        await client.suggest_by_name("  Сбер  ")  # с пробелами
+        # Все три варианта приводятся к одному ключу
+        assert call_count["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_suggest_different_count_separate(self, monkeypatch):
+        monkeypatch.setenv("DADATA_API_KEY", "k")
+        client = DaDataClient()
+        call_count = {"n": 0}
+
+        def fake_post(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"suggestions": [_suggestion()]})
+
+        monkeypatch.setattr(dadata_client.requests, "post", fake_post)
+
+        await client.suggest_by_name("Сбер", count=5)
+        await client.suggest_by_name("Сбер", count=10)
+        # Разный count — разные ключи (для маленького count меньше данных)
+        assert call_count["n"] == 2
+

@@ -1,4 +1,11 @@
-"""Клиент DaData.ru — базовые данные о компании по ИНН и поиск по названию."""
+"""Клиент DaData.ru — базовые данные о компании по ИНН и поиск по названию.
+
+Включает cross-user persistent cache (FileTTLCache):
+- fetch_company по ИНН кэшируется на 24ч (DADATA_FETCH_CACHE_TTL)
+- suggest_by_name кэшируется на 1ч (DADATA_SUGGEST_CACHE_TTL)
+Кэш разделяется между всеми пользователями — один и тот же ИНН,
+проверенный сотней клиентов, делает 1 запрос к DaData.
+"""
 
 import asyncio
 import logging
@@ -7,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from api_quota import ApiQuotaExhausted, get_quota
+from cache import FileTTLCache
 from schemas import CompanyData
 
 logger = logging.getLogger("financial-architect")
@@ -19,11 +28,38 @@ class DaDataClient:
     def __init__(self) -> None:
         self.api_key = os.getenv("DADATA_API_KEY", "")
         self.timeout = float(os.getenv("DADATA_TIMEOUT", "10"))
+        self._cache_fetch = FileTTLCache(
+            "dadata_fetch",
+            ttl=float(os.getenv("DADATA_FETCH_CACHE_TTL", str(24 * 3600))),
+        )
+        self._cache_suggest = FileTTLCache(
+            "dadata_suggest",
+            ttl=float(os.getenv("DADATA_SUGGEST_CACHE_TTL", "3600")),
+        )
 
     async def fetch_company(self, inn: str) -> Optional[CompanyData]:
-        """Получить данные о компании по ИНН из DaData."""
+        """Получить данные о компании по ИНН из DaData.
+
+        Кэшируется на 24ч (DADATA_FETCH_CACHE_TTL) — ЕГРЮЛ-данные
+        в DaData обновляются раз в сутки, чаще запрашивать не имеет
+        смысла. Cross-user: один и тот же ИНН для разных юзеров —
+        один платный запрос.
+        """
         if not self.api_key:
             logger.warning("DADATA_API_KEY not set, skipping DaData")
+            return None
+
+        cached_raw = self._cache_fetch.get(inn)
+        if cached_raw is not None:
+            return self._parse(cached_raw, inn)
+
+        # Глобальная квота: cache miss = реальный сетевой вызов.
+        # Если апстрим в auto-degradation — возвращаем None, как при
+        # любой другой ошибке. fetch продолжится с другими источниками.
+        try:
+            get_quota().check("dadata_fetch")
+        except ApiQuotaExhausted as exc:
+            logger.warning("DaData fetch skipped: %s", exc)
             return None
 
         def _call() -> Optional[Dict[str, Any]]:
@@ -42,7 +78,10 @@ class DaDataClient:
                 if resp.status_code == 200:
                     return resp.json()
                 else:
-                    logger.warning("DaData returned status %s: %s", resp.status_code, resp.text[:200])
+                    logger.warning(
+                        "DaData returned status %s: %s",
+                        resp.status_code, resp.text[:200],
+                    )
             except Exception as exc:
                 logger.warning("DaData request failed: %s", exc)
             return None
@@ -51,42 +90,65 @@ class DaDataClient:
         if not raw:
             return None
 
+        # Учёт квоты только на успешный ответ — DaData биллит за 200 OK.
+        # Сетевые ошибки/5xx не считаем (raw is None).
+        get_quota().record("dadata_fetch")
+        # Кэшируем только успешные ответы (даже если parse вернёт None
+        # из-за пустых suggestions — это валидный ответ DaData,
+        # дёргать API ещё раз нет смысла).
+        self._cache_fetch.set(inn, raw)
         return self._parse(raw, inn)
 
     async def suggest_by_name(self, query: str, count: int = 10) -> List[CompanyData]:
         """Поиск компаний по началу названия. Возвращает до `count`
         результатов, в порядке релевантности DaData. Пустой результат
-        — если ключ не настроен или запрос пустой."""
+        — если ключ не настроен или запрос пустой.
+
+        Кэшируется на 1ч по ключу `query|count` (нормализованному).
+        """
         if not self.api_key or not query.strip():
             return []
 
         # DaData ограничивает count: max 20 для suggest
         count = max(1, min(count, 20))
-
-        def _call() -> Optional[Dict[str, Any]]:
+        normalized_query = query.strip().lower()
+        cache_key = f"{normalized_query}|{count}"
+        cached_raw = self._cache_suggest.get(cache_key)
+        if cached_raw is not None:
+            raw = cached_raw
+        else:
             try:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Authorization": f"Token {self.api_key}",
-                }
-                resp = requests.post(
-                    DADATA_SUGGEST_URL,
-                    json={"query": query.strip(), "count": count},
-                    headers=headers,
-                    timeout=self.timeout,
-                )
-                if resp.status_code == 200:
-                    return resp.json()
-                logger.warning("DaData suggest status %s: %s",
-                               resp.status_code, resp.text[:200])
-            except Exception as exc:
-                logger.warning("DaData suggest failed: %s", exc)
-            return None
+                get_quota().check("dadata_suggest")
+            except ApiQuotaExhausted as exc:
+                logger.warning("DaData suggest skipped: %s", exc)
+                return []
 
-        raw = await asyncio.to_thread(_call)
-        if not raw:
-            return []
+            def _call() -> Optional[Dict[str, Any]]:
+                try:
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "Authorization": f"Token {self.api_key}",
+                    }
+                    resp = requests.post(
+                        DADATA_SUGGEST_URL,
+                        json={"query": query.strip(), "count": count},
+                        headers=headers,
+                        timeout=self.timeout,
+                    )
+                    if resp.status_code == 200:
+                        return resp.json()
+                    logger.warning("DaData suggest status %s: %s",
+                                   resp.status_code, resp.text[:200])
+                except Exception as exc:
+                    logger.warning("DaData suggest failed: %s", exc)
+                return None
+
+            raw = await asyncio.to_thread(_call)
+            if not raw:
+                return []
+            get_quota().record("dadata_suggest")
+            self._cache_suggest.set(cache_key, raw)
 
         suggestions = raw.get("suggestions", [])
         results: List[CompanyData] = []

@@ -908,3 +908,106 @@ class TestRevokeInviteeBonus:
         store.get(42)
         result = store.revoke_invitee_bonus(42)
         assert result is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Quick/Full модель лимитов (Step 3: экономия бюджета API)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestQuickFullLimits:
+    def test_default_counters_zero(self):
+        p = UserProfile(user_id=1)
+        assert p.quick_today == 0
+        assert p.full_today == 0
+
+    def test_free_quick_limit_5(self):
+        p = UserProfile(user_id=1, tariff="free")
+        assert p.remaining_quick() == 5
+        assert p.can_quick_check() is True
+
+    def test_free_full_limit_1(self):
+        p = UserProfile(user_id=1, tariff="free")
+        assert p.remaining_full() == 1
+        assert p.can_full_check() is True
+
+    def test_business_quick_unlimited(self):
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        p = UserProfile(
+            user_id=1, tariff="business", tariff_expires_at=_iso(future),
+        )
+        assert p.remaining_quick() is None
+        assert p.can_quick_check() is True
+
+    def test_business_full_capped_at_150(self):
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        p = UserProfile(
+            user_id=1, tariff="business", tariff_expires_at=_iso(future),
+        )
+        assert p.remaining_full() == 150
+
+    def test_increment_quick_independent_from_full(self):
+        p = UserProfile(user_id=1, tariff="free")
+        p.increment_quick()
+        p.increment_quick()
+        assert p.quick_today == 2
+        assert p.full_today == 0
+        assert p.checks_total == 2
+
+    def test_increment_full_independent_from_quick(self):
+        p = UserProfile(user_id=1, tariff="free")
+        p.increment_full()
+        assert p.full_today == 1
+        assert p.quick_today == 0
+
+    def test_quick_blocks_after_limit(self):
+        p = UserProfile(user_id=1, tariff="free")
+        for _ in range(5):
+            p.increment_quick()
+        assert p.can_quick_check() is False
+        assert p.remaining_quick() == 0
+
+    def test_full_blocks_after_limit(self):
+        p = UserProfile(user_id=1, tariff="free")
+        p.increment_full()
+        assert p.can_full_check() is False
+        assert p.remaining_full() == 0
+
+    def test_new_day_resets_both(self):
+        p = UserProfile(
+            user_id=1, tariff="free",
+            quick_today=5, full_today=1, checks_date="2020-01-01",
+        )
+        p.reset_if_new_day()
+        assert p.quick_today == 0
+        assert p.full_today == 0
+
+    def test_expired_paid_uses_free_limits(self):
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        p = UserProfile(
+            user_id=1, tariff="pro", tariff_expires_at=_iso(past),
+        )
+        # Просрочен → effective_tariff=free → лимиты free
+        assert p.remaining_quick() == 5
+        assert p.remaining_full() == 1
+
+    def test_lifetime_pro_grants_pro_limits(self):
+        p = UserProfile(user_id=1, tariff="free", lifetime_tariff="pro")
+        # effective = pro → лимиты pro
+        assert p.remaining_quick() == 150
+        assert p.remaining_full() == 30
+
+
+class TestUserStoreQuickFullHelpers:
+    def test_store_increment_quick_persists(self, store):
+        store.get(1)
+        store.increment_quick(1)
+        store.increment_quick(1)
+        assert store.get(1).quick_today == 2
+        assert store.get(1).full_today == 0
+
+    def test_store_increment_full_persists(self, store):
+        store.get(1)
+        store.increment_full(1)
+        assert store.get(1).full_today == 1
+        assert store.get(1).quick_today == 0

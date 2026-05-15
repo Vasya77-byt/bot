@@ -34,6 +34,35 @@ class CompanyService:
         self.sbis = SbisClient()
         self.zchb = ZchbClient()
 
+    async def fetch_quick(self, inn: str) -> Optional[CompanyData]:
+        """Краткая проверка (L1): только базовый источник.
+
+        Используется в режиме «Quick» — preview перед платным «Полным
+        отчётом». Один платный запрос (DaData, ~1₽). Если DaData
+        недоступна — fallback на ФНС (тоже ~1 запрос).
+
+        ВАЖНО: cross-user кэш в DaData/ФНС-клиентах работает на оба
+        пути, поэтому популярные ИНН могут отдаваться без сетевого
+        вызова вообще.
+        """
+        try:
+            result = await self.dadata.fetch_company(inn)
+            if result is not None:
+                logger.info("DaData quick: found data for INN %s", inn)
+                return result
+        except Exception as exc:
+            logger.warning("DaData quick error for INN %s: %s", inn, exc)
+
+        try:
+            result = await self.fns.fetch_company(inn)
+            if result is not None:
+                logger.info("FNS quick fallback: found data for INN %s", inn)
+                return result
+        except Exception as exc:
+            logger.warning("FNS quick fallback error for INN %s: %s", inn, exc)
+
+        return None
+
     async def fetch(self, inn: str) -> Optional[CompanyData]:
         """Получить данные о компании из всех доступных источников."""
         results: list[CompanyData] = []

@@ -40,12 +40,34 @@ logger = logging.getLogger("financial-architect")
 
 STORAGE_FILE = os.getenv("USERS_FILE", "users.json")
 
-# Лимиты проверок по тарифам (в день)
+# Лимиты проверок по тарифам (legacy — единый счётчик).
+# Сохранён для обратной совместимости с местами в main.py, которые
+# ещё дёргают can_check()/increment_checks(). После полного перехода
+# на Quick/Full модель (Step 3b) эту константу можно удалить.
 TARIFF_LIMITS: Dict[str, Optional[int]] = {
     "free": 3,
     "start": 50,
     "pro": 300,
     "business": None,  # безлимит
+}
+
+# ── Quick/Full модель лимитов (Step 3 — экономия бюджета API) ──
+# Quick = краткая проверка (только DaData ~1₽): название, ИНН, статус,
+#         директор, ОКВЭД. Лимит большой — это маркетинговая воронка.
+# Full  = полный отчёт (DaData + ФНС + ЗЧБ + AI + ...). Дорогой по
+#         API (~10-20₽ с кэшем). Лимит жёсткий — защита бюджета.
+TARIFF_QUICK_LIMITS: Dict[str, Optional[int]] = {
+    "free": 5,
+    "start": 30,
+    "pro": 150,
+    "business": None,  # безлимит
+}
+
+TARIFF_FULL_LIMITS: Dict[str, Optional[int]] = {
+    "free": 1,
+    "start": 5,
+    "pro": 30,
+    "business": 150,
 }
 
 # Лимиты подписок на мониторинг ИНН (одновременно отслеживаемых)
@@ -58,8 +80,8 @@ TARIFF_MONITORING_LIMITS: Dict[str, Optional[int]] = {
 
 # Цены тарифов в рублях (месячная подписка)
 TARIFF_PRICES: Dict[str, int] = {
-    "start": 490,
-    "pro": 1290,
+    "start": 500,
+    "pro": 990,
     "business": 2490,
 }
 
@@ -136,9 +158,14 @@ TARIFF_FEATURES = {
 class UserProfile:
     user_id: int
     tariff: str = "free"
-    checks_today: int = 0
+    checks_today: int = 0        # legacy общий счётчик (= quick_today + full_today
+                                 # после Step 3b); пока заполняется через
+                                 # increment_checks() для обратной совместимости
     checks_date: str = ""        # ISO дата последнего сброса: "2024-01-15"
     checks_total: int = 0
+    # Quick/Full модель (Step 3): два счётчика для экономии бюджета API.
+    quick_today: int = 0         # краткие проверки (L1, ~1 запрос)
+    full_today: int = 0          # полные отчёты (L2+, ~3-5 запросов)
     # Подписка
     tariff_expires_at: str = ""      # ISO datetime в UTC, пусто для free
     subscription_operation_id: str = ""  # operationId подписки в Точке
@@ -184,6 +211,8 @@ class UserProfile:
         today = date.today().isoformat()
         if self.checks_date != today:
             self.checks_today = 0
+            self.quick_today = 0
+            self.full_today = 0
             self.checks_date = today
 
     def _monthly_active(self) -> bool:
@@ -214,11 +243,55 @@ class UserProfile:
         return monthly if TARIFF_RANK.get(monthly, 0) >= TARIFF_RANK.get(lifetime, 0) else lifetime
 
     def can_check(self) -> bool:
+        """Legacy: общий счётчик. Используется местами, ещё не
+        мигрированными на Quick/Full. После Step 3b — удалить."""
         self.reset_if_new_day()
         limit = TARIFF_LIMITS.get(self.effective_tariff())
         if limit is None:
             return True  # безлимит
         return self.checks_today < limit
+
+    def can_quick_check(self) -> bool:
+        """Можно ли сделать ещё одну краткую проверку (L1)."""
+        self.reset_if_new_day()
+        limit = TARIFF_QUICK_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return True
+        return self.quick_today < limit
+
+    def can_full_check(self) -> bool:
+        """Можно ли запросить ещё один полный отчёт (L2+)."""
+        self.reset_if_new_day()
+        limit = TARIFF_FULL_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return True
+        return self.full_today < limit
+
+    def remaining_quick(self) -> Optional[int]:
+        """Остаток кратких проверок на сегодня; None — безлимит."""
+        self.reset_if_new_day()
+        limit = TARIFF_QUICK_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return None
+        return max(0, limit - self.quick_today)
+
+    def remaining_full(self) -> Optional[int]:
+        """Остаток полных отчётов на сегодня; None — безлимит."""
+        self.reset_if_new_day()
+        limit = TARIFF_FULL_LIMITS.get(self.effective_tariff())
+        if limit is None:
+            return None
+        return max(0, limit - self.full_today)
+
+    def increment_quick(self) -> None:
+        self.reset_if_new_day()
+        self.quick_today += 1
+        self.checks_total += 1
+
+    def increment_full(self) -> None:
+        self.reset_if_new_day()
+        self.full_today += 1
+        self.checks_total += 1
 
     def has_completed_onboarding(self) -> bool:
         """Прошёл ли клиент обязательные шаги: оферта принята + телефон."""
@@ -311,8 +384,23 @@ class UserStore:
         self._save()
 
     def increment_checks(self, user_id: int) -> UserProfile:
+        """Legacy: общий счётчик. Удалить после Step 3b."""
         profile = self.get(user_id)
         profile.increment()
+        self.save_profile(profile)
+        return profile
+
+    def increment_quick(self, user_id: int) -> UserProfile:
+        """Инкремент счётчика кратких проверок (L1)."""
+        profile = self.get(user_id)
+        profile.increment_quick()
+        self.save_profile(profile)
+        return profile
+
+    def increment_full(self, user_id: int) -> UserProfile:
+        """Инкремент счётчика полных отчётов (L2+)."""
+        profile = self.get(user_id)
+        profile.increment_full()
         self.save_profile(profile)
         return profile
 

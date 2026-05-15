@@ -286,3 +286,52 @@ class TestFnsFetchCompany:
         )
         result = await client.fetch_company("123456789012")
         assert result.name == "ИП Иванов Иван Иванович"
+
+
+class TestFnsCrossUserCache:
+    """Cross-user persistent cache по ИНН — экономия платных запросов."""
+
+    @pytest.mark.asyncio
+    async def test_same_inn_one_http_call(self, monkeypatch):
+        monkeypatch.setenv("FNS_API_KEY", "test-key")
+        client = FnsClient()
+        call_count = {"n": 0}
+
+        def fake_get(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"items": [{"ЮЛ": _ul()}]})
+
+        monkeypatch.setattr(fns_client.requests, "get", fake_get)
+        for _ in range(5):
+            await client.fetch_company("7707083893")
+        assert call_count["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_different_inns_separate_keys(self, monkeypatch):
+        monkeypatch.setenv("FNS_API_KEY", "test-key")
+        client = FnsClient()
+        call_count = {"n": 0}
+
+        def fake_get(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(200, {"items": [{"ЮЛ": _ul()}]})
+
+        monkeypatch.setattr(fns_client.requests, "get", fake_get)
+        await client.fetch_company("7707083893")
+        await client.fetch_company("7728168971")
+        assert call_count["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_response_not_cached(self, monkeypatch):
+        monkeypatch.setenv("FNS_API_KEY", "test-key")
+        client = FnsClient()
+        call_count = {"n": 0}
+
+        def fake_get(*a, **kw):
+            call_count["n"] += 1
+            return FakeResponse(503, {})
+
+        monkeypatch.setattr(fns_client.requests, "get", fake_get)
+        await client.fetch_company("7707083893")
+        await client.fetch_company("7707083893")
+        assert call_count["n"] == 2

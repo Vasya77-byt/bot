@@ -268,6 +268,19 @@ def build_app(
         if not inn:
             return web.Response(text="bad token", status=400)
 
+        # Тариф владельца токена — определяет, рендерим базовый отчёт
+        # (Pro) или расширенный с visualizations (Business).
+        is_business = False
+        token_user_id = info.get("user_id")
+        if users is not None and token_user_id is not None:
+            try:
+                profile = users.get(int(token_user_id))
+                is_business = profile.effective_tariff() == "business"
+            except Exception:
+                # Не валим отчёт если профиль не загрузился — рендерим
+                # базовую версию как safe default.
+                is_business = False
+
         try:
             company = await company_service.fetch(inn)
         except Exception as exc:
@@ -295,6 +308,7 @@ def build_app(
         try:
             html = render_report(
                 inn=inn, company=company, card=card, security=security,
+                is_business=is_business,
             )
         except Exception as exc:
             logger.exception("report: render failed inn=%s: %s", inn, exc)

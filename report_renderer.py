@@ -14,11 +14,17 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from risk_score import LEVEL_LABEL, calculate_risk_score
+from risk_score import (
+    CATEGORY_KEYS,
+    CATEGORY_LABELS,
+    LEVEL_LABEL,
+    calculate_category_scores,
+    calculate_risk_score,
+    factor_breakdown,
+)
 
 logger = logging.getLogger("financial-architect")
 
@@ -161,14 +167,55 @@ def _collect_factors(card, security) -> tuple[list[dict], list[dict]]:
     return neg, pos
 
 
+def _build_timeline(card) -> list[dict]:
+    """Собирает события для horizontal timeline из истории ЕГРЮЛ (diffs ZCHB).
+
+    Возвращает список {date, title, kind} для рендера в шаблоне.
+    Если данных истории нет — пустой список (timeline просто не отрисуется).
+
+    kind: 'critical' / 'warning' / 'info' — для цвета маркера.
+    """
+    events: list[dict] = []
+    if card is None:
+        return events
+    # ZCHB diffs могут лежать в разных полях в зависимости от парсера.
+    # Используем best-effort: card.diffs / card.history / events.
+    diffs = (getattr(card, "diffs", None) or getattr(card, "history", None) or [])
+    for d in diffs[:20]:  # ограничиваем 20 событий для визуальной читаемости
+        if not isinstance(d, dict):
+            continue
+        date_str = d.get("date") or d.get("dt") or ""
+        title = d.get("title") or d.get("event") or d.get("change") or ""
+        if not date_str or not title:
+            continue
+        # Простая категоризация по подстроке
+        title_lower = str(title).lower()
+        if any(k in title_lower for k in ("банкрот", "ликвид")):
+            kind = "critical"
+        elif any(k in title_lower for k in ("директор", "руковод", "учредит")):
+            kind = "warning"
+        else:
+            kind = "info"
+        events.append({"date": date_str, "title": str(title), "kind": kind})
+    # Сортируем по дате убыванием (свежие сверху)
+    events.sort(key=lambda e: e["date"], reverse=True)
+    return events
+
+
 def render_report(
     *,
     inn: str,
     company,
     card,
     security,
+    is_business: bool = False,
 ) -> bytes:
-    """Рендерит HTML-отчёт. Возвращает bytes (utf-8)."""
+    """Рендерит HTML-отчёт. Возвращает bytes (utf-8).
+
+    is_business=True — отрисовываются расширенные секции (радар,
+    donut, timeline, кнопки share/PDF). По умолчанию False для
+    обратной совместимости (Pro юзеры видят базовый отчёт).
+    """
     template = _env.get_template("report.html")
 
     # Базовые поля
@@ -250,6 +297,24 @@ def render_report(
 
     tax_violations_sum = card.tax_violations_sum if card else 0
 
+    # ── Business-only: данные для радара, donut и timeline ───────────
+    category_scores: dict = {}
+    category_radar: list = []  # для Chart.js: список объектов с label+value
+    score_breakdown: list = []
+    timeline_events: list = []
+    if is_business:
+        category_scores = calculate_category_scores(company, security)
+        category_radar = [
+            {
+                "key": k,
+                "label": CATEGORY_LABELS[k],
+                "value": category_scores.get(k, 0),
+            }
+            for k in CATEGORY_KEYS
+        ]
+        score_breakdown = factor_breakdown(company, security)
+        timeline_events = _build_timeline(card)
+
     context = {
         "company_name": company_name,
         "inn": inn,
@@ -275,6 +340,14 @@ def render_report(
         "risk_label_lower": risk_label_lower,
         "fmt_money": _fmt_money,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        # Business-only расширения. В Pro/базовом отчёте флаг False
+        # и шаблон скрывает блоки через {% if is_business %}.
+        "is_business": is_business,
+        "category_radar": category_radar,
+        "category_radar_json": json.dumps(category_radar, ensure_ascii=False),
+        "score_breakdown": score_breakdown,
+        "score_breakdown_json": json.dumps(score_breakdown, ensure_ascii=False),
+        "timeline_events": timeline_events,
     }
     html = template.render(**context)
     return html.encode("utf-8")

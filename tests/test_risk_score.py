@@ -542,3 +542,80 @@ class TestCardFactors:
         # 25+35+25+20+15 = 120 → cap 100
         assert result.score == 100
         assert result.level == "critical"
+
+
+class TestCategoryScores:
+    """5-категорийная разбивка для radar chart в Business веб-отчёте."""
+
+    def test_no_factors_returns_zeros(self):
+        from risk_score import CATEGORY_KEYS, calculate_category_scores
+        scores = calculate_category_scores(None, None)
+        assert set(scores.keys()) == set(CATEGORY_KEYS)
+        assert all(v == 0 for v in scores.values())
+
+    def test_fssp_routes_to_legal(self):
+        from risk_score import calculate_category_scores
+        scores = calculate_category_scores(
+            _company(),
+            _security(enforcement_count=10, enforcement_total_sum=1_000_000),
+        )
+        # ФССП-факторы попадают в legal категорию
+        assert scores["legal"] > 0
+        # И не дают вклада в другие
+        assert scores["financial"] == 0
+        assert scores["reputational"] == 0
+
+    def test_status_routes_to_operational(self):
+        from risk_score import calculate_category_scores
+        scores = calculate_category_scores(
+            _company(status="Ликвидация"),
+        )
+        assert scores["operational"] > 0
+        assert scores["legal"] == 0
+
+    def test_unreliable_supplier_routes_to_reputational(self):
+        from risk_score import calculate_category_scores
+        sec = _security_with_card(is_unreliable_supplier=True)
+        scores = calculate_category_scores(_company(), sec)
+        assert scores["reputational"] > 0
+
+    def test_score_clamped_at_100(self):
+        from risk_score import calculate_category_scores
+        # Заведомо высокий ФССП → legal суммирует много, но кламп даёт ≤100
+        scores = calculate_category_scores(
+            _company(),
+            _security(enforcement_count=1000, enforcement_total_sum=10_000_000_000),
+        )
+        assert scores["legal"] <= 100
+
+
+class TestFactorBreakdown:
+    """Разбивка факторов для donut chart."""
+
+    def test_empty_returns_empty(self):
+        from risk_score import factor_breakdown
+        assert factor_breakdown(None, None) == []
+
+    def test_includes_label_points_category(self):
+        from risk_score import factor_breakdown
+        items = factor_breakdown(
+            _company(),
+            _security(enforcement_count=5),
+        )
+        assert len(items) >= 1
+        for item in items:
+            assert "label" in item
+            assert "points" in item
+            assert "category" in item
+            assert item["points"] > 0  # только сработавшие
+
+    def test_sorted_by_points_desc(self):
+        from risk_score import factor_breakdown
+        # Подбираем несколько факторов с разными весами
+        items = factor_breakdown(
+            _company(status="Банкрот", age_years=0, capital=5_000),
+            _security(enforcement_count=2),
+        )
+        points = [i["points"] for i in items]
+        assert points == sorted(points, reverse=True)
+

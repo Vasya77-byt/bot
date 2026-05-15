@@ -37,10 +37,16 @@ class TestParseCsvInns:
         assert parse_csv_inns(csv) == ["7707083893"]
 
     def test_extracts_both_lengths(self):
-        # 10 и 12 цифр — оба валидны (юрлица и ИП)
-        result = parse_csv_inns(b"7707083893, 123456789012")
+        # 10 (юрлица) и 12 (ИП) — оба валидируются по контрольной цифре.
+        # 7707083893 — Сбер, 123456789047 — тестовый с валидной контрольной.
+        result = parse_csv_inns(b"7707083893, 123456789047")
         assert "7707083893" in result
-        assert "123456789012" in result
+        assert "123456789047" in result
+
+    def test_filters_invalid_checksum_inn(self):
+        """Случайные 10/12 цифр не должны попадать — контрольная не сойдётся."""
+        # Артикул товара, серия документа и т.п.
+        assert parse_csv_inns(b"1111111111, 2222222222, 1234567890") == []
 
     def test_ignores_non_inn_numbers(self):
         # 9 цифр (короткий), 13 (слишком длинный — но 12 в начале)

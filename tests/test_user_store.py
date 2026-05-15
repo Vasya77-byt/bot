@@ -6,8 +6,9 @@ import pytest
 
 from user_store import (
     TARIFF_FEATURES,
-    TARIFF_LIMITS,
+    TARIFF_FULL_LIMITS,
     TARIFF_PRICES,
+    TARIFF_QUICK_LIMITS,
     UserProfile,
     UserStore,
 )
@@ -19,20 +20,33 @@ def _iso(dt: datetime) -> str:
 
 class TestProfileResetIfNewDay:
     def test_same_day_does_not_reset(self):
-        p = UserProfile(user_id=1, checks_today=5, checks_date=date.today().isoformat())
+        p = UserProfile(
+            user_id=1, quick_today=3, full_today=1, bulk_today=2,
+            checks_date=date.today().isoformat(),
+        )
         p.reset_if_new_day()
-        assert p.checks_today == 5
+        assert p.quick_today == 3
+        assert p.full_today == 1
+        assert p.bulk_today == 2
 
-    def test_new_day_resets_counter(self):
-        p = UserProfile(user_id=1, checks_today=5, checks_date="2000-01-01")
+    def test_new_day_resets_all_counters(self):
+        p = UserProfile(
+            user_id=1, quick_today=5, full_today=2, bulk_today=10,
+            checks_date="2000-01-01",
+        )
         p.reset_if_new_day()
-        assert p.checks_today == 0
+        assert p.quick_today == 0
+        assert p.full_today == 0
+        assert p.bulk_today == 0
         assert p.checks_date == date.today().isoformat()
 
     def test_empty_date_treated_as_new_day(self):
-        p = UserProfile(user_id=1, checks_today=7, checks_date="")
+        p = UserProfile(
+            user_id=1, quick_today=7, full_today=3, checks_date="",
+        )
         p.reset_if_new_day()
-        assert p.checks_today == 0
+        assert p.quick_today == 0
+        assert p.full_today == 0
 
 
 class TestSubscriptionActive:
@@ -74,75 +88,6 @@ class TestEffectiveTariff:
         assert p.effective_tariff() == "free"
 
 
-class TestCanCheck:
-    def test_free_under_limit(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=2,
-                        checks_date=date.today().isoformat())
-        assert p.can_check() is True
-
-    def test_free_at_limit_blocks(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=TARIFF_LIMITS["free"],
-                        checks_date=date.today().isoformat())
-        assert p.can_check() is False
-
-    def test_business_unlimited(self):
-        future = datetime.now(timezone.utc) + timedelta(days=1)
-        p = UserProfile(user_id=1, tariff="business", tariff_expires_at=_iso(future),
-                        checks_today=10000, checks_date=date.today().isoformat())
-        assert p.can_check() is True
-
-    def test_expired_paid_uses_free_limit(self):
-        past = datetime.now(timezone.utc) - timedelta(days=1)
-        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=_iso(past),
-                        checks_today=TARIFF_LIMITS["free"],
-                        checks_date=date.today().isoformat())
-        assert p.can_check() is False
-
-    def test_can_check_resets_on_new_day(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=TARIFF_LIMITS["free"],
-                        checks_date="2000-01-01")
-        # сброс в can_check внутри reset_if_new_day → лимит снова доступен
-        assert p.can_check() is True
-
-
-class TestRemainingAndLimit:
-    def test_remaining_for_limited_tariff(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=1,
-                        checks_date=date.today().isoformat())
-        assert p.remaining_checks() == TARIFF_LIMITS["free"] - 1
-
-    def test_remaining_at_or_above_limit_clamps_to_zero(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=999,
-                        checks_date=date.today().isoformat())
-        assert p.remaining_checks() == 0
-
-    def test_remaining_unlimited_returns_none(self):
-        future = datetime.now(timezone.utc) + timedelta(days=10)
-        p = UserProfile(user_id=1, tariff="business", tariff_expires_at=_iso(future),
-                        checks_date=date.today().isoformat())
-        assert p.remaining_checks() is None
-
-    def test_daily_limit_matches_table(self):
-        assert UserProfile(user_id=1, tariff="free").daily_limit() == TARIFF_LIMITS["free"]
-
-
-class TestIncrement:
-    def test_increments_today_and_total(self):
-        p = UserProfile(user_id=1, tariff="free", checks_date=date.today().isoformat())
-        p.increment()
-        p.increment()
-        assert p.checks_today == 2
-        assert p.checks_total == 2
-
-    def test_increment_resets_on_new_day_then_counts(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=99, checks_total=200,
-                        checks_date="2000-01-01")
-        p.increment()
-        assert p.checks_today == 1
-        assert p.checks_total == 201
-        assert p.checks_date == date.today().isoformat()
-
-
 class TestTariffsTable:
     def test_all_tariffs_have_features(self):
         for tariff in ("free", "start", "pro", "business"):
@@ -152,8 +97,13 @@ class TestTariffsTable:
         for tariff in ("start", "pro", "business"):
             assert TARIFF_PRICES[tariff] > 0
 
-    def test_business_unlimited_in_table(self):
-        assert TARIFF_LIMITS["business"] is None
+    def test_business_unlimited_quick(self):
+        assert TARIFF_QUICK_LIMITS["business"] is None
+
+    def test_business_capped_full(self):
+        # Business не безлимитный по полным отчётам — есть жёсткая защита
+        assert TARIFF_FULL_LIMITS["business"] is not None
+        assert TARIFF_FULL_LIMITS["business"] > 0
 
 
 @pytest.fixture
@@ -198,14 +148,14 @@ class TestUserStoreLoad:
 
 
 class TestUserStoreMutations:
-    def test_increment_checks_persists(self, tmp_path):
+    def test_increment_quick_persists(self, tmp_path):
         path = tmp_path / "u.json"
         store = UserStore(filepath=str(path))
-        store.increment_checks(1)
-        store.increment_checks(1)
+        store.increment_quick(1)
+        store.increment_quick(1)
         # перечитываем с диска
         store2 = UserStore(filepath=str(path))
-        assert store2.get(1).checks_today == 2
+        assert store2.get(1).quick_today == 2
         assert store2.get(1).checks_total == 2
 
     def test_set_tariff_changes_value(self, store):

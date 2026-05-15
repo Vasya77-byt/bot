@@ -1,11 +1,9 @@
 import os
 import re
 from io import BytesIO
-from textwrap import wrap
 from typing import Optional
 
 from fpdf import FPDF
-from PIL import Image, ImageDraw, ImageFont
 
 from schemas import CompanyData
 
@@ -130,72 +128,6 @@ def _find_truetype_font() -> Optional[str]:
     return None
 
 
-def build_kp_pdf(title: str, body: str, company: Optional[CompanyData] = None) -> bytes:
-    font_path = _find_truetype_font()
-    if not font_path:
-        # Helvetica не поддерживает кириллицу — без TTF не получим
-        # читаемый PDF. Бросаем явное исключение, обработчик ловит и
-        # показывает осмысленное сообщение.
-        raise FontNotFoundError(
-            "TrueType-шрифт не найден. Установите fonts-dejavu-core "
-            "(apt-get install fonts-dejavu-core) или положите "
-            "DejaVuSans.ttf в каталог проекта."
-        )
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font("CustomFont", "", font_path)
-    pdf.set_font("CustomFont", size=14)
-    pdf.cell(0, 10, text=_pdf_safe(title), new_x="LMARGIN", new_y="NEXT")
-
-    pdf.set_font("CustomFont", size=11)
-
-    if company:
-        pdf.multi_cell(0, 8, text=_pdf_safe(_company_block(company)))
-        pdf.ln(4)
-
-    pdf.multi_cell(0, 8, text=_pdf_safe(body))
-
-    output = BytesIO()
-    pdf.output(output)
-    return output.getvalue()
-
-
-def build_kp_png(title: str, body: str, company: Optional[CompanyData] = None, width: int = 1000, height: int = 600) -> bytes:
-    img = Image.new("RGB", (width, height), color="white")
-    draw = ImageDraw.Draw(img)
-    ttf_path = _find_truetype_font()
-    try:
-        if ttf_path:
-            font_title = ImageFont.truetype(ttf_path, 24)
-            font_body = ImageFont.truetype(ttf_path, 16)
-        else:
-            font_title = ImageFont.load_default()
-            font_body = ImageFont.load_default()
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_body = ImageFont.load_default()
-
-    y = 20
-    draw.text((20, y), title, font=font_title, fill="black")
-    y += 40
-
-    if company:
-        company_text = _company_block(company)
-        for line in company_text.splitlines():
-            draw.text((20, y), line, font=font_body, fill="black")
-            y += 20
-        y += 10
-
-    for line in _wrap_text(body, width=80):
-        draw.text((20, y), line, font=font_body, fill="black")
-        y += 20
-
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
 def build_bulk_xlsx(results: list, filename: str = "bulk_check.xlsx") -> bytes:
     """Сборка Excel-файла из списка BulkResult.
 
@@ -283,8 +215,7 @@ def build_company_card_pdf(
 ) -> bytes:
     """Структурированная PDF-карточка контрагента (D2).
 
-    В отличие от build_kp_pdf (текстовый дамп отчёта в формате КП),
-    эта карточка организована блоками-секциями: основные данные,
+    Карточка организована блоками-секциями: основные данные,
     регистрация, финансы, риски. Подходит для бухгалтерии/юристов
     как due-diligence document.
 
@@ -604,22 +535,3 @@ def _build_bulk_csv(results: list) -> bytes:
             comment,
         ])
     return ("﻿" + out.getvalue()).encode("utf-8")
-
-
-def _company_block(company: CompanyData) -> str:
-    return "\n".join(
-        [
-            f"Компания: {company.name or '—'}",
-            f"ИНН: {company.inn or '—'}; ОГРН: {company.ogrn or '—'}",
-            f"Регион: {company.region or '—'}; ОКВЭД: {company.okved_main or '—'}",
-            f"Штат: {company.employees_count or '—'}; Выручка/прибыль: {company.revenue_last_year or '—'} / {company.profit_last_year or '—'}",
-        ]
-    )
-
-
-def _wrap_text(text: str, width: int) -> list[str]:
-    lines = []
-    for paragraph in text.split("\n"):
-        lines.extend(wrap(paragraph, width=width) or [""])
-    return lines
-

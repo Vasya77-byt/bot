@@ -27,6 +27,7 @@ from typing import Iterable, List, Optional
 
 from api_quota import get_quota
 from company_service import CompanyService
+from ocr import is_valid_inn
 from schemas import CompanyData
 
 logger = logging.getLogger("financial-architect")
@@ -106,6 +107,10 @@ def parse_csv_inns(content: bytes, max_count: int = BULK_MAX_PER_REQUEST) -> Lis
     for match in _INN_RE.finditer(text):
         inn = match.group(1)
         if inn in seen:
+            continue
+        # Контрольная цифра ИНН отсеивает мусор (артикулы, телефоны,
+        # серии документов), которые случайно совпали по длине 10/12.
+        if not is_valid_inn(inn):
             continue
         seen.add(inn)
         out.append(inn)

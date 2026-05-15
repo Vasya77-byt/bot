@@ -278,6 +278,146 @@ def build_bulk_xlsx(results: list, filename: str = "bulk_check.xlsx") -> bytes:
     return buf.getvalue()
 
 
+def build_company_xlsx(company: CompanyData) -> bytes:
+    """Excel-карточка по одной компании.
+
+    Двухколоночный лист «Поле | Значение» — подходит для бухгалтерии
+    и быстрого сохранения паспорта контрагента. Не таблица, а карточка
+    (один контрагент = один файл).
+
+    Если openpyxl недоступен — fallback на CSV-байты.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError:
+        return _build_company_csv(company)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Контрагент"
+
+    # Заголовок-шапка
+    ws["A1"] = "Карточка контрагента"
+    ws["A1"].font = Font(bold=True, size=14, color="FFFFFF")
+    ws["A1"].fill = PatternFill("solid", fgColor="2481CC")
+    ws.merge_cells("A1:B1")
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    fields = [
+        ("ИНН",                  company.inn),
+        ("КПП",                  company.kpp),
+        ("ОГРН",                 company.ogrn),
+        ("Название",             company.name),
+        ("Статус",               company.status),
+        ("Руководитель",         company.director),
+        ("Регион",               company.region),
+        ("Адрес",                company.address),
+        ("ОКВЭД",                company.okved_main),
+        ("Описание ОКВЭД",       company.okved_name),
+        ("Дата регистрации",     company.reg_date),
+        ("Возраст (лет)",        company.age_years),
+        ("Уставный капитал, ₽",  company.capital),
+        ("Сотрудников",          company.employees_count),
+        ("Выручка за год, ₽",    company.revenue_last_year),
+        ("Прибыль за год, ₽",    company.profit_last_year),
+        ("Источники данных",     company.source),
+    ]
+
+    label_font = Font(bold=True)
+    label_fill = PatternFill("solid", fgColor="F0F0F0")
+    for row_idx, (label, value) in enumerate(fields, start=2):
+        ws.cell(row=row_idx, column=1, value=label).font = label_font
+        ws.cell(row=row_idx, column=1).fill = label_fill
+        ws.cell(row=row_idx, column=2, value=value if value not in (None, "") else "—")
+
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 60
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_company_csv(company: CompanyData) -> bytes:
+    """Fallback на CSV если openpyxl недоступен."""
+    import csv
+    import io
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=";")
+    fields = [
+        ("ИНН",            company.inn),
+        ("КПП",            company.kpp),
+        ("ОГРН",           company.ogrn),
+        ("Название",       company.name),
+        ("Статус",         company.status),
+        ("Руководитель",   company.director),
+        ("Регион",         company.region),
+        ("Адрес",          company.address),
+        ("ОКВЭД",          company.okved_main),
+        ("Дата регистрации", company.reg_date),
+        ("Уставный капитал", company.capital),
+    ]
+    for label, value in fields:
+        writer.writerow([label, value if value not in (None, "") else ""])
+    return ("﻿" + out.getvalue()).encode("utf-8")
+
+
+def build_company_1c_csv(company: CompanyData) -> bytes:
+    """1С-совместимый CSV для импорта контрагента.
+
+    Формат: одна строка с заголовками в первой строке, одна строка
+    с данными во второй. Заголовки точно соответствуют стандартным
+    реквизитам справочника «Контрагенты» 1С 8.3 (УТ/Бухгалтерия).
+    Разделитель `;`, кодировка cp1251 — именно так 1С ждёт CSV при
+    стандартной загрузке через «Обработки → Загрузка данных из
+    табличного документа».
+
+    После выгрузки юзер открывает в 1С нужную обработку и указывает
+    этот CSV как источник.
+    """
+    import csv
+    import io
+
+    # Поля, которые 1С понимает «из коробки» по точному совпадению
+    # имён колонок с реквизитами справочника. Порядок имеет значение
+    # для удобства маппинга в обработке.
+    headers = [
+        "ИНН",
+        "КПП",
+        "Наименование",
+        "НаименованиеПолное",
+        "ЮридическийАдрес",
+        "ОГРН",
+        "ДатаРегистрации",
+        "КодОКВЭД",
+        "НаименованиеОКВЭД",
+        "Руководитель",
+        "СтатусВЕГРЮЛ",
+    ]
+    row = [
+        company.inn or "",
+        company.kpp or "",
+        company.name or "",
+        company.name or "",  # полное = краткое если нет отдельного
+        company.address or "",
+        company.ogrn or "",
+        company.reg_date or "",
+        company.okved_main or "",
+        company.okved_name or "",
+        company.director or "",
+        company.status or "",
+    ]
+
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(headers)
+    writer.writerow(row)
+    # cp1251 — стандарт 1С 8.3 на Windows. Заменяем непредставимые
+    # символы на '?' чтобы не уронить экспорт на экзотических OKVED.
+    return out.getvalue().encode("cp1251", errors="replace")
+
+
 def _build_bulk_csv(results: list) -> bytes:
     """Fallback: CSV-байты, если openpyxl не установлен.
 

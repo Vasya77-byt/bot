@@ -1635,6 +1635,51 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             return
 
+        if action_part in ("ca_xlsx", "ca_1c") and inn_part:
+            await callback_query.answer()
+            # Фича Pro/Business — на Free/Start апсейл.
+            profile = user_store.get(user_id)
+            if profile.effective_tariff() not in ("pro", "business"):
+                await callback_query.message.reply_text(
+                    "📊 Excel/1С-экспорт доступен на тарифах Pro и Business.\n\n"
+                    "Нажмите «Тарифы» чтобы перейти.",
+                )
+                return
+            # Re-fetch из кэша (после Full отчёта данные уже там — 0 API-вызовов).
+            company = await company_service.fetch(inn_part)
+            if company is None:
+                await callback_query.message.reply_text(
+                    f"⚠️ Не удалось получить данные по ИНН {inn_part}.\n"
+                    "Проверьте, что вы перед этим запросили полный отчёт.",
+                )
+                return
+            if action_part == "ca_xlsx":
+                from exports import build_company_xlsx
+                content = build_company_xlsx(company)
+                filename = f"company_{inn_part}.xlsx"
+                caption = f"📊 Excel по ИНН {inn_part}"
+            else:  # ca_1c
+                from exports import build_company_1c_csv
+                content = build_company_1c_csv(company)
+                filename = f"contractor_{inn_part}.csv"
+                caption = (
+                    f"📁 1С-CSV по ИНН {inn_part}\n"
+                    "Импорт: Обработки → Загрузка данных из табличного документа"
+                )
+            doc = BytesIO(content)
+            doc.name = filename
+            try:
+                await callback_query.message.reply_document(
+                    document=doc, file_name=filename, caption=caption,
+                )
+            except Exception as exc:
+                logger.exception("Export send failed for %s: %s", inn_part, exc)
+                await callback_query.message.reply_text(
+                    "⚠️ Не удалось отправить файл. Попробуйте ещё раз или "
+                    "сообщите в поддержку: @YRS75",
+                )
+            return
+
         if action_part == "ca_ai" and inn_part:
             await callback_query.answer()
             await callback_query.message.reply_text("🤖 Запрашиваю ИИ-анализ у GigaChat...")
@@ -2312,7 +2357,9 @@ def _company_actions_keyboard(inn: str, user_id: int = 0) -> InlineKeyboardMarku
         ],
         [monitor_btn],
         [
-            InlineKeyboardButton("📄 Скачать PDF", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📄 PDF", callback_data=f"ca_pdf:{inn}"),
+            InlineKeyboardButton("📊 Excel", callback_data=f"ca_xlsx:{inn}"),
+            InlineKeyboardButton("📁 1С", callback_data=f"ca_1c:{inn}"),
         ],
     ]
     web_btn = _build_web_report_button(inn, user_id)

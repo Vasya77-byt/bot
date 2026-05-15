@@ -183,6 +183,101 @@ class SubscriptionService:
         )
         return result.confirmation_url, result.payment_id
 
+    async def create_topup_payment(
+        self, user_id: int, amount_rub: int,
+        method: str = "",
+    ) -> tuple[str, str]:
+        """Создаёт платёж на пополнение баланса юзера.
+
+        Возвращает (payment_url, payment_id). amount_rub — сумма к
+        списанию с карты. Бонус по уровню (10/15/20%) рассчитается
+        в webhook'е после успешной оплаты — для прозрачности оферты.
+
+        Использует ЮKassa (одноразовый платёж без recurring). Если
+        ЮKassa не настроена — ValueError. Точка использует subscription
+        API с recurring=True, что не подходит для разовых пополнений.
+
+        method: "" / "sbp" / "tpay" / "sberpay" — выбор способа в ЮKassa.
+        """
+        from user_store import TOPUP_MAX_RUB, TOPUP_MIN_RUB
+        if amount_rub < TOPUP_MIN_RUB or amount_rub > TOPUP_MAX_RUB:
+            raise ValueError(
+                f"Сумма пополнения должна быть от {TOPUP_MIN_RUB} до "
+                f"{TOPUP_MAX_RUB}₽",
+            )
+        if self.yookassa is None:
+            raise ValueError(
+                "yookassa_not_configured",
+            )
+        return await self._create_yookassa_topup(
+            user_id, amount_rub,
+            payment_method_type=self.YOOKASSA_METHOD_TYPES.get(method, ""),
+        )
+
+    async def _create_yookassa_topup(
+        self, user_id: int, amount_rub: int,
+        payment_method_type: str = "",
+    ) -> tuple[str, str]:
+        """ЮKassa-платёж на пополнение баланса. Не recurring, не
+        save_payment_method — это одноразовая разовая операция."""
+        profile = self.users.get(user_id)
+        if not profile.email:
+            raise ValueError("email_required")
+        tariff_pseudo = f"topup_{amount_rub}"
+        result = await self.yookassa.create_payment(
+            amount=float(amount_rub),
+            description=f"Пополнение баланса на {amount_rub}₽",
+            user_id=user_id,
+            tariff=tariff_pseudo,
+            return_url=self.redirect_url,
+            customer_email=profile.email,
+            tax_system_code=self.yookassa_tax_system_code,
+            vat_code=self.yookassa_vat_code,
+            save_payment_method=False,   # одноразовый платёж
+            kind="topup",
+            payment_method_type=payment_method_type,
+        )
+        self.payments.record_created(
+            operation_id=result.payment_id,
+            order_id=result.order_id,
+            user_id=user_id,
+            tariff=tariff_pseudo,
+            amount=float(amount_rub),
+            kind="topup",
+            provider="yookassa",
+        )
+        return result.confirmation_url, result.payment_id
+
+    def _process_topup_if_applicable(self, rec) -> bool:
+        """Если запись платежа — пополнение баланса, обрабатывает её
+        и возвращает True. Иначе False (обычная подписка).
+
+        Идентифицируется по tariff="topup_N" и kind="topup".
+        """
+        if rec.kind != "topup" or not rec.tariff.startswith("topup_"):
+            return False
+        try:
+            amount_rub = int(rec.tariff.split("_", 1)[1])
+        except (ValueError, IndexError):
+            logger.error(
+                "Topup webhook: bad tariff format %s", rec.tariff,
+            )
+            return True  # признаём но не зачисляем (защита от мусора)
+
+        # Рассчитываем база + бонус и зачисляем
+        from user_store import calc_topup_credits
+        base_kopeks, bonus_kopeks = calc_topup_credits(amount_rub)
+        profile = self.users.add_balance(
+            rec.user_id, base_kopeks, bonus_kopeks,
+        )
+        bonus_rub = bonus_kopeks // 100
+        logger.info(
+            "Topup processed: user=%s amount=%d₽ bonus=+%d₽ "
+            "new_balance=%d₽",
+            rec.user_id, amount_rub, bonus_rub, profile.balance_kopeks // 100,
+        )
+        return True
+
     def handle_webhook_paid(
         self, *,
         operation_id: str,
@@ -225,6 +320,12 @@ class SubscriptionService:
             return self.users.get(rec.user_id)
 
         self.payments.mark_paid(operation_id)
+
+        # Wallet-пополнение обрабатывается отдельно — не активируем
+        # подписку, только начисляем баланс (база + бонус по объёму).
+        if self._process_topup_if_applicable(rec):
+            return self.users.get(rec.user_id)
+
         # Привязываем operationId подписки к профилю — для последующих
         # charge_subscription. Это происходит ТОЛЬКО для initial-платежа;
         # рекуррентные списания не пересохраняют id (он тот же).
@@ -297,6 +398,11 @@ class SubscriptionService:
             return self.users.get(rec.user_id)
 
         self.payments.mark_paid(payment_id)
+
+        # Wallet-пополнение: не активируем подписку, только зачисляем
+        # на баланс. Распознаётся по kind="topup" и tariff="topup_N".
+        if self._process_topup_if_applicable(rec):
+            return self.users.get(rec.user_id)
 
         # Сохраняем payment_method_id ТОЛЬКО при первом платеже —
         # рекуррентные используют тот же токен.

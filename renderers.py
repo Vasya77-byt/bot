@@ -502,6 +502,15 @@ def _security_block(result: SecurityResult, company_name: Optional[str] = None) 
     return "\n".join(lines)
 
 
+def _progress_bar(value: int, max_value: int, length: int = 10) -> str:
+    """ASCII прогресс-бар: ▓▓▓▓░░░░ — для визуализации срока подписки."""
+    if max_value <= 0:
+        return "░" * length
+    ratio = max(0.0, min(1.0, value / max_value))
+    filled = int(ratio * length)
+    return "▓" * filled + "░" * (length - filled)
+
+
 def render_profile(
     profile: UserProfile,
     monitoring_count: Optional[int] = None,
@@ -509,33 +518,107 @@ def render_profile(
 ) -> str:
     """Рендер профиля пользователя.
 
+    Содержит:
+    - тариф (effective, учитывает lifetime и срок) + прогресс-бар срока
+    - дата регистрации в боте + возраст в днях
+    - три счётчика на сегодня: Quick / Full / Bulk
+    - мониторинг (если параметры переданы)
+    - блок реф.программы (если есть приглашённые) с tier-уровнем
+    - таблица возможностей по тарифу
+
     monitoring_count/monitoring_limit — состояние списка отслеживаемых
     компаний. monitoring_limit=None при заданном count означает ∞.
     """
-    tariff_label = TARIFF_LABELS.get(profile.tariff, profile.tariff)
-    limit = profile.daily_limit()
-    remaining = profile.remaining_checks()
+    from datetime import datetime, timezone
+
+    from user_store import (
+        TARIFF_BULK_LIMITS,
+        TARIFF_FULL_LIMITS,
+        TARIFF_QUICK_LIMITS,
+    )
+
     profile.reset_if_new_day()
+    eff_tariff = profile.effective_tariff()
+    tariff_label = TARIFF_LABELS.get(eff_tariff, eff_tariff)
 
-    limit_str = str(limit) if limit is not None else "∞"
-    remaining_str = str(remaining) if remaining is not None else "∞"
+    # ── Строка тарифа: «навсегда» / срок + прогресс ──
+    tariff_line = f"Тариф: {tariff_label}"
+    if profile.lifetime_tariff:
+        tariff_line += " (навсегда)"
+    elif profile.is_subscription_active() and profile.tariff_expires_at:
+        try:
+            expires = datetime.fromisoformat(profile.tariff_expires_at)
+            now = datetime.now(timezone.utc)
+            days_left = max(0, (expires - now).days)
+            # Прогресс относительно стандартного 30-дневного цикла
+            bar = _progress_bar(days_left, 30, length=10)
+            tariff_line += (
+                f"\nДействует до: {expires.strftime('%d.%m.%Y')} "
+                f"({bar} {days_left} дн.)"
+            )
+        except ValueError:
+            pass
 
-    lines = [
-        "👤 Ваш профиль",
+    lines = ["👤 Ваш профиль", "", tariff_line]
+
+    # ── Дата регистрации ──
+    if profile.registered_at:
+        try:
+            reg = datetime.fromisoformat(profile.registered_at)
+            now = datetime.now(timezone.utc)
+            age_days = max(0, (now - reg).days)
+            lines.append(
+                f"В боте с: {reg.strftime('%d.%m.%Y')} ({age_days} дн.)",
+            )
+        except ValueError:
+            pass
+
+    lines.append(f"Всего проверок: {profile.checks_total}")
+
+    # ── Счётчики на сегодня (Quick / Full / Bulk) ──
+    quick_limit = TARIFF_QUICK_LIMITS.get(eff_tariff)
+    full_limit = TARIFF_FULL_LIMITS.get(eff_tariff)
+    bulk_limit = TARIFF_BULK_LIMITS.get(eff_tariff)
+
+    def _fmt(used: int, limit) -> str:
+        return f"{used}/∞" if limit is None else f"{used}/{limit}"
+
+    lines.extend([
         "",
-        f"Тариф: {tariff_label}",
-        f"Проверок сегодня: {profile.checks_today}/{limit_str}",
-        f"Осталось: {remaining_str}",
-        f"Всего проверок: {profile.checks_total}",
-    ]
+        "📊 Сегодня:",
+        f"   Быстрые проверки: {_fmt(profile.quick_today, quick_limit)}",
+        f"   Полные отчёты: {_fmt(profile.full_today, full_limit)}",
+    ])
+    if bulk_limit and bulk_limit > 0:
+        lines.append(
+            f"   Bulk-проверки: {_fmt(profile.bulk_today, bulk_limit)}",
+        )
 
+    # ── Мониторинг ──
     if monitoring_count is not None:
         mon_limit_str = "∞" if monitoring_limit is None else str(monitoring_limit)
-        lines.append(f"Отслеживается компаний: {monitoring_count}/{mon_limit_str}")
+        lines.append("")
+        lines.append(
+            f"👁 Мониторинг: {monitoring_count}/{mon_limit_str} компаний",
+        )
 
+    # ── Реф.программа (только если что-то есть) ──
+    if profile.referrals_count > 0 or profile.referrals_paid_count > 0:
+        from referral_tiers import current_tier
+        tier = current_tier(profile.referrals_paid_count)
+        lines.extend([
+            "",
+            "🤝 Реф.программа:",
+            f"   Приглашено: {profile.referrals_count}",
+            f"   Оплатили: {profile.referrals_paid_count}",
+            f"   Получено бонусных дней: {profile.referral_bonus_days_total}",
+        ])
+        if tier.key != "none":
+            lines.append(f"   Уровень: {tier.emoji} {tier.label}")
+
+    # ── Возможности тарифа ──
     lines.extend(["", "─── Возможности ───"])
-
-    features = TARIFF_FEATURES.get(profile.tariff, {})
+    features = TARIFF_FEATURES.get(eff_tariff, {})
     for feature, enabled in features.items():
         mark = "✅" if enabled else "❌"
         lines.append(f"{mark} {feature}")

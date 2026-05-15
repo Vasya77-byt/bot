@@ -1424,7 +1424,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник арбитражных дел не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Суды» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text("⚖️ Запрашиваю арбитражные дела...")
@@ -1440,8 +1441,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zakupki.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник госзакупок не настроен (ZAKUPKI_API_URL).\n"
-                    "Для подключения сообщите админу: @YRS75",
+                    "🔧 Раздел «Контракты» в данный момент подключается. "
+                    "Попробуйте позже.",
                 )
                 return
             await callback_query.message.reply_text("📦 Запрашиваю данные по контрактам...")
@@ -1464,7 +1465,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник финансовых данных не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Финансы» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text("📊 Собираю финансовый отчёт...")
@@ -1501,7 +1503,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник связей не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «Связи» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text(
@@ -1518,7 +1521,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник истории не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «История» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             await callback_query.message.reply_text(
@@ -1560,7 +1564,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             await callback_query.answer()
             if not zchb.enabled:
                 await callback_query.message.reply_text(
-                    "⚠️ Источник ЕГРЮЛ не настроен (ZCHB_API_KEY)."
+                    "🔧 Раздел «ЕГРЮЛ» в данный момент подключается. "
+                    "Попробуйте позже."
                 )
                 return
             card = await zchb.get_card(inn_part)
@@ -1610,42 +1615,51 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
 
         if action_part == "ca_pdf" and inn_part:
             await callback_query.answer()
-            await callback_query.message.reply_text("📄 Готовлю PDF-отчёт...")
-            company = await company_service.fetch(inn_part)
-            sec = None
-            try:
-                sec = await security_service.check(
-                    inn=inn_part,
-                    name=company.name if company else None,
-                    okved=company.okved_main if company else None,
-                    ogrn=company.ogrn if company else None,
-                )
-            except Exception as exc:
-                logger.error("PDF report security check failed for %s: %s",
-                             inn_part, exc)
-            parsed = ParseResult(
-                raw_text=inn_part, inn=inn_part, mode="internal_analysis",
-                is_request=False, is_proposal=False, company_data=company,
+            status_msg = await callback_query.message.reply_text(
+                "📄 Готовлю PDF-отчёт...",
             )
-            body = render_response(
-                parsed=parsed, company=company, risk=set(), security=sec,
-            )
-            company_name = (company.name if company else inn_part) or inn_part
-            title = f"Отчёт о проверке: {company_name}"
-            try:
-                content = build_kp_pdf(title, body, company)
-            except Exception as exc:
-                logger.exception("PDF build failed for %s: %s", inn_part, exc)
-                error_text = "⚠️ Не удалось собрать PDF.\n"
-                if "шрифт не найден" in str(exc).lower() or "font" in str(exc).lower():
-                    error_text += (
-                        "На сервере не установлен шрифт с поддержкой кириллицы. "
-                        "Сообщите в поддержку: @YRS75"
+            async with _typing(callback_query.message):
+                await _update_status(status_msg, "📄 Запрашиваю данные...")
+                company = await company_service.fetch(inn_part)
+                await _update_status(status_msg, "📄 Проверяю безопасность...")
+                sec = None
+                try:
+                    sec = await security_service.check(
+                        inn=inn_part,
+                        name=company.name if company else None,
+                        okved=company.okved_main if company else None,
+                        ogrn=company.ogrn if company else None,
                     )
-                else:
-                    error_text += "Сохраните текст отчёта из чата или попробуйте ещё раз."
-                await callback_query.message.reply_text(error_text)
-                return
+                except Exception as exc:
+                    logger.error("PDF report security check failed for %s: %s",
+                                 inn_part, exc)
+                await _update_status(status_msg, "📄 Собираю PDF...")
+                parsed = ParseResult(
+                    raw_text=inn_part, inn=inn_part, mode="internal_analysis",
+                    is_request=False, is_proposal=False, company_data=company,
+                )
+                body = render_response(
+                    parsed=parsed, company=company, risk=set(), security=sec,
+                )
+                company_name = (company.name if company else inn_part) or inn_part
+                title = f"Отчёт о проверке: {company_name}"
+                try:
+                    content = build_kp_pdf(title, body, company)
+                except Exception as exc:
+                    logger.exception("PDF build failed for %s: %s", inn_part, exc)
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+                    await callback_query.message.reply_text(
+                        "📄 PDF-отчёт временно недоступен. "
+                        "Попробуйте ещё раз или сохраните текст из чата."
+                    )
+                    return
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
             filename = f"report_{inn_part}.pdf"
             doc = BytesIO(content)
             doc.name = filename
@@ -1657,8 +1671,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("PDF send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ PDF собрался, но Telegram отказался принимать файл. "
-                    "Сообщите в поддержку: @YRS75"
+                    "📄 Не удалось отправить PDF. Попробуйте ещё раз."
                 )
             return
 
@@ -1673,45 +1686,57 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                     "Нажмите «Тарифы» чтобы перейти.",
                 )
                 return
-            await callback_query.message.reply_text(
+            status_msg = await callback_query.message.reply_text(
                 "📋 Готовлю карточку контрагента...",
             )
-            # Re-fetch из кэша (после Full уже там — 0 API-вызовов).
-            company = await company_service.fetch(inn_part)
-            if company is None:
-                await callback_query.message.reply_text(
-                    f"⚠️ Не удалось получить данные по ИНН {inn_part}.\n"
-                    "Запросите сначала полный отчёт.",
-                )
-                return
-            # Security result для секции «Риски» — best-effort.
-            sec_result = None
-            try:
-                sec_result = await security_service.check(
-                    inn=inn_part,
-                    name=company.name if company else None,
-                    okved=company.okved_main if company else None,
-                    ogrn=company.ogrn if company else None,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Card PDF security check failed for %s: %s", inn_part, exc,
-                )
-            from exports import build_company_card_pdf
-            try:
-                content = build_company_card_pdf(company, sec_result)
-            except Exception as exc:
-                logger.exception("Card PDF build failed for %s: %s", inn_part, exc)
-                error_text = "⚠️ Не удалось собрать карточку.\n"
-                if "шрифт" in str(exc).lower() or "font" in str(exc).lower():
-                    error_text += (
-                        "На сервере не установлен шрифт с поддержкой кириллицы. "
-                        "Сообщите в поддержку: @YRS75"
+            async with _typing(callback_query.message):
+                # Re-fetch из кэша (после Full уже там — 0 API-вызовов).
+                company = await company_service.fetch(inn_part)
+                if company is None:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+                    await callback_query.message.reply_text(
+                        f"⚠️ Не удалось получить данные по ИНН {inn_part}.\n"
+                        "Запросите сначала полный отчёт.",
                     )
-                else:
-                    error_text += "Попробуйте ещё раз или сообщите в поддержку."
-                await callback_query.message.reply_text(error_text)
-                return
+                    return
+                await _update_status(status_msg, "📋 Проверяю риски...")
+                # Security result для секции «Риски» — best-effort.
+                sec_result = None
+                try:
+                    sec_result = await security_service.check(
+                        inn=inn_part,
+                        name=company.name if company else None,
+                        okved=company.okved_main if company else None,
+                        ogrn=company.ogrn if company else None,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Card PDF security check failed for %s: %s", inn_part, exc,
+                    )
+                await _update_status(status_msg, "📋 Собираю PDF...")
+                from exports import build_company_card_pdf
+                try:
+                    content = build_company_card_pdf(company, sec_result)
+                except Exception as exc:
+                    logger.exception(
+                        "Card PDF build failed for %s: %s", inn_part, exc,
+                    )
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+                    await callback_query.message.reply_text(
+                        "📋 Карточка временно недоступна. Попробуйте ещё раз."
+                    )
+                    return
+            # async with _typing вышел — основная работа сделана
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
             filename = f"card_{inn_part}.pdf"
             doc = BytesIO(content)
             doc.name = filename
@@ -1723,8 +1748,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("Card PDF send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ Карточка собралась, но Telegram отказался принимать файл. "
-                    "Сообщите в поддержку: @YRS75",
+                    "📋 Не удалось отправить карточку. Попробуйте ещё раз."
                 )
             return
 
@@ -1768,8 +1792,7 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
             except Exception as exc:
                 logger.exception("Export send failed for %s: %s", inn_part, exc)
                 await callback_query.message.reply_text(
-                    "⚠️ Не удалось отправить файл. Попробуйте ещё раз или "
-                    "сообщите в поддержку: @YRS75",
+                    "📊 Не удалось отправить файл. Попробуйте ещё раз."
                 )
             return
 
@@ -1798,7 +1821,8 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
                 )
             else:
                 await callback_query.message.reply_text(
-                    "❌ Не удалось получить ИИ-анализ. Проверьте GIGACHAT_CREDENTIALS в .env"
+                    "🤖 ИИ-анализ временно недоступен. "
+                    "Попробуйте через несколько минут."
                 )
             return
 
@@ -1854,25 +1878,41 @@ async def handle_callback(client: Client, callback_query: CallbackQuery) -> None
         allowed = await _check_full_and_count(callback_query.message, user_id)
         if not allowed:
             return
-        company = await company_service.fetch(inn)
-        sec_result = None
-        try:
-            sec_result = await security_service.check(
-                inn=inn,
-                name=company.name if company else None,
-                okved=company.okved_main if company else None,
-                ogrn=company.ogrn if company else None,
+
+        # Длинный flow (4-5 API подряд): чтобы юзер не сидел в тишине,
+        # показываем typing-индикатор и обновляем статус-сообщение
+        # на ключевых шагах.
+        status_msg = await callback_query.message.reply_text(
+            "🔍 Запрашиваю данные о компании...",
+        )
+        async with _typing(callback_query.message):
+            company = await company_service.fetch(inn)
+            await _update_status(status_msg, "🛡 Проверяю безопасность и риски...")
+            sec_result = None
+            try:
+                sec_result = await security_service.check(
+                    inn=inn,
+                    name=company.name if company else None,
+                    okved=company.okved_main if company else None,
+                    ogrn=company.ogrn if company else None,
+                )
+            except Exception as exc:
+                logger.error("Security check failed for INN %s: %s", inn, exc)
+            await _update_status(status_msg, "📊 Формирую отчёт...")
+            parsed_inner = ParseResult(
+                raw_text=inn, inn=inn, mode="internal_analysis",
+                is_request=False, is_proposal=False, company_data=company,
             )
-        except Exception as exc:
-            logger.error("Security check failed for INN %s: %s", inn, exc)
-        parsed_inner = ParseResult(
-            raw_text=inn, inn=inn, mode="internal_analysis",
-            is_request=False, is_proposal=False, company_data=company,
-        )
-        reply = render_response(
-            parsed=parsed_inner, company=company, risk=set(),
-            security=sec_result,
-        )
+            reply = render_response(
+                parsed=parsed_inner, company=company, risk=set(),
+                security=sec_result,
+            )
+        # Удаляем статус-сообщение перед отправкой основного отчёта —
+        # чтобы в чате остался только результат, без артефакта.
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         await callback_query.message.reply_text(
             reply,
             disable_web_page_preview=True,
@@ -2827,7 +2867,9 @@ async def _do_quick_check(message, parsed: "ParseResult", user_id: int) -> None:
     allowed = await _check_quick_and_count(message, user_id)
     if not allowed:
         return
-    company = await company_service.fetch_quick(inn)
+    # Quick короткий, но typing-индикатор не повредит (~1 сек на DaData).
+    async with _typing(message):
+        company = await company_service.fetch_quick(inn)
     text = _render_quick_card(company, inn)
     await message.reply_text(
         text,
@@ -2958,6 +3000,83 @@ async def _run_bulk_check(message, user_id: int, content: bytes) -> None:
         pass
 
     await message.reply_document(document=bio, caption="Отчёт по контрагентам")
+
+
+# ── Helper'ы для UX: typing-индикатор и обновление статус-сообщения ──
+
+
+class _TypingContext:
+    """Async context manager: пока внутри `async with`, периодически
+    шлёт «бот печатает...» в чат.
+
+    Telegram-action протухает через ~5 секунд, поэтому продлеваем
+    каждые 4 секунды через background task. После выхода из контекста
+    task отменяется.
+
+    Используется для длинных операций (Full-отчёт, PDF-сборка,
+    AI-анализ) — юзер не видит «тишину» и понимает что бот работает.
+    """
+
+    def __init__(self, client_obj, chat_id: int) -> None:
+        self._client = client_obj
+        self._chat_id = chat_id
+        self._task: Optional[asyncio.Task] = None
+
+    async def _loop(self) -> None:
+        try:
+            while True:
+                try:
+                    await self._client.send_chat_action(
+                        self._chat_id, "typing",
+                    )
+                except Exception:
+                    # Сбой action не критичен — продолжаем
+                    pass
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+
+    async def __aenter__(self) -> "_TypingContext":
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+def _typing(message):
+    """Удобная обёртка: `async with _typing(message): ...`.
+
+    Извлекает client и chat_id из любого message-like объекта
+    (Message или CallbackQuery.message)."""
+    client_obj = getattr(message, "_client", None)
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    if client_obj is None or chat_id is None:
+        # Fallback на no-op context — UX без typing'а, но без падения
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _noop():
+            yield
+        return _noop()
+    return _TypingContext(client_obj, chat_id)
+
+
+async def _update_status(status_msg, text: str) -> None:
+    """Best-effort обновление статус-сообщения. Тихо проглатывает
+    ошибки (например, MessageNotModified если текст не изменился) —
+    статус это UX, а не критичная логика."""
+    if status_msg is None:
+        return
+    try:
+        await status_msg.edit_text(text)
+    except Exception:
+        pass
 
 
 async def _check_full_and_count(message, user_id: int) -> bool:

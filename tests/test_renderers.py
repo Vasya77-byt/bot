@@ -272,36 +272,99 @@ class TestRenderProposal:
 
 
 class TestRenderProfile:
-    def test_free_user(self):
-        p = UserProfile(user_id=1, tariff="free", checks_today=2,
-                        checks_total=10, checks_date=date.today().isoformat())
+    def test_free_user_has_quick_full_counters(self):
+        p = UserProfile(
+            user_id=1, tariff="free",
+            quick_today=2, full_today=1,
+            checks_total=10, checks_date=date.today().isoformat(),
+        )
         text = render_profile(p)
         assert "Free" in text
-        assert "Проверок сегодня: 2/3" in text  # free лимит = 3
-        assert "Осталось: 1" in text
+        # Free: Quick=5, Full=1, Bulk=0
+        assert "Быстрые проверки: 2/5" in text
+        assert "Полные отчёты: 1/1" in text
+        # Bulk не показываем для Free (лимит 0)
+        assert "Bulk-проверки" not in text
         assert "Всего проверок: 10" in text
 
-    def test_business_unlimited_shown_as_infinity(self):
+    def test_business_shows_unlimited_quick(self):
         future = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
-        p = UserProfile(user_id=1, tariff="business",
-                        tariff_expires_at=future,
-                        checks_today=99, checks_date=date.today().isoformat())
+        p = UserProfile(
+            user_id=1, tariff="business",
+            tariff_expires_at=future,
+            quick_today=99, checks_date=date.today().isoformat(),
+        )
         text = render_profile(p)
-        assert "∞" in text  # лимит ∞
-        assert "Проверок сегодня: 99/∞" in text
+        # Business Quick = ∞
+        assert "Быстрые проверки: 99/∞" in text
+        # Business Bulk = 100
+        assert "Bulk-проверки: 0/100" in text
 
     def test_features_listed_with_marks(self):
-        p = UserProfile(user_id=1, tariff="pro")
+        future = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=future)
         text = render_profile(p)
         # Pro имеет ИИ-анализ, не имеет API
         assert "✅ 🤖 ИИ-анализ" in text
         assert "❌ 🔌 API доступ" in text
 
-    def test_unknown_tariff_falls_back_to_raw(self):
-        p = UserProfile(user_id=1, tariff="enterprise")
+    def test_shows_registration_date(self):
+        reg_iso = (datetime.now(timezone.utc) - timedelta(days=43)).isoformat()
+        p = UserProfile(user_id=1, tariff="free", registered_at=reg_iso)
         text = render_profile(p)
-        # tariff label fallback на raw имя
-        assert "enterprise" in text
+        assert "В боте с:" in text
+        assert "43 дн." in text
+
+    def test_no_registration_date_when_absent(self):
+        p = UserProfile(user_id=1, tariff="free", registered_at="")
+        text = render_profile(p)
+        assert "В боте с:" not in text
+
+    def test_subscription_expiry_with_progress_bar(self):
+        future = (datetime.now(timezone.utc) + timedelta(days=15)).isoformat()
+        p = UserProfile(user_id=1, tariff="pro", tariff_expires_at=future)
+        text = render_profile(p)
+        # Прогресс-бар 15/30 = половина заполненной
+        assert "Действует до:" in text
+        assert "▓" in text and "░" in text
+        # Реалистичный остаток (14 или 15 в зависимости от времени)
+        assert "дн." in text
+
+    def test_lifetime_shows_forever(self):
+        p = UserProfile(user_id=1, tariff="free", lifetime_tariff="pro")
+        text = render_profile(p)
+        assert "навсегда" in text
+
+    def test_referral_block_when_invited(self):
+        p = UserProfile(
+            user_id=1, tariff="free",
+            referrals_count=5, referrals_paid_count=2,
+            referral_bonus_days_total=30,
+        )
+        text = render_profile(p)
+        assert "🤝 Реф.программа" in text
+        assert "Приглашено: 5" in text
+        assert "Оплатили: 2" in text
+        assert "Получено бонусных дней: 30" in text
+
+    def test_referral_block_hidden_when_no_invites(self):
+        p = UserProfile(user_id=1, tariff="free")
+        text = render_profile(p)
+        assert "🤝 Реф.программа" not in text
+
+    def test_referral_tier_shown_when_threshold_reached(self):
+        p = UserProfile(
+            user_id=1, tariff="free",
+            referrals_count=3, referrals_paid_count=3,  # Bronze
+        )
+        text = render_profile(p)
+        # Bronze emoji + label
+        assert "🥉" in text or "Bronze" in text or "Бронза" in text or "ронз" in text
+
+    def test_monitoring_shown_when_param_provided(self):
+        p = UserProfile(user_id=1, tariff="pro")
+        text = render_profile(p, monitoring_count=5, monitoring_limit=30)
+        assert "👁 Мониторинг: 5/30" in text
 
 
 class TestRenderComparison:
